@@ -1,0 +1,11 @@
+maubot: 0.1.0
+id: org.jobmachine.communitybot
+version: 0.0.1
+license: MIT
+modules:
+  - community
+main_class: CommunityBot
+extra_files:
+  - base-config.yaml
+database: true  
+database_type: asyncpg
