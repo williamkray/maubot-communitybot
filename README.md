@@ -7,6 +7,12 @@ supposed to be.
 
 # features
 
+## greet new users on joining a room
+
+configure your bot to send a custom greeting to users whenever they join a room! configuration file provides a greeting
+map (define multiple greetings each with an identifier) and then a configuration of which rooms to greet users in, and
+which greeting message the bot should send them.
+
 ## activity tracking and reporting
 
 tracks the last message timestamp of a user across any room that the bot is in, and generates a simple report. intended
@@ -52,6 +58,4 @@ to manage room admins. the bot will also invite other users to these new rooms a
 install this like any other maubot plugin: zip the contents of this repo into a file and upload via the web interface,
 or use the `mbc` utility to package and upload to your maubot server. 
 
-be sure to give your bot permission to kick people from all rooms, otherwise management features will not work! for
-more robust management, check out the [welcome](https://github.com/williamkray/maubot-welcome),
-[join](https://github.com/williamkray/maubot-join) plugins as well.
+be sure to give your bot permission to kick people from all rooms, otherwise management features will not work!
