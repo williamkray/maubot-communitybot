@@ -5,9 +5,10 @@ import json
 import time
 import re
 
-from mautrix.client import Client, InternalEventType, MembershipEventDispatcher
+from mautrix.client import Client, InternalEventType, MembershipEventDispatcher, SyncStream
 from mautrix.types import (Event, StateEvent, EventID, UserID, FileInfo, EventType,
-                            MediaMessageEventContent, ReactionEvent, RedactionEvent)
+                            MediaMessageEventContent, ReactionEvent, RedactionEvent, RoomID,
+                            RoomAlias)
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
@@ -28,6 +29,10 @@ class Config(BaseProxyConfig):
         helper.copy("kick_threshold_days")
         helper.copy("encrypt")
         helper.copy("invitees")
+        helper.copy("notification_room")
+        helper.copy("join_notification_message")
+        helper.copy_dict("greeting_rooms")
+        helper.copy_dict("greetings")
 
 
 class CommunityBot(Plugin):
@@ -102,9 +107,29 @@ class CommunityBot(Plugin):
         return report
         
     @event.on(InternalEventType.JOIN)
-    async def passive_sync(self, evt:StateEvent) -> None:
+    async def newjoin(self, evt:StateEvent) -> None:
+        # passive sync of tracking db
         if evt.room_id == self.config['parent_room']:
             await self.do_sync()
+        self.log.debug(self.config["greeting_rooms"])
+        # greeting activities
+        room_id = str(evt.room_id)
+        if room_id in self.config["greeting_rooms"]:
+            greeting_map = self.config['greetings']
+            greeting_name = self.config['greeting_rooms'][room_id]
+            if evt.source & SyncStream.STATE:
+                return
+            else:
+                nick = self.client.parse_user_id(evt.sender)[0]
+                pill = '<a href="https://matrix.to/#/{mxid}">{nick}</a>'.format(mxid=evt.sender, nick=nick)
+                greeting = greeting_map[greeting_name].format(user=pill)
+                await self.client.send_notice(evt.room_id, html=greeting) 
+                if self.config["notification_room"]:
+                    roomnamestate = await self.client.get_state_event(evt.room_id, 'm.room.name')
+                    roomname = roomnamestate['name']
+                    notification_message = self.config['join_notification_message'].format(user=evt.sender, 
+                                                                                      room=roomname)
+                    await self.client.send_notice(self.config["notification_room"], html=notification_message)
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
