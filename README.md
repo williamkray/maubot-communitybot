@@ -53,6 +53,13 @@ will attempt to sanitize the room name and assign a room alias automatically. th
 power level (1000) and set an admin power level (100) to plugin administrators. this ensures that the bot is still able
 to manage room admins. the bot will also invite other users to these new rooms as configured.
 
+## get room ID
+
+sometimes you need to know a rooms identifier, but if the room has an alias associated with it not all clients make it
+easy (or possible) to find. this subcommand (`!community roomid`) can be used to return the room id that a room alias
+points to. with no argument passed, it will return the current room's ID, or you can pass it an alias (e.g. `!community
+roomid #whatisthisroom:myserver.tld`).
+
 # installation
 
 install this like any other maubot plugin: zip the contents of this repo into a file and upload via the web interface,

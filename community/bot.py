@@ -488,6 +488,27 @@ class CommunityBot(Plugin):
         except Exception as e:
             await evt.respond(f"something went wrong: {e}")
 
+    @community.subcommand("roomid", help="return the matrix room ID of this, or a given, room")
+    @command.argument("room", required=False)
+    async def get_roomid(self, evt: MessageEvent, room: str) -> None:
+        room_id = None
+        if room:
+            if room.startswith('#'):
+                try:
+                    thatroom_id = await self.client.resolve_room_alias(room)
+                    room_id = thatroom_id["room_id"]
+                except:
+                    evt.reply("i don't recognize that room, sorry")
+                    return
+            else:
+                room_id = room
+        else:
+            room_id = evt.room_id
+        try:
+            await evt.reply(f"Room ID is: {room_id}")
+        except Exception as e:
+            await evt.respond(f"something went wrong: {e}")
+
 
     @classmethod
     def get_db_upgrade_table(cls) -> None:
