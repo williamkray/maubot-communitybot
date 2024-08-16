@@ -121,8 +121,11 @@ class CommunityBot(Plugin):
                 greeting_name = self.config['greeting_rooms'][room_id]
                 nick = self.client.parse_user_id(evt.sender)[0]
                 pill = '<a href="https://matrix.to/#/{mxid}">{nick}</a>'.format(mxid=evt.sender, nick=nick)
-                greeting = greeting_map[greeting_name].format(user=pill)
-                await self.client.send_notice(evt.room_id, html=greeting) 
+                if greeting_name != "none":
+                    greeting = greeting_map[greeting_name].format(user=pill)
+                    await self.client.send_notice(evt.room_id, html=greeting) 
+                else:
+                    pass
                 if self.config["notification_room"]:
                     roomnamestate = await self.client.get_state_event(evt.room_id, 'm.room.name')
                     roomname = roomnamestate['name']

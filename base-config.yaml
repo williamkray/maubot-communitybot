@@ -45,6 +45,7 @@ greetings:
 
 # which of the above greetings should be used in which rooms? use the exact name of each greeting
 # you've assigned, e.g. 'generic' or 'encrypted'. you must use the room ID here.
+# enter 'none' to avoid sending a message, but still be notified in the notification_room listed below.
 greeting_rooms:
   '!someroomid:server.tld': generic
   '!someotherroom:server.tld': generic
