@@ -108,18 +108,17 @@ class CommunityBot(Plugin):
         
     @event.on(InternalEventType.JOIN)
     async def newjoin(self, evt:StateEvent) -> None:
-        # passive sync of tracking db
-        if evt.room_id == self.config['parent_room']:
-            await self.do_sync()
-        self.log.debug(self.config["greeting_rooms"])
-        # greeting activities
-        room_id = str(evt.room_id)
-        if room_id in self.config["greeting_rooms"]:
-            greeting_map = self.config['greetings']
-            greeting_name = self.config['greeting_rooms'][room_id]
-            if evt.source & SyncStream.STATE:
-                return
-            else:
+        if evt.source & SyncStream.STATE:
+            return
+        else:
+            # passive sync of tracking db
+            if evt.room_id == self.config['parent_room']:
+                await self.do_sync()
+            # greeting activities
+            room_id = str(evt.room_id)
+            if room_id in self.config["greeting_rooms"]:
+                greeting_map = self.config['greetings']
+                greeting_name = self.config['greeting_rooms'][room_id]
                 nick = self.client.parse_user_id(evt.sender)[0]
                 pill = '<a href="https://matrix.to/#/{mxid}">{nick}</a>'.format(mxid=evt.sender, nick=nick)
                 greeting = greeting_map[greeting_name].format(user=pill)
@@ -406,7 +405,6 @@ class CommunityBot(Plugin):
     @command.argument("roomname", pass_raw=True, required=True)
     async def create_that_room(self, evt: MessageEvent, roomname: str) -> None:
         if (roomname == "help") or len(roomname) == 0:
-            self.log.debug(f"DEBUG: {homeserver}")
             await evt.reply('pass me a room name (like "cool topic") and i will create it and add it to the space')
         else:
             if evt.sender in self.config["admins"] or evt.sender in self.config["mods"]:
