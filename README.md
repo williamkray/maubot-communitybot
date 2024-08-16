@@ -1,9 +1,8 @@
 # Community Bot
 
-a maubot plugin that attempts to assist administrators of communities on matrix, based on the concept of matrix spaces.
-this bot will attempt to administer any room that it is in (specifically user activity tracking), so you may want to
-leverage [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not
-supposed to be.
+a maubot plugin that helps administrators of communities on matrix, based on the concept of a matrix space. this bot
+will attempt to track user activity in any room that it is in, so you may want to leverage
+[join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not supposed to be.
 
 # features
 
@@ -12,6 +11,11 @@ supposed to be.
 configure your bot to send a custom greeting to users whenever they join a room! configuration file provides a greeting
 map (define multiple greetings each with an identifier) and then a configuration of which rooms to greet users in, and
 which greeting message the bot should send them.
+
+Configure a `notification_room` to receive messages when someone joins one of the greeting rooms. If you just want
+notifications (perhaps when someone joins the space, where the bot likely cannot send a greeting anyway) set the
+greeting name to `'none'` in the greeting map, and the bot will skip the greeting and send a notification to your
+notification room.
 
 ## activity tracking and reporting
 
