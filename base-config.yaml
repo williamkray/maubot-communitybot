@@ -19,11 +19,15 @@ track_messages: True
 # will update the user's last-active date when they add a reaction to a message
 track_reactions: True
 
-# list of users who can use administrative commands, these users will also be made room admins (PL100)
-# in new rooms created with the create room commands
+# list of users who can use administrative commands. these users will also be made room admins (PL100)
 admins:
   - '@user1:server.tld'
   - '@user2:server.tld'
+
+# list of users who should be considered community moderators. these users will be made room mods (PL50)
+moderators:
+  - '@user3:server.tld'
+  - '@user4:server.tld'
 
 # list of users who should be invited to new rooms immediately (other bots perhaps)
 invitees:

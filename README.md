@@ -50,12 +50,24 @@ need to rejoin all rooms themselves or be re-invited.
 use the `guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
 `!community guests #myroom:alias.here`.
 
+## admin/moderator management
+
+set consistent power levels across all your rooms for your community administrators! the config defines a list of both
+admins and moderators (admins have a Power Level of 100, mods have PL50). running the setpower subcommand (i.e.
+`!community setpower`) will roll through all rooms in the space (including the space itself) and attempt to true-up user
+permissions to match. if you are running legacy rooms not managed by the bot, and the bot does not have permission to
+send power-level state events to the room, it will return a list for you to handle manually. users who have a PL greater
+than 0 and are not listed as either an admin or moderator will be removed from the permission list, effectively
+returning their power to whatever the room default is (usually 0).
+
 ## room creation
 
 use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.
 will attempt to sanitize the room name and assign a room alias automatically. the bot user will be assigned very high
-power level (1000) and set an admin power level (100) to plugin administrators. this ensures that the bot is still able
-to manage room admins. the bot will also invite other users to these new rooms as configured.
+power level (1000) and set an admin power level (100) to plugin administrators, 50 to moderators. this ensures that the
+bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured.
+
+rooms created by the bot will have join restriction limited to members of the space.
 
 ## get room ID
 

@@ -8,7 +8,7 @@ import re
 from mautrix.client import Client, InternalEventType, MembershipEventDispatcher, SyncStream
 from mautrix.types import (Event, StateEvent, EventID, UserID, FileInfo, EventType,
                             MediaMessageEventContent, ReactionEvent, RedactionEvent, RoomID,
-                            RoomAlias)
+                            RoomAlias, PowerLevelStateEventContent)
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
@@ -22,6 +22,7 @@ from .db import upgrade_table
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
         helper.copy("admins")
+        helper.copy("moderators")
         helper.copy("parent_room")
         helper.copy("track_messages")
         helper.copy("track_reactions")
@@ -421,6 +422,8 @@ class CommunityBot(Plugin):
                     pl_override = {"users": {self.client.mxid: 1000}}
                     for u in self.config['admins']:
                         pl_override["users"][u] = 100
+                    for u in self.config['moderators']:
+                        pl_override["users"][u] = 50
                     pl_json = json.dumps(pl_override)
 
                     mymsg = await evt.respond(f"creating {sanitized_name}, give me a minute...")
@@ -509,6 +512,74 @@ class CommunityBot(Plugin):
             await evt.reply(f"Room ID is: {room_id}")
         except Exception as e:
             await evt.respond(f"something went wrong: {e}")
+
+    @community.subcommand("setpower", help="set power levels according to the community configuration")
+    async def set_powerlevels(self, evt: MessageEvent,) -> None:
+        await evt.mark_read()
+        if evt.sender in self.config["admins"]:
+            msg = await evt.respond("truing up power levels, this could take a minute...")
+            admins = self.config['admins']
+            moderators = self.config['moderators']
+            roomlist = await self.get_space_roomlist()
+            # don't forget to include the space itself
+            roomlist.append(self.config["parent_room"])
+            success_list = []
+            error_list = []
+            adminpl = 100
+            modpl = 50
+            defaultpl = 0
+
+            for room in roomlist:
+                # need to get and evaluate the current state that contains powerlevels first
+                current_pl = await self.client.get_state_event(room, 'm.room.power_levels')
+                users = current_pl['users'].serialize()
+                updated_user_map = dict(users)
+                try:
+                    roomname = None
+                    roomnamestate = await self.client.get_state_event(room, 'm.room.name')
+                    roomname = roomnamestate['name']
+                except Exception as e:
+                    self.log.warning(e)
+
+                # update our powerlevel map values
+                for user in admins:
+                    updated_user_map[user] = adminpl
+                for user in moderators:
+                    updated_user_map[user] = modpl
+
+                # revoke values for people no longer in the config
+                for user in users.keys():
+                    if ( user not in admins and 
+                            user not in moderators and 
+                            updated_user_map[user] > defaultpl and 
+                            user != self.client.mxid ):
+                        del updated_user_map[user]
+
+
+                # and send the new state event back to the room
+                new_pl = current_pl
+                new_pl['users'] = updated_user_map
+                try:
+                    self.log.debug(f"DEBUG sending finalized PL map to room {room}: {updated_user_map}")
+                    await self.client.send_state_event(room, 'm.room.power_levels', new_pl)
+                    success_list.append(roomname or room)
+                except Exception as e:
+                    self.log.warning(e)
+                    error_list.append(roomname or room)
+
+                time.sleep(0.5)
+
+            results = "the following rooms were updated:<p><code>{success_list}</code></p>the following errors were \
+                    recorded:<p><code>{error_list}</code></p>".format(success_list=success_list, error_list=error_list)
+            await evt.respond(results, allow_html=True, edits=msg)
+        
+            # sync our database after we've made changes to room memberships
+            await self.do_sync()
+
+        else:
+            await evt.reply("lol you don't have permission to do that")
+
+    
 
 
     @classmethod
