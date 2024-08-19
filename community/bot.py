@@ -412,7 +412,11 @@ class CommunityBot(Plugin):
             await evt.reply('pass me a room name (like "cool topic") and i will create it and add it to the space')
         else:
             if evt.sender in self.config["admins"] or evt.sender in self.config["mods"]:
+                encrypted_flag_regex = re.compile(r'(\s+|^)-+encrypt(ed)?\s?')
+                force_encryption = bool(encrypted_flag_regex.search(roomname))
                 try:
+                    if force_encryption:
+                        roomname = encrypted_flag_regex.sub('', roomname)
                     sanitized_name = re.sub(r"[^a-zA-Z0-9]", '', roomname).lower()
                     invitees = self.config['invitees']
                     parent_room = self.config['parent_room']
@@ -430,6 +434,7 @@ class CommunityBot(Plugin):
                     #self.log.info(mymsg)
                     room_id = await self.client.create_room(alias_localpart=sanitized_name, name=roomname,
                             invitees=invitees, power_level_override=pl_override)
+                    time.sleep(0.5)
 
                     await evt.respond(f"updating room states...", edits=mymsg)
                     parent_event_content = json.dumps({'auto_join': False, 'suggested': False, 'via': [server]})
@@ -438,15 +443,19 @@ class CommunityBot(Plugin):
                         'room_id': parent_room}]})
 
                     await self.client.send_state_event(parent_room, 'm.space.child', parent_event_content, state_key=room_id)
+                    time.sleep(0.5)
                     await self.client.send_state_event(room_id, 'm.space.parent', child_event_content, state_key=parent_room)
+                    time.sleep(0.5)
                     await self.client.send_state_event(room_id, 'm.room.join_rules', join_rules_content, state_key="")
+                    time.sleep(0.5)
 
-                    if self.config["encrypt"]:
+                    if self.config["encrypt"] or force_encryption:
                         encryption_content = json.dumps({"algorithm": "m.megolm.v1.aes-sha2"})
 
                         await self.client.send_state_event(room_id, 'm.room.encryption', encryption_content,
                                                            state_key="")
                         await evt.respond(f"encrypting room...", edits=mymsg)
+                        time.sleep(0.5)
 
                     await evt.respond(f"room created and updated, alias is #{sanitized_name}:{server}", edits=mymsg)
 
