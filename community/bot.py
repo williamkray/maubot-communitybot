@@ -413,11 +413,14 @@ class CommunityBot(Plugin):
             await evt.reply("lol you don't have permission to do that")
 
 
-    @community.subcommand("createroom", help="create a new room titled <roomname> and add it to the parent space")
+    @community.subcommand("createroom", help="create a new room titled <roomname> and add it to the parent space. \
+                          optionally include `--encrypt` to encrypt it regardless of the default settings.")
     @command.argument("roomname", pass_raw=True, required=True)
     async def create_that_room(self, evt: MessageEvent, roomname: str) -> None:
         if (roomname == "help") or len(roomname) == 0:
-            await evt.reply('pass me a room name (like "cool topic") and i will create it and add it to the space')
+            await evt.reply('pass me a room name (like "cool topic") and i will create it and add it to the space. \
+                            use `--encrypt` to ensure it is encrypted at creation time even if that isnt my default \
+                            setting.')
         else:
             if evt.sender in self.config["admins"] or evt.sender in self.config["mods"]:
                 encrypted_flag_regex = re.compile(r'(\s+|^)-+encrypt(ed)?\s?')

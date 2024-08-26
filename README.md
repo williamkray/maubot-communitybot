@@ -63,6 +63,9 @@ returning their power to whatever the room default is (usually 0).
 ## room creation
 
 use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.
+include the `--encrypt` flag in your command to encrypt the room even if the default configuration is to create rooms
+unencrypted.
+
 will attempt to sanitize the room name and assign a room alias automatically. the bot user will be assigned very high
 power level (1000) and set an admin power level (100) to plugin administrators, 50 to moderators. this ensures that the
 bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured.
