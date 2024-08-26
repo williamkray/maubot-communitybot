@@ -99,11 +99,16 @@ class CommunityBot(Plugin):
             SELECT mxid FROM user_events WHERE last_message_timestamp <= $1
             AND ignore_inactivity = 0
             """
+        ignored_q = """
+            SELECT mxid FROM user_events WHERE ignore_inactivity = 1
+            """
         warn_inactive_results = await self.database.fetch(warn_q, warn_days_ago, kick_days_ago)
         kick_inactive_results = await self.database.fetch(kick_q, kick_days_ago)
+        ignored_results = await self.database.fetch(ignored_q)
         report = {}
         report["warn_inactive"] = [ row["mxid"] for row in warn_inactive_results ] or ["none"]
         report["kick_inactive"] = [ row["mxid"] for row in kick_inactive_results ] or ["none"]
+        report["ignored"] = [ row["mxid"] for row in ignored_results ] or ["none"]
 
         return report
         
@@ -212,10 +217,13 @@ class CommunityBot(Plugin):
     async def get_report(self, evt: MessageEvent) -> None:
         sync_results = await self.do_sync()
         report = await self.generate_report()
-        await evt.respond(f"<b>Users inactive for at least {self.config['warn_threshold_days']} days:</b><br /> \
+        await evt.respond(f"<b>Users inactive for between {self.config['warn_threshold_days']} and \
+                {self.config['kick_threshold_days']} days:</b><br /> \
                 {'<br />'.join(report['warn_inactive'])} <br />\
                 <b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['kick_inactive'])}", \
+                {'<br />'.join(report['kick_inactive'])} <br /> \
+                <b>Ignored users:</b><br /> \
+                {'<br />'.join(report['ignored'])}", \
                 allow_html=True)
 
 
