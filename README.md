@@ -1,4 +1,5 @@
 # Community Bot
+[![Chat on Matrix](https://img.shields.io/badge/chat_on_matrix-%23dev:mssj.me-green)](https://matrix.to/#/#dev:mssj.me)
 
 a maubot plugin that helps administrators of communities on matrix, based on the concept of a matrix space. this bot
 will attempt to track user activity in any room that it is in, so you may want to leverage
