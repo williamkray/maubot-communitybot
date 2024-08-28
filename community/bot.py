@@ -93,11 +93,11 @@ class CommunityBot(Plugin):
         warn_q = """
             SELECT mxid FROM user_events WHERE last_message_timestamp <= $1 AND 
             last_message_timestamp >= $2
-            AND ignore_inactivity = 0
+            AND (ignore_inactivity < 1 OR ignore_inactivity IS NULL)
             """
         kick_q = """
             SELECT mxid FROM user_events WHERE last_message_timestamp <= $1
-            AND ignore_inactivity = 0
+            AND (ignore_inactivity < 1 OR ignore_inactivity IS NULL)
             """
         ignored_q = """
             SELECT mxid FROM user_events WHERE ignore_inactivity = 1
