@@ -8,7 +8,7 @@ import re
 from mautrix.client import Client, InternalEventType, MembershipEventDispatcher, SyncStream
 from mautrix.types import (Event, StateEvent, EventID, UserID, FileInfo, EventType,
                             MediaMessageEventContent, ReactionEvent, RedactionEvent, RoomID,
-                            RoomAlias, PowerLevelStateEventContent)
+                            RoomAlias, PowerLevelStateEventContent, MessageType)
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
@@ -34,6 +34,9 @@ class Config(BaseProxyConfig):
         helper.copy("join_notification_message")
         helper.copy_dict("greeting_rooms")
         helper.copy_dict("greetings")
+        helper.copy("censor")
+        helper.copy("censor_wordlist")
+        helper.copy("censor_files")
 
 
 class CommunityBot(Plugin):
@@ -111,6 +114,32 @@ class CommunityBot(Plugin):
         report["ignored"] = [ row["mxid"] for row in ignored_results ] or ["none"]
 
         return report
+
+    def flag_message(self, msg):
+        if msg.content.msgtype in [MessageType.FILE, MessageType.IMAGE]:
+                return self.config['censor_files']
+
+        for w in self.config['censor_wordlist']:
+            try:
+                if bool(re.search(w, msg.content.body, re.IGNORECASE)):
+                    self.log.debug(f"DEBUG message flagged for censorship")
+                    return True
+                else:
+                    pass
+            except Exception as e:
+                self.log.error(f"Could not parse message for flagging: {e}")
+
+    def censor_room(self, msg):
+        if isinstance(self.config['censor'], bool):
+            self.log.debug(f"DEBUG message will be redacted because censoring is enabled")
+            return self.config['censor']
+        elif isinstance(self.config['censor'], list):
+            if msg.room_id in self.config['censor']:
+                self.log.debug(f"DEBUG message will be redacted because censoring is enabled for THIS room")
+                return True
+        else:
+            return False
+
         
     @event.on(InternalEventType.JOIN)
     async def newjoin(self, evt:StateEvent) -> None:
@@ -141,6 +170,17 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
+        if self.flag_message(evt):
+            # do we need to redact?
+            if evt.sender not in self.config['admins'] and \
+                    evt.sender not in self.config['moderators'] and \
+                    evt.sender != self.client.mxid and \
+                    self.censor_room(evt):
+                try:
+                    await self.client.redact(evt.room_id, evt.event_id, reason="message flagged")
+                except Exception as e:
+                    self.log.error(f"Flagged message could not be redacted: {e}")
+
         if not self.config["track_messages"]:
             pass
         else:

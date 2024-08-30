@@ -62,3 +62,19 @@ notification_room:
 # message to send to the notification room when someone joins one of the above rooms:
 join_notification_message: |
   User <code>{user}</code> has joined <code>{room}</code>.
+
+# whether to censor files/messages
+# can be boolean (true/false) for all-or-nothing behavior,
+# or pass a list of room IDs to only censor certain rooms. this may be helpful
+# if certain rooms are publicly facing while others are more trustworthy.
+# this bot, bot admins and bot moderators are immune to censorship.
+censor: false
+
+# whether to redact file and image uploads. this will apply to all rooms defined
+# in the censor variable (either boolean or a list of room IDs).
+censor_files: true
+
+# what words should trigger message redaction if censorship is enabled?
+censor_wordlist:
+  - 'effword'
+  - 'essword'

@@ -80,6 +80,18 @@ easy (or possible) to find. this subcommand (`!community roomid`) can be used to
 points to. with no argument passed, it will return the current room's ID, or you can pass it an alias (e.g. `!community
 roomid #whatisthisroom:myserver.tld`).
 
+## message redaction
+
+the bot can be configured to redact messages automatically to protect your users. set `censor` to either `true`,
+`false`, or a list of room IDs to enable censorship in.
+
+set `censor_files` to have the bot immediately redact file uploads in the censored rooms. define trigger words in
+`censor_wordlist` to flag messages for automatic redaction.
+
+please keep in mind that wordlist-based censorship is problematic and may redact false positives. writing a matching
+algorithm that is perfect is impossible. consider configuring your community such that censorship need only be applied
+in a limited subset of rooms.
+
 # installation
 
 install this like any other maubot plugin: zip the contents of this repo into a file and upload via the web interface,
