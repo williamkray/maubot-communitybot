@@ -24,6 +24,7 @@ class Config(BaseProxyConfig):
         helper.copy("admins")
         helper.copy("moderators")
         helper.copy("parent_room")
+        helper.copy("track_users")
         helper.copy("track_messages")
         helper.copy("track_reactions")
         helper.copy("warn_threshold_days")
@@ -48,6 +49,9 @@ class CommunityBot(Plugin):
 
 
     async def do_sync(self) -> None:
+        if not self.config["track_users"]:
+            return "user tracking is disabled"
+
         space_members_obj = await self.client.get_joined_members(self.config["parent_room"])
         space_members_list = space_members_obj.keys()
         table_users = await self.database.fetch("SELECT mxid FROM user_events")
@@ -181,7 +185,7 @@ class CommunityBot(Plugin):
                 except Exception as e:
                     self.log.error(f"Flagged message could not be redacted: {e}")
 
-        if not self.config["track_messages"]:
+        if not self.config["track_messages"] or not self.config["track_users"]:
             pass
         else:
             q = """
@@ -194,7 +198,7 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.REACTION)
     async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
-        if not self.config["track_reactions"]:
+        if not self.config["track_reactions"] or not self.config["track_users"]:
             pass
         else:
             q = """
@@ -205,7 +209,7 @@ class CommunityBot(Plugin):
             """
             await self.database.execute(q, evt.sender, evt.timestamp)
 
-    @command.new("community", help="track active/inactive status of members of a space")
+    @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
         pass
 
@@ -214,6 +218,10 @@ class CommunityBot(Plugin):
             in case they are missing")
     async def sync_space_members(self, evt: MessageEvent) -> None:
         if evt.sender in self.config["admins"]:
+            if not self.config["track_users"]:
+                await evt.respond("user tracking is disabled")
+                return
+
             results = await self.do_sync()
 
             added_str = "<br />".join(results['added'])
@@ -227,6 +235,10 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def ignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
         if evt.sender in self.config["admins"]:
+            if not self.config["track_users"]:
+                await evt.reply("user tracking is disabled")
+                return
+
             try:
                 Client.parse_user_id(mxid)
                 await self.database.execute("UPDATE user_events SET ignore_inactivity = 1 WHERE \
@@ -242,6 +254,10 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def unignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
         if evt.sender in self.config["admins"]:
+            if not self.config["track_users"]:
+                await evt.reply("user tracking is disabled")
+                return
+
             try:
                 Client.parse_user_id(mxid)
                 await self.database.execute("UPDATE user_events SET ignore_inactivity = 0 WHERE \
@@ -255,16 +271,21 @@ class CommunityBot(Plugin):
 
     @community.subcommand("report", help='generate a list of matrix IDs that have been inactive')
     async def get_report(self, evt: MessageEvent) -> None:
-        sync_results = await self.do_sync()
-        report = await self.generate_report()
-        await evt.respond(f"<b>Users inactive for between {self.config['warn_threshold_days']} and \
-                {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['warn_inactive'])} <br />\
-                <b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['kick_inactive'])} <br /> \
-                <b>Ignored users:</b><br /> \
-                {'<br />'.join(report['ignored'])}", \
-                allow_html=True)
+        if evt.sender in self.config["admins"]:
+            if not self.config["track_users"]:
+                await evt.reply("user tracking is disabled")
+                return
+
+            sync_results = await self.do_sync()
+            report = await self.generate_report()
+            await evt.respond(f"<b>Users inactive for between {self.config['warn_threshold_days']} and \
+                    {self.config['kick_threshold_days']} days:</b><br /> \
+                    {'<br />'.join(report['warn_inactive'])} <br />\
+                    <b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                    {'<br />'.join(report['kick_inactive'])} <br /> \
+                    <b>Ignored users:</b><br /> \
+                    {'<br />'.join(report['ignored'])}", \
+                    allow_html=True)
 
 
     @community.subcommand("purge", help='kick users for excessive inactivity')
