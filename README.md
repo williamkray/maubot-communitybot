@@ -5,6 +5,31 @@ a maubot plugin that helps administrators of communities on matrix, based on the
 will attempt to track user activity in any room that it is in, so you may want to leverage
 [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not supposed to be.
 
+# should i use this?
+
+why does this exist? there are some great tools out there already that do probably a much better job at combatting spam
+and abuse on matrix, like [Draupnir](https://github.com/the-draupnir-project/Draupnir). this plugin might make sense for
+you if:
+
+- you're more interested in basic community management tools (like room creation, user activity tracking, etc)
+- you already are running Maubot, or plan to
+- you're afraid of mjolnir/draupnir for some reason
+- you just really love python and want to contribute to this project
+
+my opinion is that your community should probably be configured with the following restrictions to best align
+with this plugin's capabilities:
+
+- your Space is invite-only
+- most rooms are join-restricted to only allow members of your space
+- you have a smaller subset of rooms which are publicly facing, where users can join freely and ask admins to be added
+  to the space
+
+by following this structure, you reduce the amount of surface area you have to spend time defending against spam and
+implementing censorship rules.
+
+if that doesn't sound like how you want to structure your online community, you might be better off using something like
+Draupnir or Mjolnir.
+
 # features
 
 ## greet new users on joining a room
