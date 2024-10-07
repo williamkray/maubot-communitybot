@@ -51,6 +51,13 @@ need to rejoin all rooms themselves or be re-invited.
 use the `guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
 `!community guests #myroom:alias.here`.
 
+## public banlist support
+
+initial support for public banlists (as used by other tools like mjolnir/draupnir) is here! this bot leverages
+banlists in read-only mode, just have your bot join one of these banlist rooms, and it will cross reference new room
+members against these lists and immediately ban offenders. there is no intention to add new policy creation features
+to this bot, as those concepts are probably best left to more featureful tools.
+
 ## admin/moderator management
 
 set consistent power levels across all your rooms for your community administrators! the config defines a list of both
