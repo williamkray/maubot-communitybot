@@ -4,6 +4,7 @@ from typing import Awaitable, Type, Optional, Tuple
 import json
 import time
 import re
+import fnmatch
 
 from mautrix.client import Client, InternalEventType, MembershipEventDispatcher, SyncStream
 from mautrix.types import (Event, StateEvent, EventID, UserID, FileInfo, EventType,
@@ -38,6 +39,7 @@ class Config(BaseProxyConfig):
         helper.copy("censor")
         helper.copy("censor_wordlist")
         helper.copy("censor_files")
+        helper.copy("banlists")
 
 
 class CommunityBot(Plugin):
@@ -126,7 +128,7 @@ class CommunityBot(Plugin):
         for w in self.config['censor_wordlist']:
             try:
                 if bool(re.search(w, msg.content.body, re.IGNORECASE)):
-                    self.log.debug(f"DEBUG message flagged for censorship")
+                    #self.log.debug(f"DEBUG message flagged for censorship")
                     return True
                 else:
                     pass
@@ -135,14 +137,92 @@ class CommunityBot(Plugin):
 
     def censor_room(self, msg):
         if isinstance(self.config['censor'], bool):
-            self.log.debug(f"DEBUG message will be redacted because censoring is enabled")
+            #self.log.debug(f"DEBUG message will be redacted because censoring is enabled")
             return self.config['censor']
         elif isinstance(self.config['censor'], list):
             if msg.room_id in self.config['censor']:
-                self.log.debug(f"DEBUG message will be redacted because censoring is enabled for THIS room")
+                #self.log.debug(f"DEBUG message will be redacted because censoring is enabled for THIS room")
                 return True
         else:
             return False
+
+    async def check_if_banned(self, userid):
+        # fetch banlist data
+        is_banned = False
+        myrooms = await self.client.get_joined_rooms()
+        for l in self.config['banlists']:
+            #self.log.debug(f"DEBUG getting banlist {l}")
+            if l.startswith('#'):
+                try:
+                    l_id = await self.client.resolve_room_alias(l)
+                    list_id = l_id["room_id"]
+                    #self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
+                except:
+                    evt.reply("i don't recognize that list, sorry")
+                    return
+            else:
+                list_id = l
+
+            if list_id not in myrooms:
+                self.log.error(f"Bot must be in {l} before attempting to use it as a banlist.")
+                pass
+
+            #self.log.debug(f"DEBUG looking up state in {list_id}")
+            list_state = await self.client.get_state(list_id)
+            #self.log.debug(f"DEBUG state found: {list_state}")
+            try:
+                user_policies = list(filter(lambda p : p.type.t=='m.policy.rule.user', list_state))
+                #self.log.debug(f"DEBUG user policies found: {user_policies}")
+            except Exception as e:
+                self.log.error(e)
+
+            for rule in user_policies:
+                #self.log.debug(f"Checking match of user {userid} in banlist {l} for {rule['content']}")
+                try:
+                    if bool(fnmatch.fnmatch(userid, rule["content"]["entity"])) and \
+                            bool(re.search('ban$', rule["content"]["recommendation"])):
+                        #self.log.debug(f"DEBUG user {userid} matches ban rule {rule['content']['entity']}!")
+                        return True
+                    else:
+                        pass
+                except Exception as e:
+                    self.log.error(f"Found something funny in the banlist {l} for {rule['content']}: {e}")
+                    pass
+        # if we haven't exited by now, we must not be banned!
+        return is_banned
+
+    async def ban_this_user(self, user):
+        #self.log.debug(f"DEBUG getting list of rooms")
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        #self.log.debug(f"DEBUG list of rooms acquired")
+        ban_event_map = {'ban_list':{}, 'error_list':{}}
+
+        ban_event_map['ban_list'][user] = []
+        #self.log.debug(f"DEBUG banning {user} from rooms...")
+        for room in roomlist:
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(room, 'm.room.name')
+                roomname = roomnamestate['name']
+
+                # ban user even if they're not in the room!
+                #await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                await self.client.ban_user(room, user, reason='banned')
+                if roomname:
+                    ban_event_map['ban_list'][user].append(roomname)
+                else:
+                    ban_event_map['ban_list'][user].append(room)
+                time.sleep(0.5)
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(e)
+                ban_event_map['error_list'][user] = []
+                ban_event_map['error_list'][user].append(roomname or room)
+        
+        return ban_event_map
 
         
     @event.on(InternalEventType.JOIN)
@@ -150,6 +230,12 @@ class CommunityBot(Plugin):
         if evt.source & SyncStream.STATE:
             return
         else:
+            on_banlist = await self.check_if_banned(evt.sender)
+            if on_banlist:
+                #self.log.debug(f"DEBUG user is on banlist!")
+                # ban this account in managed rooms, don't bother with anything else
+                await self.ban_this_user(evt.sender)
+                return
             # passive sync of tracking db
             if evt.room_id == self.config['parent_room']:
                 await self.do_sync()
@@ -212,6 +298,12 @@ class CommunityBot(Plugin):
     @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
         pass
+
+    @community.subcommand("bancheck", help="check subscribed banlists for a user's mxid")
+    @command.argument("mxid", "full matrix ID", required=True)
+    async def check_banlists(self, evt: MessageEvent, mxid: UserID) -> None:
+        ban_status = await self.check_if_banned(mxid)
+        await evt.reply(f"user on banlist: {ban_status}")
 
 
     @community.subcommand("sync", help="update the activity tracker with the current space members \
@@ -388,37 +480,12 @@ class CommunityBot(Plugin):
         if evt.sender in self.config["admins"]:
             user = mxid
             msg = await evt.respond("starting the ban...")
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            ban_list = {}
-            error_list = {}
-
-            ban_list[user] = []
-            for room in roomlist:
-                try:
-                    roomname = None
-                    roomnamestate = await self.client.get_state_event(room, 'm.room.name')
-                    roomname = roomnamestate['name']
-
-                    # ban user even if they're not in the room!
-                    #await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                    await self.client.ban_user(room, user, reason='banned')
-                    if roomname:
-                        ban_list[user].append(roomname)
-                    else:
-                        ban_list[user].append(room)
-                    time.sleep(0.5)
-                except MNotFound:
-                    pass
-                except Exception as e:
-                    self.log.warning(e)
-                    error_list[user] = []
-                    error_list[user].append(roomname or room)
+            results_map = await self.ban_this_user(user)
 
 
             results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(ban_list=ban_list, error_list=error_list)
+                    recorded:<p><code>{error_list}</code></p>".format(ban_list=results_map['ban_list'],
+                                                                      error_list=results_map['error_list'])
             await evt.respond(results, allow_html=True, edits=msg)
         
             # sync our database after we've made changes to room memberships
@@ -641,7 +708,7 @@ class CommunityBot(Plugin):
                 new_pl = current_pl
                 new_pl['users'] = updated_user_map
                 try:
-                    self.log.debug(f"DEBUG sending finalized PL map to room {room}: {updated_user_map}")
+                    #self.log.debug(f"DEBUG sending finalized PL map to room {room}: {updated_user_map}")
                     await self.client.send_state_event(room, 'm.room.power_levels', new_pl)
                     success_list.append(roomname or room)
                 except Exception as e:

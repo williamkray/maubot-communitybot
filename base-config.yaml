@@ -82,3 +82,10 @@ censor_files: true
 censor_wordlist:
   - 'effword'
   - 'essword'
+
+# list of banlists that should be subscribed to, such as #community-moderation-effort-bl:neko.dev
+# when users join any room managed by this bot, they are compared against these existing banlists
+# if found, they will immediately be banned.
+# your bot MUST be in the banlist room already!
+banlists: 
+  - '#community-moderation-effort-bl:neko.dev'
