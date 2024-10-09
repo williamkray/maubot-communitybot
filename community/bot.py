@@ -370,13 +370,13 @@ class CommunityBot(Plugin):
 
             sync_results = await self.do_sync()
             report = await self.generate_report()
-            await evt.respond(f"<b>Users inactive for between {self.config['warn_threshold_days']} and \
+            await evt.respond(f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
                     {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['warn_inactive'])} <br />\
-                    <b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['kick_inactive'])} <br /> \
-                    <b>Ignored users:</b><br /> \
-                    {'<br />'.join(report['ignored'])}", \
+                    {'<br />'.join(report['warn_inactive'])} <br /></p>\
+                    <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                    {'<br />'.join(report['kick_inactive'])} <br /></p> \
+                    <p><b>Ignored users:</b><br /> \
+                    {'<br />'.join(report['ignored'])}</p>", \
                     allow_html=True)
 
 
