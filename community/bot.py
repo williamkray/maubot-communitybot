@@ -14,6 +14,7 @@ from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
+BAN_STATE_EVENT = EventType.find("m.policy.rule.user", EventType.Class.STATE)
 
 # database table related things
 from .db import upgrade_table
@@ -150,21 +151,11 @@ class CommunityBot(Plugin):
         # fetch banlist data
         is_banned = False
         myrooms = await self.client.get_joined_rooms()
-        for l in self.config['banlists']:
-            #self.log.debug(f"DEBUG getting banlist {l}")
-            if l.startswith('#'):
-                try:
-                    l_id = await self.client.resolve_room_alias(l)
-                    list_id = l_id["room_id"]
-                    #self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
-                except:
-                    evt.reply("i don't recognize that list, sorry")
-                    return
-            else:
-                list_id = l
-
+        banlist_roomids = await self.get_banlist_roomids()
+        
+        for list_id in banlist_roomids:
             if list_id not in myrooms:
-                self.log.error(f"Bot must be in {l} before attempting to use it as a banlist.")
+                self.log.error(f"Bot must be in {list_id} before attempting to use it as a banlist.")
                 pass
 
             #self.log.debug(f"DEBUG looking up state in {list_id}")
@@ -186,12 +177,12 @@ class CommunityBot(Plugin):
                     else:
                         pass
                 except Exception as e:
-                    self.log.error(f"Found something funny in the banlist {l} for {rule['content']}: {e}")
+                    self.log.debug(f"Found something funny in the banlist {l} for {rule['content']}: {e}")
                     pass
         # if we haven't exited by now, we must not be banned!
         return is_banned
 
-    async def ban_this_user(self, user):
+    async def ban_this_user(self, user, reason="banned"):
         #self.log.debug(f"DEBUG getting list of rooms")
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
@@ -209,7 +200,7 @@ class CommunityBot(Plugin):
 
                 # ban user even if they're not in the room!
                 #await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                await self.client.ban_user(room, user, reason='banned')
+                await self.client.ban_user(room, user, reason=reason)
                 if roomname:
                     ban_event_map['ban_list'][user].append(roomname)
                 else:
@@ -223,6 +214,42 @@ class CommunityBot(Plugin):
                 ban_event_map['error_list'][user].append(roomname or room)
         
         return ban_event_map
+
+    async def get_banlist_roomids(self):
+        banlist_roomids = []
+        for l in self.config['banlists']:
+            #self.log.debug(f"DEBUG getting banlist {l}")
+            if l.startswith('#'):
+                try:
+                    l_id = await self.client.resolve_room_alias(l)
+                    list_id = l_id["room_id"]
+                    #self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
+                except:
+                    evt.reply("i don't recognize that list, sorry")
+                    return
+            else:
+                list_id = l
+
+            banlist_roomids.append(list_id)
+
+        return banlist_roomids
+
+
+    @event.on(BAN_STATE_EVENT)
+    async def check_ban_event(self, evt:StateEvent) -> None:
+        banlist_roomids = await self.get_banlist_roomids()
+        # we only care about ban events in rooms in the banlist
+        if evt.room_id not in banlist_roomids:
+            return
+        else:
+            try:
+                entity = evt.content["entity"]
+                recommendation = evt.content["recommendation"]
+                self.log.debug(f"DEBUG new ban rule found: {entity} should have action {recommendation}")
+                if bool(re.search('ban$', recommendation)):
+                    await self.ban_this_user(entity)
+            except Exception as e:
+                self.log.error(e)
 
         
     @event.on(InternalEventType.JOIN)
