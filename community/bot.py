@@ -312,7 +312,7 @@ class CommunityBot(Plugin):
     @community.subcommand("sync", help="update the activity tracker with the current space members \
             in case they are missing")
     async def sync_space_members(self, evt: MessageEvent) -> None:
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             if not self.config["track_users"]:
                 await evt.respond("user tracking is disabled")
                 return
@@ -329,7 +329,7 @@ class CommunityBot(Plugin):
     @community.subcommand("ignore", help="exclude a specific matrix ID from inactivity tracking")
     @command.argument("mxid", "full matrix ID", required=True)
     async def ignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             if not self.config["track_users"]:
                 await evt.reply("user tracking is disabled")
                 return
@@ -348,7 +348,7 @@ class CommunityBot(Plugin):
     @community.subcommand("unignore", help="re-enable activity tracking for a specific matrix ID")
     @command.argument("mxid", "full matrix ID", required=True)
     async def unignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             if not self.config["track_users"]:
                 await evt.reply("user tracking is disabled")
                 return
@@ -366,7 +366,7 @@ class CommunityBot(Plugin):
 
     @community.subcommand("report", help='generate a list of matrix IDs that have been inactive')
     async def get_report(self, evt: MessageEvent) -> None:
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             if not self.config["track_users"]:
                 await evt.reply("user tracking is disabled")
                 return
@@ -386,7 +386,7 @@ class CommunityBot(Plugin):
     @community.subcommand("purge", help='kick users for excessive inactivity')
     async def kick_users(self, evt: MessageEvent) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             msg = await evt.respond("starting the purge...")
             report = await self.generate_report()
             purgeable = report['kick_inactive']
@@ -434,7 +434,7 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def kick_user(self, evt: MessageEvent, mxid: UserID) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             user = mxid
             msg = await evt.respond("starting the purge...")
             roomlist = await self.get_space_roomlist()
@@ -480,7 +480,7 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def ban_user(self, evt: MessageEvent, mxid: UserID) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             user = mxid
             msg = await evt.respond("starting the ban...")
             results_map = await self.ban_this_user(user)
@@ -502,7 +502,7 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def unban_user(self, evt: MessageEvent, mxid: UserID) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"]:
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             user = mxid
             msg = await evt.respond("starting the unban...")
             roomlist = await self.get_space_roomlist()
@@ -553,7 +553,7 @@ class CommunityBot(Plugin):
                             use `--encrypt` to ensure it is encrypted at creation time even if that isnt my default \
                             setting.')
         else:
-            if evt.sender in self.config["admins"] or evt.sender in self.config["mods"]:
+            if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
                 encrypted_flag_regex = re.compile(r'(\s+|^)-+encrypt(ed)?\s?')
                 force_encryption = bool(encrypted_flag_regex.search(roomname))
                 try:
