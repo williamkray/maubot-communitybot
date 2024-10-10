@@ -242,6 +242,9 @@ class CommunityBot(Plugin):
             # greeting activities
             room_id = str(evt.room_id)
             if room_id in self.config["greeting_rooms"]:
+                # just in case we got here even if the person is on the banlists
+                if on_banlist:
+                    return
                 greeting_map = self.config['greetings']
                 greeting_name = self.config['greeting_rooms'][room_id]
                 nick = self.client.parse_user_id(evt.sender)[0]
