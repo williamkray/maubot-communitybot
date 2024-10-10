@@ -89,3 +89,9 @@ censor_wordlist:
 # your bot MUST be in the banlist room already!
 banlists: 
   - '#community-moderation-effort-bl:neko.dev'
+
+# should we ban proactively? this will generate ban events across all rooms every time
+# the ban lists have a new policy added, which may be noisy. however, without this enabled,
+# an account may join your rooms, THEN get added to the banlist, and you will have to manually
+# ban them from your rooms.
+proactive_banning: true

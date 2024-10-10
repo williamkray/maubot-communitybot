@@ -41,6 +41,7 @@ class Config(BaseProxyConfig):
         helper.copy("censor_wordlist")
         helper.copy("censor_files")
         helper.copy("banlists")
+        helper.copy("proactive_banning")
 
 
 class CommunityBot(Plugin):
@@ -177,7 +178,7 @@ class CommunityBot(Plugin):
                     else:
                         pass
                 except Exception as e:
-                    self.log.debug(f"Found something funny in the banlist {l} for {rule['content']}: {e}")
+                    self.log.debug(f"Found something funny in the banlist {list_id} for {rule['content']}: {e}")
                     pass
         # if we haven't exited by now, we must not be banned!
         return is_banned
@@ -237,6 +238,9 @@ class CommunityBot(Plugin):
 
     @event.on(BAN_STATE_EVENT)
     async def check_ban_event(self, evt:StateEvent) -> None:
+        if not self.config["proactive_banning"]:
+            return
+
         banlist_roomids = await self.get_banlist_roomids()
         # we only care about ban events in rooms in the banlist
         if evt.room_id not in banlist_roomids:
