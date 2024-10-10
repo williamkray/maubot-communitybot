@@ -74,6 +74,11 @@ join_notification_message: |
 # this bot, bot admins and bot moderators are immune to censorship.
 censor: false
 
+# if censoring content, what minimum Power Level is required to not be censored?
+# this allows easy permission of trusted users in a room to post images or files on demand.
+# rooms usually default to 0 power level for normal users.
+uncensor_pl: 1
+
 # whether to redact file and image uploads. this will apply to all rooms defined
 # in the censor variable (either boolean or a list of room IDs).
 censor_files: true

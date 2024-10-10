@@ -38,6 +38,7 @@ class Config(BaseProxyConfig):
         helper.copy_dict("greeting_rooms")
         helper.copy_dict("greetings")
         helper.copy("censor")
+        helper.copy("uncensor_pl")
         helper.copy("censor_wordlist")
         helper.copy("censor_files")
         helper.copy("banlists")
@@ -124,7 +125,7 @@ class CommunityBot(Plugin):
         return report
 
     def flag_message(self, msg):
-        if msg.content.msgtype in [MessageType.FILE, MessageType.IMAGE]:
+        if msg.content.msgtype in [MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO]:
                 return self.config['censor_files']
 
         for w in self.config['censor_wordlist']:
@@ -294,10 +295,14 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
+        power_levels = await self.client.get_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS)
+        user_level = power_levels.get_user_level(evt.sender)
+        self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
         if self.flag_message(evt):
             # do we need to redact?
             if evt.sender not in self.config['admins'] and \
                     evt.sender not in self.config['moderators'] and \
+                    user_level < self.config['uncensor_pl'] and \
                     evt.sender != self.client.mxid and \
                     self.censor_room(evt):
                 try:
