@@ -88,6 +88,10 @@ censor_wordlist:
   - 'effword'
   - 'essword'
 
+# using one of these words results in redaction AND an instant ban. use with EXTREME caution. wordlist pattern matching can have
+# unintended consequences! set to an empty list [] to avoid using.
+censor_wordlist_instaban: []
+
 # list of banlists that should be subscribed to, such as #community-moderation-effort-bl:neko.dev
 # when users join any room managed by this bot, they are compared against these existing banlists
 # if found, they will immediately be banned.

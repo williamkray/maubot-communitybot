@@ -40,6 +40,7 @@ class Config(BaseProxyConfig):
         helper.copy("censor")
         helper.copy("uncensor_pl")
         helper.copy("censor_wordlist")
+        helper.copy("censor_wordlist_instaban")
         helper.copy("censor_files")
         helper.copy("banlists")
         helper.copy("proactive_banning")
@@ -137,6 +138,18 @@ class CommunityBot(Plugin):
                     pass
             except Exception as e:
                 self.log.error(f"Could not parse message for flagging: {e}")
+
+    def flag_instaban(self, msg):
+        for w in self.config['censor_wordlist_instaban']:
+            try:
+                if bool(re.search(w, msg.content.body, re.IGNORECASE)):
+                    #self.log.debug(f"DEBUG message flagged for instaban")
+                    return True
+                else:
+                    pass
+            except Exception as e:
+                self.log.error(f"Could not parse message for flagging: {e}")
+
 
     def censor_room(self, msg):
         if isinstance(self.config['censor'], bool):
@@ -297,7 +310,7 @@ class CommunityBot(Plugin):
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
         power_levels = await self.client.get_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS)
         user_level = power_levels.get_user_level(evt.sender)
-        self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
+        #self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
         if self.flag_message(evt):
             # do we need to redact?
             if evt.sender not in self.config['admins'] and \
@@ -309,6 +322,20 @@ class CommunityBot(Plugin):
                     await self.client.redact(evt.room_id, evt.event_id, reason="message flagged")
                 except Exception as e:
                     self.log.error(f"Flagged message could not be redacted: {e}")
+        if evt.content.msgtype in {MessageType.TEXT, MessageType.NOTICE, MessageType.EMOTE}:
+            if self.flag_instaban(evt):
+                # do we need to redact?
+                if evt.sender not in self.config['admins'] and \
+                        evt.sender not in self.config['moderators'] and \
+                        user_level < self.config['uncensor_pl'] and \
+                        evt.sender != self.client.mxid and \
+                        self.censor_room(evt):
+                    try:
+                        await self.client.redact(evt.room_id, evt.event_id, reason="message flagged")
+                    except Exception as e:
+                        self.log.error(f"Flagged message could not be redacted: {e}")
+                        
+                    await self.ban_this_user(evt.sender)
 
         if not self.config["track_messages"] or not self.config["track_users"]:
             pass
