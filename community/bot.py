@@ -264,6 +264,9 @@ class CommunityBot(Plugin):
                 entity = evt.content["entity"]
                 recommendation = evt.content["recommendation"]
                 self.log.debug(f"DEBUG new ban rule found: {entity} should have action {recommendation}")
+                if bool(re.search(r"[*?]", entity)):
+                    self.log.debug(f"DEBUG ban rule appears to be glob pattern, skipping proactive measures.")
+                    return
                 if bool(re.search('ban$', recommendation)):
                     await self.ban_this_user(entity)
             except Exception as e:
