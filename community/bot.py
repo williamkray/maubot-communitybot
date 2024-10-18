@@ -127,7 +127,7 @@ class CommunityBot(Plugin):
 
     def flag_message(self, msg):
         if msg.content.msgtype in [MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO]:
-                return self.config['censor_files']
+            return self.config['censor_files']
 
         for w in self.config['censor_wordlist']:
             try:
