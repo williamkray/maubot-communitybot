@@ -24,6 +24,7 @@ from .db import upgrade_table
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
         helper.copy("sleep")
+        helper.copy("welcome_sleep")
         helper.copy("admins")
         helper.copy("moderators")
         helper.copy("parent_room")
@@ -305,6 +306,7 @@ class CommunityBot(Plugin):
                 pill = '<a href="https://matrix.to/#/{mxid}">{nick}</a>'.format(mxid=evt.sender, nick=nick)
                 if greeting_name != "none":
                     greeting = greeting_map[greeting_name].format(user=pill)
+                    time.sleep(self.config['welcome_sleep'])
                     await self.client.send_notice(evt.room_id, html=greeting) 
                 else:
                     pass

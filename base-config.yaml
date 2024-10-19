@@ -64,6 +64,9 @@ greeting_rooms:
   '!someotherroom:server.tld': generic
   '!myencryptedroomid:server.tld': encrypted
 
+# how long to wait (in seconds) before sending a greeting to a new
+welcome_sleep: 0
+
 # add a room ID here to send a message to when someone joins the above rooms
 # (optional)
 notification_room: 
