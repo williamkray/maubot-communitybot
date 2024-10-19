@@ -342,7 +342,7 @@ class CommunityBot(Plugin):
                     except Exception as e:
                         self.log.error(f"Flagged message could not be redacted: {e}")
                         
-                    await self.ban_this_user(evt.sender)
+                    await self.ban_this_user(evt.sender, all_rooms=True)
 
         if not self.config["track_messages"] or not self.config["track_users"]:
             pass
@@ -553,7 +553,7 @@ class CommunityBot(Plugin):
         if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
             user = mxid
             msg = await evt.respond("starting the ban...")
-            results_map = await self.ban_this_user(user)
+            results_map = await self.ban_this_user(user, all_rooms=True)
 
 
             results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
