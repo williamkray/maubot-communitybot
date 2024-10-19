@@ -1,6 +1,11 @@
 # the room-id of the matrix room or space to use as your "full user list"
 parent_room: "!somerandomcharacters:server.tld"
 
+# sleep time between actions. you can drop this to 0 if your bot has no
+# ratelimits imposed on its homeserver, otherwise you may want to increase this
+# to avoid errors.
+sleep: 1
+
 # whether to encrypt rooms when using the room creation commands 
 encrypt: False
 

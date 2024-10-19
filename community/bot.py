@@ -23,6 +23,7 @@ from .db import upgrade_table
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
+        helper.copy("sleep")
         helper.copy("admins")
         helper.copy("moderators")
         helper.copy("parent_room")
@@ -224,7 +225,7 @@ class CommunityBot(Plugin):
                     ban_event_map['ban_list'][user].append(roomname)
                 else:
                     ban_event_map['ban_list'][user].append(room)
-                time.sleep(0.5)
+                time.sleep(self.config['sleep'])
             except MNotFound:
                 pass
             except Exception as e:
@@ -242,6 +243,7 @@ class CommunityBot(Plugin):
                 try:
                     l_id = await self.client.resolve_room_alias(l)
                     list_id = l_id["room_id"]
+                    time.sleep(self.config['sleep'])
                     #self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
                 except:
                     evt.reply("i don't recognize that list, sorry")
@@ -347,26 +349,38 @@ class CommunityBot(Plugin):
         if not self.config["track_messages"] or not self.config["track_users"]:
             pass
         else:
-            q = """
-                INSERT INTO user_events(mxid, last_message_timestamp) 
-                VALUES ($1, $2)
-                ON CONFLICT(mxid)
-                DO UPDATE SET last_message_timestamp=$2
-            """
-            await self.database.execute(q, evt.sender, evt.timestamp)
+            rooms_to_manage = await self.get_space_roomlist()
+            # only attempt to track rooms in the space, ignore any other rooms
+            # the bot may happen to be in line banlist policy rooms etc.
+            if evt.room_id not in rooms_to_manage:
+                return
+            else:
+                q = """
+                    INSERT INTO user_events(mxid, last_message_timestamp) 
+                    VALUES ($1, $2)
+                    ON CONFLICT(mxid)
+                    DO UPDATE SET last_message_timestamp=$2
+                """
+                await self.database.execute(q, evt.sender, evt.timestamp)
 
     @event.on(EventType.REACTION)
     async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
         if not self.config["track_reactions"] or not self.config["track_users"]:
             pass
         else:
-            q = """
-                INSERT INTO user_events(mxid, last_message_timestamp) 
-                VALUES ($1, $2)
-                ON CONFLICT(mxid)
-                DO UPDATE SET last_message_timestamp=$2
-            """
-            await self.database.execute(q, evt.sender, evt.timestamp)
+            rooms_to_manage = await self.get_space_roomlist()
+            # only attempt to track rooms in the space, ignore any other rooms
+            # the bot may happen to be in line banlist policy rooms etc.
+            if evt.room_id not in rooms_to_manage:
+                return
+            else:
+                q = """
+                    INSERT INTO user_events(mxid, last_message_timestamp) 
+                    VALUES ($1, $2)
+                    ON CONFLICT(mxid)
+                    DO UPDATE SET last_message_timestamp=$2
+                """
+                await self.database.execute(q, evt.sender, evt.timestamp)
 
     @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
@@ -480,7 +494,7 @@ class CommunityBot(Plugin):
                             purge_list[user].append(roomname)
                         else:
                             purge_list[user].append(room)
-                        time.sleep(0.5)
+                        time.sleep('sleep')
                     except MNotFound:
                         pass
                     except Exception as e:
@@ -526,7 +540,7 @@ class CommunityBot(Plugin):
                         purge_list[user].append(roomname)
                     else:
                         purge_list[user].append(room)
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
                 except MNotFound:
                     pass
                 except Exception as e:
@@ -594,7 +608,7 @@ class CommunityBot(Plugin):
                         unban_list[user].append(roomname)
                     else:
                         unban_list[user].append(room)
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
                 except MNotFound:
                     pass
                 except Exception as e:
@@ -646,7 +660,7 @@ class CommunityBot(Plugin):
                     #self.log.info(mymsg)
                     room_id = await self.client.create_room(alias_localpart=sanitized_name, name=roomname,
                             invitees=invitees, power_level_override=pl_override)
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
 
                     await evt.respond(f"updating room states...", edits=mymsg)
                     parent_event_content = json.dumps({'auto_join': False, 'suggested': False, 'via': [server]})
@@ -655,11 +669,11 @@ class CommunityBot(Plugin):
                         'room_id': parent_room}]})
 
                     await self.client.send_state_event(parent_room, 'm.space.child', parent_event_content, state_key=room_id)
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
                     await self.client.send_state_event(room_id, 'm.space.parent', child_event_content, state_key=parent_room)
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
                     await self.client.send_state_event(room_id, 'm.room.join_rules', join_rules_content, state_key="")
-                    time.sleep(0.5)
+                    time.sleep(self.config['sleep'])
 
                     if self.config["encrypt"] or force_encryption:
                         encryption_content = json.dumps({"algorithm": "m.megolm.v1.aes-sha2"})
@@ -667,7 +681,7 @@ class CommunityBot(Plugin):
                         await self.client.send_state_event(room_id, 'm.room.encryption', encryption_content,
                                                            state_key="")
                         await evt.respond(f"encrypting room...", edits=mymsg)
-                        time.sleep(0.5)
+                        time.sleep(self.config['sleep'])
 
                     await evt.respond(f"room created and updated, alias is #{sanitized_name}:{server}", edits=mymsg)
 
@@ -788,7 +802,7 @@ class CommunityBot(Plugin):
                     self.log.warning(e)
                     error_list.append(roomname or room)
 
-                time.sleep(0.5)
+                time.sleep(self.config['sleep'])
 
             results = "the following rooms were updated:<p><code>{success_list}</code></p>the following errors were \
                     recorded:<p><code>{error_list}</code></p>".format(success_list=success_list, error_list=error_list)
