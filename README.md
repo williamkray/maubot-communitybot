@@ -1,9 +1,9 @@
 # Community Bot
 [![Chat on Matrix](https://img.shields.io/badge/chat_on_matrix-%23dev:mssj.me-green)](https://matrix.to/#/#dev:mssj.me)
 
-a maubot plugin that helps administrators of communities on matrix, based on the concept of a matrix space. this bot
-will attempt to track user activity in any room that it is in, so you may want to leverage
-[join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not supposed to be.
+a maubot plugin that helps administrators of communities on matrix, based on the concept of a matrix space. you may want
+to leverage [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not
+supposed to be.
 
 # should i use this?
 
@@ -31,6 +31,9 @@ if that doesn't sound like how you want to structure your online community, you 
 Draupnir or Mjolnir.
 
 # features
+
+please read through the comments in the `base-config.yaml` for more thorough explanations, but this covers the high
+points.
 
 ## greet new users on joining a room
 
