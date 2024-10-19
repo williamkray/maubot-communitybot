@@ -197,7 +197,7 @@ class CommunityBot(Plugin):
         # if we haven't exited by now, we must not be banned!
         return is_banned
 
-    async def ban_this_user(self, user, reason="banned"):
+    async def ban_this_user(self, user, reason="banned", all_rooms=False):
         #self.log.debug(f"DEBUG getting list of rooms")
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
@@ -214,7 +214,11 @@ class CommunityBot(Plugin):
                 roomname = roomnamestate['name']
 
                 # ban user even if they're not in the room!
-                #await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                if all_rooms:
+                    pass
+                else:
+                    await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+
                 await self.client.ban_user(room, user, reason=reason)
                 if roomname:
                     ban_event_map['ban_list'][user].append(roomname)
