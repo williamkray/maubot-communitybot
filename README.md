@@ -98,6 +98,27 @@ send power-level state events to the room, it will return a list for you to hand
 than 0 and are not listed as either an admin or moderator will be removed from the permission list, effectively
 returning their power to whatever the room default is (usually 0).
 
+## EXPERIMENTAL: AI Powered Moderation
+
+this plugin offers experimental support to allow LLM-backed moderation support. this is an incredibly sensitive topic,
+and so the following caveats apply:
+
+1. there are no default configuration values for this feature. you have to be very intentional and explicit. i will not
+   include guidance on how to configure this for you. if you cannot figure out how to do it based on the config variable
+   names, you already should not be using this.
+2. ai moderation will only work if you enable censorship on a SINGLE ROOM. if you use sweeping censorship or a list of
+   more than one room, the plugin will throw errors and you will experience unexpected behavior. you have been warned.
+   enabling censorship on a single room is the suggested community-structure to reduce administrative overhead, so if
+   you are doing anything other than that this feature is not for you.
+3. enabling ai moderation in a single room will force a greeting every time someone joins as a reminder that messages
+   are being sent to an external service. this will expose the api endpoint you are using in full. if you are using an
+   endpoint that includes secure information like a request token in the query string or something like that, it will be
+   broadcast to the entire room. you really should use an api key sent in headers instead. you have been warned.
+4. the LLM prompt asks the LLM to reply with a specifically structured JSON object. if for some reason the code is
+   unable to parse the response from the LLM (probably malformed json or including extra commentary in the response) the
+   code is set to retry 2 more times... in theory. i've had this happen so infrequently that i actually haven't had a
+   chance to test the retry logic. you may encounter un-moderated content if the language model isn't behaving.
+
 ## room creation
 
 use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.

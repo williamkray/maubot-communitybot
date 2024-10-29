@@ -115,3 +115,12 @@ proactive_banning: true
 
 # should we redact messages when a user is banned?
 redact_on_ban: true
+
+# use AI moderation? this will assess all text-based messages and attempt to score them as spam, scam, offensive, etc.
+# this is a really questionable thing to enable. please be sure to read the readme section for information about
+# what this does, what the risks are, and why there are no default values.
+ai_mod: false
+ai_mod_threshold: ''
+ai_mod_api_key: myapikeygoeshere
+ai_mod_api_endpoint: ''
+ai_mod_api_model: ''
