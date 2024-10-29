@@ -554,6 +554,7 @@ that explain how the score was reached.
                 and self.censor_room(evt)
             ):
                 # now we can send the message to the api and get a score
+                await evt.mark_read()
                 score = await self.ai_analyze(evt)
                 self.log.debug(f"DEBUG message score: {score['comment']} ({score['analysis']})")
                 # is the score high enough to redact?

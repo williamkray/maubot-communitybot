@@ -118,6 +118,8 @@ and so the following caveats apply:
    unable to parse the response from the LLM (probably malformed json or including extra commentary in the response) the
    code is set to retry 2 more times... in theory. i've had this happen so infrequently that i actually haven't had a
    chance to test the retry logic. you may encounter un-moderated content if the language model isn't behaving.
+5. the endpoint must be compatible with openai's chat completions api (localai.io provides this compatibility, for
+   example).
 
 ## room creation
 
