@@ -112,3 +112,6 @@ banlists:
 # an account may join your rooms, THEN get added to the banlist, and you will have to manually
 # ban them from your rooms.
 proactive_banning: true
+
+# should we redact messages when a user is banned?
+redact_on_ban: true

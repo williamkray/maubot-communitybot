@@ -1,6 +1,6 @@
 maubot: 0.1.0
 id: org.jobmachine.communitybot
-version: 0.1.17
+version: 0.1.18
 license: MIT
 modules:
   - community

@@ -13,3 +13,12 @@ async def upgrade_v1(conn: Connection) -> None:
                 ignore_inactivity INT
             )"""
     )
+
+@upgrade_table.register(description="Include message redaction tracking")
+async def upgrade_v2(conn: Connection) -> None:
+    await conn.execute(
+            """CREATE TABLE redaction_tasks (
+                event_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL
+            )"""
+    )

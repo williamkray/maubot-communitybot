@@ -5,11 +5,12 @@ import json
 import time
 import re
 import fnmatch
+import asyncio
 
 from mautrix.client import Client, InternalEventType, MembershipEventDispatcher, SyncStream
 from mautrix.types import (Event, StateEvent, EventID, UserID, FileInfo, EventType,
                             MediaMessageEventContent, ReactionEvent, RedactionEvent, RoomID,
-                            RoomAlias, PowerLevelStateEventContent, MessageType)
+                            RoomAlias, PowerLevelStateEventContent, MessageType, PaginationDirection)
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
@@ -46,15 +47,40 @@ class Config(BaseProxyConfig):
         helper.copy("censor_files")
         helper.copy("banlists")
         helper.copy("proactive_banning")
+        helper.copy("redact_on_ban")
 
 
 class CommunityBot(Plugin):
+
+    _redaction_tasks: asyncio.Task = None
 
     async def start(self) -> None:
         await super().start()
         self.config.load_and_update()
         self.client.add_dispatcher(MembershipEventDispatcher)
+        # Start background redaction task
+        self._redaction_tasks = asyncio.create_task(self._redaction_loop())
 
+    async def stop(self) -> None:
+        if self._redaction_tasks:
+            self._redaction_tasks.cancel()
+        await super().stop()
+
+    async def _redaction_loop(self) -> None:
+        while True:
+            try:
+                # Get all rooms with pending redactions
+                rooms = await self.database.fetch(
+                    "SELECT DISTINCT room_id FROM redaction_tasks"
+                )
+                for room in rooms:
+                    await self.redact_messages(room['room_id'])
+                await asyncio.sleep(60)  # Run every minute
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.log.error(f"Error in redaction loop: {e}")
+                await asyncio.sleep(60)  # Wait a minute before retrying on error
 
     async def do_sync(self) -> None:
         if not self.config["track_users"]:
@@ -198,17 +224,58 @@ class CommunityBot(Plugin):
                     pass
         # if we haven't exited by now, we must not be banned!
         return is_banned
+    
+    async def get_messages_to_redact(self, room_id, mxid):
+        try:
+            messages = await self.client.get_messages(
+                room_id,
+                limit=100,
+                filter_json={
+                    "senders": [mxid],
+                    "not_types": ["m.room.redaction"]
+                },
+                direction=PaginationDirection.BACKWARD
+            )
+            # Filter out events with empty content
+            filtered_events = [event for event in messages.events if event.content and event.content.serialize()]
+            self.log.debug(f"DEBUG found {len(filtered_events)} messages to redact in {room_id} (after filtering empty content)")
+            return filtered_events
+        except Exception as e:
+            self.log.error(f"Error getting messages to redact: {e}")
+            return []
+    
+    async def redact_messages(self, room_id):
+        counters = {'success': 0, 'failure': 0}
+        sleep_time = self.config['sleep']
+        events = await self.database.fetch(
+            "SELECT event_id FROM redaction_tasks WHERE room_id = $1",
+            room_id
+        )
+        for event in events:
+            try:
+                await self.client.redact(room_id, event['event_id'], reason="content removed")
+                counters['success'] += 1
+                await self.database.execute(
+                    "DELETE FROM redaction_tasks WHERE event_id = $1",
+                    event['event_id']
+                )
+                await asyncio.sleep(sleep_time)
+            except Exception as e:
+                if "Too Many Requests" in str(e):
+                    self.log.warning(f"Rate limited while redacting messages in {room_id}, will try again in next loop")
+                    return counters
+                self.log.error(f"Failed to redact message: {e}")
+                counters['failure'] += 1
+                await asyncio.sleep(sleep_time)
+        return counters
 
     async def ban_this_user(self, user, reason="banned", all_rooms=False):
-        #self.log.debug(f"DEBUG getting list of rooms")
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
-        #self.log.debug(f"DEBUG list of rooms acquired")
         ban_event_map = {'ban_list':{}, 'error_list':{}}
 
         ban_event_map['ban_list'][user] = []
-        #self.log.debug(f"DEBUG banning {user} from rooms...")
         for room in roomlist:
             try:
                 roomname = None
@@ -233,7 +300,18 @@ class CommunityBot(Plugin):
                 self.log.warning(e)
                 ban_event_map['error_list'][user] = []
                 ban_event_map['error_list'][user].append(roomname or room)
-        
+
+            if self.config["redact_on_ban"]:
+                messages = await self.get_messages_to_redact(room, user)
+                # Queue messages for redaction
+                for msg in messages:
+                    await self.database.execute(
+                        "INSERT INTO redaction_tasks (event_id, room_id) VALUES ($1, $2)",
+                        msg.event_id,
+                        room
+                    )
+                self.log.info(f"Queued {len(messages)} messages for redaction in {roomname or room}")
+
         return ban_event_map
 
     async def get_banlist_roomids(self):
@@ -247,7 +325,7 @@ class CommunityBot(Plugin):
                     time.sleep(self.config['sleep'])
                     #self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
                 except:
-                    evt.reply("i don't recognize that list, sorry")
+                    self.log.error(f"Banlist fetching failed for {l}")
                     return
             else:
                 list_id = l
@@ -629,6 +707,32 @@ class CommunityBot(Plugin):
         else:
             await evt.reply("lol you don't have permission to do that")
 
+    @community.subcommand("redact", help="redact messages from a specific user (optionally in a specific room)")
+    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("room", "room ID", required=False)
+    async def mark_for_redaction(self, evt: MessageEvent, mxid: UserID, room: str) -> None:
+        await evt.mark_read()
+        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
+            if room:
+                if room.startswith('#'):
+                    room_id = await self.client.resolve_room_alias(room)
+                    room_id = room_id["room_id"]
+                else:
+                    room_id = room
+            else:
+                room_id = evt.room_id
+
+            # get list of messages to redact in this room
+            messages = await self.get_messages_to_redact(room_id, mxid)
+            for msg in messages:
+                await self.database.execute(
+                    "INSERT INTO redaction_tasks (event_id, room_id) VALUES ($1, $2)",
+                    msg.event_id,
+                    room_id
+                )
+            await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
+        else:
+            await evt.reply("lol you don't have permission to do that")
 
     @community.subcommand("createroom", help="create a new room titled <roomname> and add it to the parent space. \
                           optionally include `--encrypt` to encrypt it regardless of the default settings.")
