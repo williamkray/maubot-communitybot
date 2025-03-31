@@ -76,6 +76,8 @@ if you want more sever action, use the `ban` and `unban` subcommands to ban user
 will automatically kick them from those rooms as well). if you've made a mistake, use the unban option, but they will
 need to rejoin all rooms themselves or be re-invited.
 
+if configured with the `redact_on_ban` setting, banning a user from your space will also queue up to their last 100 messages in each room for redaction. if not, you can redact their messages in each individual room using the `!community redact` command.
+
 use the `guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
 `!community guests #myroom:alias.here`.
 
