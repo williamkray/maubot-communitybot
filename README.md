@@ -110,6 +110,17 @@ bot is still able to manage room admins. the bot will also invite other users to
 
 rooms created by the bot will have join restriction limited to members of the space.
 
+## room archival and replacement
+
+use the `archive` subcommand to archive a room. this will remove the room from the parent space, remove all room aliases, and add a tombstone event to indicate the room is archived
+
+use the `replaceroom` subcommand to replace an existing room with a new one. this is useful when:
+- room members have power levels that cannot be corrected, or room members you cannot kick out
+- you need to revert encryption settings
+- you want to start fresh with a new room while preserving the old room's name and aliases
+
+the replacement process will create a new room with the same name and avatar, transfer all room aliases to the new room, and archive the old room with a pointer to the new room. the new room will have standard join rules that restrict membership to space members. this logic is a little clunky, but it seems to work.
+
 ## get room ID
 
 sometimes you need to know a rooms identifier, but if the room has an alias associated with it not all clients make it
