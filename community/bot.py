@@ -6,6 +6,7 @@ import time
 import re
 import fnmatch
 import asyncio
+import asyncpg.exceptions
 
 from mautrix.client import (
     Client,
@@ -128,10 +129,23 @@ class CommunityBot(Plugin):
         if not self.config["track_users"]:
             return "user tracking is disabled"
 
-        space_members_obj = await self.client.get_joined_members(
-            self.config["parent_room"]
-        )
-        space_members_list = space_members_obj.keys()
+        try:
+            space_members_obj = await self.client.get_joined_members(
+                self.config["parent_room"]
+            )
+            space_members_list = space_members_obj.keys()
+        except asyncpg.exceptions.UniqueViolationError as e:
+            # If we hit a duplicate key error, log it and retry once
+            self.log.warning(f"Duplicate key error during member sync, retrying: {e}")
+            await asyncio.sleep(1)  # Brief delay before retry
+            space_members_obj = await self.client.get_joined_members(
+                self.config["parent_room"]
+            )
+            space_members_list = space_members_obj.keys()
+        except Exception as e:
+            self.log.error(f"Failed to get space members: {e}")
+            return {"added": [], "dropped": []}
+
         table_users = await self.database.fetch("SELECT mxid FROM user_events")
         table_user_list = [row["mxid"] for row in table_users]
         untracked_users = set(space_members_list) - set(table_user_list)
@@ -884,7 +898,6 @@ class CommunityBot(Plugin):
             self.log.info(
                 "no admins or moderators configured, skipping power level sync"
             )
-            pass
         else:
             power_levels = await self.client.get_state_event(
                 self.config["parent_room"], EventType.ROOM_POWER_LEVELS
@@ -916,23 +929,23 @@ class CommunityBot(Plugin):
                 self.log.debug("successfully migrated admin/mod config to parent room")
             except Exception as e:
                 self.log.error(
-                    f"Failed to send power levels to {self.config["parent_room"]}: {e}"
+                    f"Failed to send power levels to {self.config['parent_room']}: {e}"
                 )
                 await evt.respond(
-                    f"Failed to send power levels to {self.config["parent_room"]}: {e}"
+                    f"Failed to send power levels to {self.config['parent_room']}: {e}"
                 )
 
-            if not self.config["track_users"]:
-                await evt.respond("user tracking is disabled")
-                return
+        if not self.config["track_users"]:
+            await evt.respond("user tracking is disabled")
+            return
 
-            results = await self.do_sync()
+        results = await self.do_sync()
 
-            added_str = "<br />".join(results["added"])
-            dropped_str = "<br />".join(results["dropped"])
-            await evt.respond(
-                f"Added: {added_str}<br /><br />Dropped: {dropped_str}", allow_html=True
-            )
+        added_str = "<br />".join(results["added"])
+        dropped_str = "<br />".join(results["dropped"])
+        await evt.respond(
+            f"Added: {added_str}<br /><br />Dropped: {dropped_str}", allow_html=True
+        )
 
     @community.subcommand(
         "ignore", help="exclude a specific matrix ID from inactivity tracking"
