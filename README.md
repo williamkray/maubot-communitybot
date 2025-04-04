@@ -5,6 +5,14 @@ a maubot plugin that helps administrators of communities on matrix, based on the
 to leverage [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not
 supposed to be.
 
+# important upgrade note
+
+if you are upgrading from an earlier version to v0.2.0, please note that the user permission model has changed to be easier to manage, but will require some intervention.
+
+statically defined `admins` and `moderators` in the config will no longer be used. instead, user permissions in rooms will be inherited from the parent space or room, and changes will cascade to all child rooms.
+
+to migrate, ensure your bot is an admin of the parent space and use the `!community sync` command to make users in your admin and moderator lists appropriately leveled in that parent space. this will also clear out these lists to prepare for deprecation in a later version. you may want to run `!community setpower` to update your child rooms if there are significant changes.
+
 # should i use this?
 
 why does this exist? there are some great tools out there already that do probably a much better job at combatting spam
