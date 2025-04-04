@@ -66,6 +66,26 @@ class CommunityBot(Plugin):
             self._redaction_tasks.cancel()
         await super().stop()
 
+    async def user_permitted(self, user_id: UserID, min_level: int = 50) -> bool:
+        """Check if a user has sufficient power level in the parent room.
+        
+        Args:
+            user_id: The Matrix ID of the user to check
+            min_level: Minimum required power level (default 50 for moderator)
+            
+        Returns:
+            bool: True if user has sufficient power level
+        """
+        try:
+            power_levels = await self.client.get_state_event(
+                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
+            )
+            user_level = power_levels.get_user_level(user_id)
+            return user_level >= min_level
+        except Exception as e:
+            self.log.error(f"Failed to check user power level: {e}")
+            return False
+
     async def _redaction_loop(self) -> None:
         while True:
             try:
@@ -536,6 +556,82 @@ class CommunityBot(Plugin):
             except Exception as e:
                 self.log.error(e)
 
+    @event.on(EventType.ROOM_POWER_LEVELS)
+    async def sync_power_levels(self, evt: StateEvent) -> None:
+        # Only care about changes in the parent room
+        if evt.room_id != self.config['parent_room']:
+            return
+
+        # Get the changed user and their new power level
+        try:
+            old_levels = evt.prev_content.get("users", {})
+            new_levels = evt.content.get("users", {})
+            
+            # Find which user's power level changed
+            changed_users = {}
+            for user, new_level in new_levels.items():
+                if user not in old_levels or old_levels[user] != new_level:
+                    changed_users[user] = new_level
+
+            if not changed_users:
+                return
+
+            # Get all rooms in the space
+            space_rooms = await self.client.get_joined_rooms()
+            success_rooms = []
+            failed_rooms = []
+
+            # Apply the same power level changes to each room
+            for room_id in space_rooms:
+                if room_id == self.config['parent_room']:
+                    continue
+
+                try:
+                    roomname = (await self.client.get_state_event(room_id, "m.room.name"))["name"]
+                except:
+                    self.log.warning(f"Unable to get room name for {room_id}")
+
+                # Get current power levels
+                try:
+                    # Get current power levels
+                    current_pl = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
+                    
+                    # Update existing power levels object with new levels
+                    users = current_pl.get("users", {})
+                    for user, level in changed_users.items():
+                        users[user] = level
+                    
+                    current_pl["users"] = users
+                    
+                    # Send updated power levels
+                    try:
+                        await self.client.send_state_event(room_id, EventType.ROOM_POWER_LEVELS, current_pl)
+                        success_rooms.append(roomname or room_id)
+                    except Exception as e:
+                        self.log.error(f"Failed to send power levels to {roomname or room_id}: {e}")
+                        failed_rooms.append(roomname or room_id)
+                    
+                    time.sleep(self.config['sleep'])
+                    
+                except Exception as e:
+                    self.log.warning(f"Failed to update power levels in {room_id}: {e}")
+                    failed_rooms.append(room_id)
+
+            # Send notification if configured
+            if self.config["notification_room"]:
+                changes = ", ".join([f"{user} → {level}" for user, level in changed_users.items()])
+                notification = f"Power level changes ({changes}) propagated from parent room:<br>"
+                notification += f"Succeeded in: <code>{', '.join(success_rooms)}</code><br>"
+                if failed_rooms:
+                    notification += f"Failed in: <code>{', '.join(failed_rooms)}</code>"
+                
+                await self.client.send_notice(
+                    self.config["notification_room"],
+                    html=notification
+                )
+
+        except Exception as e:
+            self.log.error(f"Error syncing power levels: {e}")
         
     @event.on(InternalEventType.JOIN)
     async def newjoin(self, evt:StateEvent) -> None:
@@ -581,9 +677,7 @@ class CommunityBot(Plugin):
         #self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
         if self.flag_message(evt):
             # do we need to redact?
-            if evt.sender not in self.config['admins'] and \
-                    evt.sender not in self.config['moderators'] and \
-                    user_level < self.config['uncensor_pl'] and \
+            if not await self.user_permitted(evt.sender) and \
                     evt.sender != self.client.mxid and \
                     self.censor_room(evt):
                 try:
@@ -593,9 +687,7 @@ class CommunityBot(Plugin):
         if evt.content.msgtype in {MessageType.TEXT, MessageType.NOTICE, MessageType.EMOTE}:
             if self.flag_instaban(evt):
                 # do we need to redact?
-                if evt.sender not in self.config['admins'] and \
-                        evt.sender not in self.config['moderators'] and \
-                        user_level < self.config['uncensor_pl'] and \
+                if not await self.user_permitted(evt.sender) and \
                         evt.sender != self.client.mxid and \
                         self.censor_room(evt):
                     try:
@@ -655,137 +747,136 @@ class CommunityBot(Plugin):
     @community.subcommand("sync", help="update the activity tracker with the current space members \
             in case they are missing")
     async def sync_space_members(self, evt: MessageEvent) -> None:
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not self.config["track_users"]:
-                await evt.respond("user tracking is disabled")
-                return
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            results = await self.do_sync()
-
-            added_str = "<br />".join(results['added'])
-            dropped_str = "<br />".join(results['dropped'])
-            await evt.respond(f"Added: {added_str}<br /><br />Dropped: {dropped_str}", allow_html=True)
+        # check config values for admins and moderators. if they have a lower PL in the parent room,
+        # attempt to update the parent room with their appropriate admin/mod status
+        # we can skip all of this logic if those config values are empty
+        # this logic helps migrate explicit configuration to the parent-room inheritance model
+        if not self.config["admins"] and not self.config["moderators"]:
+            self.log.info("no admins or moderators configured, skipping power level sync")
+            pass
         else:
-            await evt.reply("lol you don't have permission to do that")
+            power_levels = await self.client.get_state_event(self.config["parent_room"], EventType.ROOM_POWER_LEVELS)
+            users = power_levels.get("users", {})
+            for user in self.config["admins"]:
+                if user not in users or users.get(user) < 100:
+                    # update the users object in-place
+                    users[user] = 100
+
+            for user in self.config["moderators"]:
+                if user not in users or users.get(user) < 50:
+                    # update the users object in-place
+                    users[user] = 50
+
+            try:
+                # update full powerlevels object with updated user object
+                power_levels["users"] = users
+                await self.client.send_state_event(self.config["parent_room"], EventType.ROOM_POWER_LEVELS, power_levels)
+                # if updating was successful, let's go ahead and clear out the values in the config
+                self.config["admins"] = []
+                self.config["moderators"] = []
+                # and save the config to the file
+                self.config.save()
+                self.log.debug("successfully migrated admin/mod config to parent room")
+            except Exception as e:
+                self.log.error(f"Failed to send power levels to {self.config["parent_room"]}: {e}")
+                await evt.respond(f"Failed to send power levels to {self.config["parent_room"]}: {e}")
+                
+                
+
+        if not self.config["track_users"]:
+            await evt.respond("user tracking is disabled")
+            return
+
+        results = await self.do_sync()
+
+        added_str = "<br />".join(results['added'])
+        dropped_str = "<br />".join(results['dropped'])
+        await evt.respond(f"Added: {added_str}<br /><br />Dropped: {dropped_str}", allow_html=True)
 
 
     @community.subcommand("ignore", help="exclude a specific matrix ID from inactivity tracking")
     @command.argument("mxid", "full matrix ID", required=True)
     async def ignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            try:
-                Client.parse_user_id(mxid)
-                await self.database.execute("UPDATE user_events SET ignore_inactivity = 1 WHERE \
-                        mxid = $1", mxid)
-                self.log.info(f"{mxid} set to ignore inactivity")
-                await evt.react("✅")
-            except Exception as e:
-                await evt.respond(f"{e}")
-        else:
-            await evt.reply("lol you don't have permission to set that")
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        try:
+            Client.parse_user_id(mxid)
+            await self.database.execute("UPDATE user_events SET ignore_inactivity = 1 WHERE \
+                    mxid = $1", mxid)
+            self.log.info(f"{mxid} set to ignore inactivity")
+            await evt.react("✅")
+        except Exception as e:
+            await evt.respond(f"{e}")
 
     @community.subcommand("unignore", help="re-enable activity tracking for a specific matrix ID")
     @command.argument("mxid", "full matrix ID", required=True)
     async def unignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            try:
-                Client.parse_user_id(mxid)
-                await self.database.execute("UPDATE user_events SET ignore_inactivity = 0 WHERE \
-                        mxid = $1", mxid)
-                self.log.info(f"{mxid} set to track inactivity")
-                await evt.react("✅")
-            except Exception as e:
-                await evt.respond(f"{e}")
-        else:
-            await evt.reply("lol you don't have permission to set that")
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        try:
+            Client.parse_user_id(mxid)
+            await self.database.execute("UPDATE user_events SET ignore_inactivity = 0 WHERE \
+                    mxid = $1", mxid)
+            self.log.info(f"{mxid} set to track inactivity")
+            await evt.react("✅")
+        except Exception as e:
+            await evt.respond(f"{e}")
 
     @community.subcommand("report", help='generate a list of matrix IDs that have been inactive')
     async def get_report(self, evt: MessageEvent) -> None:
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            sync_results = await self.do_sync()
-            report = await self.generate_report()
-            await evt.respond(f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
-                    {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['warn_inactive'])} <br /></p>\
-                    <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['kick_inactive'])} <br /></p> \
-                    <p><b>Ignored users:</b><br /> \
-                    {'<br />'.join(report['ignored'])}</p>", \
-                    allow_html=True)
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
+                {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['warn_inactive'])} <br /></p>\
+                <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['kick_inactive'])} <br /></p> \
+                <p><b>Ignored users:</b><br /> \
+                {'<br />'.join(report['ignored'])}</p>", \
+                allow_html=True)
 
 
     @community.subcommand("purge", help='kick users for excessive inactivity')
     async def kick_users(self, evt: MessageEvent) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            msg = await evt.respond("starting the purge...")
-            report = await self.generate_report()
-            purgeable = report['kick_inactive']
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            purge_list = {}
-            error_list = {}
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            for user in purgeable:
-                purge_list[user] = []
-                for room in roomlist:
-                    try:
-                        roomname = None
-                        roomnamestate = await self.client.get_state_event(room, 'm.room.name')
-                        roomname = roomnamestate['name']
+        msg = await evt.respond("starting the purge...")
+        report = await self.generate_report()
+        purgeable = report['kick_inactive']
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        purge_list = {}
+        error_list = {}
 
-                        await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                        await self.client.kick_user(room, user, reason='inactivity')
-                        if roomname:
-                            purge_list[user].append(roomname)
-                        else:
-                            purge_list[user].append(room)
-                        time.sleep('sleep')
-                    except MNotFound:
-                        pass
-                    except Exception as e:
-                        self.log.warning(e)
-                        error_list[user] = []
-                        error_list[user].append(roomname or room)
-
-
-            results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(purge_list=purge_list, error_list=error_list)
-            await evt.respond(results, allow_html=True, edits=msg)
-        
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
-
-        else:
-            await evt.reply("lol you don't have permission to do that")
-
-
-    @community.subcommand("kick", help='kick a specific user from the community and all rooms')
-    @command.argument("mxid", "full matrix ID", required=True)
-    async def kick_user(self, evt: MessageEvent, mxid: UserID) -> None:
-        await evt.mark_read()
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            user = mxid
-            msg = await evt.respond("starting the purge...")
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            purge_list = {}
-            error_list = {}
-
+        for user in purgeable:
             purge_list[user] = []
             for room in roomlist:
                 try:
@@ -794,12 +885,12 @@ class CommunityBot(Plugin):
                     roomname = roomnamestate['name']
 
                     await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                    await self.client.kick_user(room, user, reason='kicked')
+                    await self.client.kick_user(room, user, reason='inactivity')
                     if roomname:
                         purge_list[user].append(roomname)
                     else:
                         purge_list[user].append(room)
-                    time.sleep(self.config['sleep'])
+                    time.sleep('sleep')
                 except MNotFound:
                     pass
                 except Exception as e:
@@ -808,110 +899,154 @@ class CommunityBot(Plugin):
                     error_list[user].append(roomname or room)
 
 
-            results = "the following users were kicked:<p><code>{purge_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(purge_list=purge_list, error_list=error_list)
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(purge_list=purge_list, error_list=error_list)
+        await evt.respond(results, allow_html=True, edits=msg)
         
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
-        else:
-            await evt.reply("lol you don't have permission to do that")
+
+    @community.subcommand("kick", help='kick a specific user from the community and all rooms')
+    @command.argument("mxid", "full matrix ID", required=True)
+    async def kick_user(self, evt: MessageEvent, mxid: UserID) -> None:
+        await evt.mark_read()
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        user = mxid
+        msg = await evt.respond("starting the purge...")
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        purge_list = {}
+        error_list = {}
+
+        purge_list[user] = []
+        for room in roomlist:
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(room, 'm.room.name')
+                roomname = roomnamestate['name']
+
+                await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                await self.client.kick_user(room, user, reason='kicked')
+                if roomname:
+                    purge_list[user].append(roomname)
+                else:
+                    purge_list[user].append(room)
+                time.sleep(self.config['sleep'])
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(e)
+                error_list[user] = []
+                error_list[user].append(roomname or room)
+
+
+        results = "the following users were kicked:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(purge_list=purge_list, error_list=error_list)
+        await evt.respond(results, allow_html=True, edits=msg)
+        
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
 
     @community.subcommand("ban", help='kick and ban a specific user from the community and all rooms')
     @command.argument("mxid", "full matrix ID", required=True)
     async def ban_user(self, evt: MessageEvent, mxid: UserID) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            user = mxid
-            msg = await evt.respond("starting the ban...")
-            results_map = await self.ban_this_user(user, all_rooms=True)
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        user = mxid
+        msg = await evt.respond("starting the ban...")
+        results_map = await self.ban_this_user(user, all_rooms=True)
 
 
-            results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(ban_list=results_map['ban_list'],
-                                                                      error_list=results_map['error_list'])
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(ban_list=results_map['ban_list'],
+                                                                  error_list=results_map['error_list'])
+        await evt.respond(results, allow_html=True, edits=msg)
         
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
-
-        else:
-            await evt.reply("lol you don't have permission to do that")
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
 
     @community.subcommand("unban", help='unban a specific user from the community and all rooms')
     @command.argument("mxid", "full matrix ID", required=True)
     async def unban_user(self, evt: MessageEvent, mxid: UserID) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            user = mxid
-            msg = await evt.respond("starting the unban...")
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            unban_list = {}
-            error_list = {}
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            unban_list[user] = []
-            for room in roomlist:
-                try:
-                    roomname = None
-                    roomnamestate = await self.client.get_state_event(room, 'm.room.name')
-                    roomname = roomnamestate['name']
+        user = mxid
+        msg = await evt.respond("starting the unban...")
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        unban_list = {}
+        error_list = {}
 
-                    await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                    await self.client.unban_user(room, user, reason='unbanned')
-                    if roomname:
-                        unban_list[user].append(roomname)
-                    else:
-                        unban_list[user].append(room)
-                    time.sleep(self.config['sleep'])
-                except MNotFound:
-                    pass
-                except Exception as e:
-                    self.log.warning(e)
-                    error_list[user] = []
-                    error_list[user].append(roomname or room)
+        unban_list[user] = []
+        for room in roomlist:
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(room, 'm.room.name')
+                roomname = roomnamestate['name']
+
+                await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                await self.client.unban_user(room, user, reason='unbanned')
+                if roomname:
+                    unban_list[user].append(roomname)
+                else:
+                    unban_list[user].append(room)
+                time.sleep(self.config['sleep'])
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(e)
+                error_list[user] = []
+                error_list[user].append(roomname or room)
 
 
-            results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(unban_list=unban_list, error_list=error_list)
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(unban_list=unban_list, error_list=error_list)
+        await evt.respond(results, allow_html=True, edits=msg)
         
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
-
-        else:
-            await evt.reply("lol you don't have permission to do that")
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     @community.subcommand("redact", help="redact messages from a specific user (optionally in a specific room)")
     @command.argument("mxid", "full matrix ID", required=True)
     @command.argument("room", "room ID", required=False)
     async def mark_for_redaction(self, evt: MessageEvent, mxid: UserID, room: str) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if room:
-                if room.startswith('#'):
-                    room_id = await self.client.resolve_room_alias(room)
-                    room_id = room_id["room_id"]
-                else:
-                    room_id = room
-            else:
-                room_id = evt.room_id
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            # get list of messages to redact in this room
-            messages = await self.get_messages_to_redact(room_id, mxid)
-            for msg in messages:
-                await self.database.execute(
-                    "INSERT INTO redaction_tasks (event_id, room_id) VALUES ($1, $2)",
-                    msg.event_id,
-                    room_id
-                )
-            await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
+        if room:
+            if room.startswith('#'):
+                room_id = await self.client.resolve_room_alias(room)
+                room_id = room_id["room_id"]
+            else:
+                room_id = room
         else:
-            await evt.reply("lol you don't have permission to do that")
+            room_id = evt.room_id
+
+        # get list of messages to redact in this room
+        messages = await self.get_messages_to_redact(room_id, mxid)
+        for msg in messages:
+            await self.database.execute(
+                "INSERT INTO redaction_tasks (event_id, room_id) VALUES ($1, $2)",
+                msg.event_id,
+                room_id
+            )
+        await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
 
     async def create_room(self, roomname: str, evt: MessageEvent = None) -> None:
         """Create a new room and add it to the parent space.
@@ -935,10 +1070,17 @@ class CommunityBot(Plugin):
             
             # Set bot PL higher than admin so we can kick old admins if needed
             pl_override = {"users": {self.client.mxid: 1000}}
-            for u in self.config['admins']:
-                pl_override["users"][u] = 100
-            for u in self.config['moderators']:
-                pl_override["users"][u] = 50
+            
+            # Get power levels from parent room
+            parent_power_levels = await self.client.get_state_event(
+                self.config["parent_room"], 
+                EventType.ROOM_POWER_LEVELS
+            )
+            
+            # Copy power levels from parent room for all users
+            for user, level in parent_power_levels.users.items():
+                if user != self.client.mxid:  # Skip bot's power level
+                    pl_override["users"][user] = level
 
             if evt:
                 mymsg = await evt.respond(f"creating {sanitized_name}, give me a minute...")
@@ -996,156 +1138,212 @@ class CommunityBot(Plugin):
                             use `--encrypt` to ensure it is encrypted at creation time even if that isnt my default \
                             setting.')
         else:
-            if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-                await self.create_room(roomname, evt)
-            else:
-                await evt.reply("you're not the boss of me!")
+            if not await self.user_permitted(evt.sender):
+                await evt.reply("You don't have permission to use this command")
+                return
+
+            encrypted_flag_regex = re.compile(r'(\s+|^)-+encrypt(ed)?\s?')
+            force_encryption = bool(encrypted_flag_regex.search(roomname))
+            try:
+                if force_encryption:
+                    roomname = encrypted_flag_regex.sub('', roomname)
+                sanitized_name = re.sub(r"[^a-zA-Z0-9]", '', roomname).lower()
+                invitees = self.config['invitees']
+                parent_room = self.config['parent_room']
+                ## homeserver is derived from maubot's client instance since this is the user that will create the room
+                server = self.client.parse_user_id(self.client.mxid)[1]
+                # set bot PL higher than admin so we can kick old admins if needed
+                pl_override = {"users": {self.client.mxid: 1000}}
+                for u in self.config['admins']:
+                    pl_override["users"][u] = 100
+                for u in self.config['moderators']:
+                    pl_override["users"][u] = 50
+                pl_json = json.dumps(pl_override)
+
+                mymsg = await evt.respond(f"creating {sanitized_name}, give me a minute...")
+                #self.log.info(mymsg)
+                room_id = await self.client.create_room(alias_localpart=sanitized_name, name=roomname,
+                        invitees=invitees, power_level_override=pl_override)
+                time.sleep(self.config['sleep'])
+
+                await evt.respond(f"updating room states...", edits=mymsg)
+                parent_event_content = json.dumps({'auto_join': False, 'suggested': False, 'via': [server]})
+                child_event_content = json.dumps({'canonical': True, 'via': [server]})
+                join_rules_content = json.dumps({'join_rule': 'restricted', 'allow': [{'type': 'm.room_membership',
+                    'room_id': parent_room}]})
+
+                await self.client.send_state_event(parent_room, 'm.space.child', parent_event_content, state_key=room_id)
+                time.sleep(self.config['sleep'])
+                await self.client.send_state_event(room_id, 'm.space.parent', child_event_content, state_key=parent_room)
+                time.sleep(self.config['sleep'])
+                await self.client.send_state_event(room_id, 'm.room.join_rules', join_rules_content, state_key="")
+                time.sleep(self.config['sleep'])
+
+                if self.config["encrypt"] or force_encryption:
+                    encryption_content = json.dumps({"algorithm": "m.megolm.v1.aes-sha2"})
+
+                    await self.client.send_state_event(room_id, 'm.room.encryption', encryption_content,
+                                                       state_key="")
+                    await evt.respond(f"encrypting room...", edits=mymsg)
+                    time.sleep(self.config['sleep'])
+
+                await evt.respond(f"room created and updated, alias is #{sanitized_name}:{server}", edits=mymsg)
+
+
+            except Exception as e:
+                await evt.respond(f"i tried, but something went wrong: \"{e}\"", edits=mymsg)
 
     @community.subcommand("archive", help="archive a room")
     @command.argument("room", required=False)
     async def archive_room(self, evt: MessageEvent, room: str) -> None:
         await evt.mark_read()
 
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not room:
-                room_id = evt.room_id
-                self.log.debug(f"DEBUG room we are archiving is {room_id}")
-            elif room and room.startswith('#'):
-                try:
-                    self.log.debug(f"DEBUG trying to resolve alias {room}")
-                    room_id = await self.client.resolve_room_alias(room)
-                    room_id = room_id["room_id"]
-                    self.log.debug(f"DEBUG room we are archiving is {room_id}")
-                except Exception as e:
-                    evt.reply("i couldn't resolve that alias, sorry")
-                    self.log.error(f"error resolving alias {room}: {e}")
-                    return
-            elif room and room.startswith('!'):
-                room_id = room
-                self.log.debug(f"DEBUG room we are archiving is {room_id}")
-            else:
-                evt.reply("i don't recognize that room, sorry")
-                return
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            success = await self.do_archive_room(room_id, evt)
-            
-            # Only try to respond if we're not archiving the room we're in
-            if success and room_id != evt.room_id:
-                await evt.respond("Room has been archived.")
+        if not room:
+            room_id = evt.room_id
+            self.log.debug(f"DEBUG room we are archiving is {room_id}")
+        elif room and room.startswith('#'):
+            try:
+                self.log.debug(f"DEBUG trying to resolve alias {room}")
+                room_id = await self.client.resolve_room_alias(room)
+                room_id = room_id["room_id"]
+                self.log.debug(f"DEBUG room we are archiving is {room_id}")
+            except Exception as e:
+                evt.reply("i couldn't resolve that alias, sorry")
+                self.log.error(f"error resolving alias {room}: {e}")
+                return
+        elif room and room.startswith('!'):
+            room_id = room
+            self.log.debug(f"DEBUG room we are archiving is {room_id}")
+        else:
+            evt.reply("i don't recognize that room, sorry")
+            return
+
+        success = await self.do_archive_room(room_id, evt)
+        
+        # Only try to respond if we're not archiving the room we're in
+        if success and room_id != evt.room_id:
+            await evt.respond("Room has been archived.")
 
     @community.subcommand("replaceroom", help="replace a room with a new one")
     @command.argument("room", required=False)
     async def replace_room(self, evt: MessageEvent, room: str) -> None:
         await evt.mark_read()
 
-        if evt.sender in self.config["admins"] or evt.sender in self.config["moderators"]:
-            if not room:
-                room = evt.room_id
-            # first we need to get relevant room state of the room we want to replace
-            # this includes the room name, alias, and join rules
-            if room.startswith('#'):
-                room_id = await self.client.resolve_room_alias(room)
-                room_id = room_id["room_id"]
-            else:
-                room_id = room
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            # Check bot permissions in the old room
-            has_perms, error_msg, _ = await self.check_bot_permissions(
-                room_id, 
-                evt,
-                ["state", "tombstone", "power_levels"]
-            )
-            if not has_perms:
-                await evt.respond(f"Cannot replace room: {error_msg}")
-                return
+        if not room:
+            room = evt.room_id
+        # first we need to get relevant room state of the room we want to replace
+        # this includes the room name, alias, and join rules
+        if room.startswith('#'):
+            room_id = await self.client.resolve_room_alias(room)
+            room_id = room_id["room_id"]
+        else:
+            room_id = room
 
-            # Get the room name from the state event
+        # Check bot permissions in the old room
+        has_perms, error_msg, _ = await self.check_bot_permissions(
+            room_id, 
+            evt,
+            ["state", "tombstone", "power_levels"]
+        )
+        if not has_perms:
+            await evt.respond(f"Cannot replace room: {error_msg}")
+            return
+
+        # Get the room name from the state event
+        try:
+            room_name_event = await self.client.get_state_event(room_id, EventType.ROOM_NAME)
+            room_name = room_name_event.name
+        except Exception as e:
+            self.log.warning(f"Failed to get room name: {e}")
+            #await evt.respond("Could not find room name in state events")
+            pass
+
+        # get the room topic from the state event
+        try:
+            room_topic_event = await self.client.get_state_event(room_id, EventType.ROOM_TOPIC)
+            room_topic = room_topic_event.topic
+        except Exception as e:
+            self.log.warning(f"Failed to get room topic: {e}")
+            pass
+
+        # Get list of aliases to transfer while removing them from the old room
+        aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
+
+        # Now we can start the process of replacing the room
+        # First we need to create the new room. this will create the initial alias,
+        # as well as bot defaults such as power levels, initial invitations, encryption,
+        # and space membership
+        new_room_id, new_room_alias = await self.create_room(room_name, evt)
+        if not new_room_id:
+            await evt.respond("Failed to create new room")
+            return
+
+        # Check bot permissions in the new room
+        has_perms, error_msg, _ = await self.check_bot_permissions(
+            new_room_id, 
+            evt,
+            ["state", "tombstone", "power_levels"]
+        )
+        if not has_perms:
+            await evt.respond(f"Created new room but cannot complete replacement: {error_msg}")
+            return
+
+        # Transfer the aliases to the new room
+        for alias in aliases_to_transfer:
+            localpart = alias.split(':')[0][1:]  # Remove # and get localpart
+            server = alias.split(':')[1]
             try:
-                room_name_event = await self.client.get_state_event(room_id, EventType.ROOM_NAME)
-                room_name = room_name_event.name
+                await self.client.add_room_alias(new_room_id, localpart)
+                self.log.info(f"Successfully transferred alias {alias} to new room {new_room_id}")
             except Exception as e:
-                self.log.warning(f"Failed to get room name: {e}")
-                #await evt.respond("Could not find room name in state events")
-                pass
-
-            # get the room topic from the state event
-            try:
-                room_topic_event = await self.client.get_state_event(room_id, EventType.ROOM_TOPIC)
-                room_topic = room_topic_event.topic
-            except Exception as e:
-                self.log.warning(f"Failed to get room topic: {e}")
-                pass
-
-            # Get list of aliases to transfer while removing them from the old room
-            aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
-
-            # Now we can start the process of replacing the room
-            # First we need to create the new room. this will create the initial alias,
-            # as well as bot defaults such as power levels, initial invitations, encryption,
-            # and space membership
-            new_room_id, new_room_alias = await self.create_room(room_name, evt)
-            if not new_room_id:
-                await evt.respond("Failed to create new room")
-                return
-
-            # Check bot permissions in the new room
-            has_perms, error_msg, _ = await self.check_bot_permissions(
-                new_room_id, 
-                evt,
-                ["state", "tombstone", "power_levels"]
-            )
-            if not has_perms:
-                await evt.respond(f"Created new room but cannot complete replacement: {error_msg}")
-                return
-
-            # Transfer the aliases to the new room
-            for alias in aliases_to_transfer:
-                localpart = alias.split(':')[0][1:]  # Remove # and get localpart
-                server = alias.split(':')[1]
+                # If transfer failed, try to create a modified alias
+                modified_alias = f"{localpart}NEW"
                 try:
-                    await self.client.add_room_alias(new_room_id, localpart)
-                    self.log.info(f"Successfully transferred alias {alias} to new room {new_room_id}")
-                except Exception as e:
-                    # If transfer failed, try to create a modified alias
-                    modified_alias = f"{localpart}NEW"
-                    try:
-                        await self.client.add_room_alias(new_room_id, modified_alias)
-                        self.log.info(f"Successfully transferred modified alias {modified_alias} to new room {new_room_id}")
-                    except Exception as e2:
-                        self.log.error(f"Failed to transfer modified alias {modified_alias}: {e2}")
+                    await self.client.add_room_alias(new_room_id, modified_alias)
+                    self.log.info(f"Successfully transferred modified alias {modified_alias} to new room {new_room_id}")
+                except Exception as e2:
+                    self.log.error(f"Failed to transfer modified alias {modified_alias}: {e2}")
 
-            # Get the room avatar from the old room
-            try:
-                old_room_avatar = await self.client.get_state_event(room_id, EventType.ROOM_AVATAR)
-                if old_room_avatar and old_room_avatar.url:
-                    # Set the same avatar in the new room
-                    await self.client.send_state_event(
-                        new_room_id,
-                        EventType.ROOM_AVATAR,
-                        {"url": old_room_avatar.url}
-                    )
-                    self.log.info(f"Successfully copied room avatar to new room {new_room_id}")
-            except Exception as e:
-                self.log.error(f"Failed to copy room avatar to new room: {e}")
-                #await evt.respond(f"Failed to copy room avatar to new room: {e}")
-
-            # Set the room topic in the new room
-            try:
+        # Get the room avatar from the old room
+        try:
+            old_room_avatar = await self.client.get_state_event(room_id, EventType.ROOM_AVATAR)
+            if old_room_avatar and old_room_avatar.url:
+                # Set the same avatar in the new room
                 await self.client.send_state_event(
                     new_room_id,
-                    EventType.ROOM_TOPIC,
-                    {"topic": room_topic}
+                    EventType.ROOM_AVATAR,
+                    {"url": old_room_avatar.url}
                 )
-                self.log.info(f"Successfully copied room topic to new room {new_room_id}")
-            except Exception as e:
-                self.log.error(f"Failed to copy room topic to new room: {e}")
-                #await evt.respond(f"Failed to copy room topic to new room: {e}")
-            
+                self.log.info(f"Successfully copied room avatar to new room {new_room_id}")
+        except Exception as e:
+            self.log.error(f"Failed to copy room avatar to new room: {e}")
+            #await evt.respond(f"Failed to copy room avatar to new room: {e}")
 
-            # Archive the old room with a pointer to the new room
-            success = await self.do_archive_room(room_id, evt, new_room_id)
-            if not success:
-                await evt.respond("Failed to archive old room, but new room has been created")
+        # Set the room topic in the new room
+        try:
+            await self.client.send_state_event(
+                new_room_id,
+                EventType.ROOM_TOPIC,
+                {"topic": room_topic}
+            )
+            self.log.info(f"Successfully copied room topic to new room {new_room_id}")
+        except Exception as e:
+            self.log.error(f"Failed to copy room topic to new room: {e}")
+            #await evt.respond(f"Failed to copy room topic to new room: {e}")
+        
+
+        # Archive the old room with a pointer to the new room
+        success = await self.do_archive_room(room_id, evt, new_room_id)
+        if not success:
+            await evt.respond("Failed to archive old room, but new room has been created")
 
     @community.subcommand("guests", help="generate a list of members in a room who are not members of the parent space")
     @command.argument("room", required=False)
@@ -1202,68 +1400,68 @@ class CommunityBot(Plugin):
     @community.subcommand("setpower", help="set power levels according to the community configuration")
     async def set_powerlevels(self, evt: MessageEvent,) -> None:
         await evt.mark_read()
-        if evt.sender in self.config["admins"]:
-            msg = await evt.respond("truing up power levels, this could take a minute...")
-            admins = self.config['admins']
-            moderators = self.config['moderators']
-            roomlist = await self.get_space_roomlist()
-            # don't forget to include the space itself
-            roomlist.append(self.config["parent_room"])
-            success_list = []
-            error_list = []
-            adminpl = 100
-            modpl = 50
-            defaultpl = 0
+        if not await self.user_permitted(evt.sender, min_level=100):
+            await evt.reply("You don't have permission to use this command")
+            return
 
-            for room in roomlist:
-                # need to get and evaluate the current state that contains powerlevels first
-                current_pl = await self.client.get_state_event(room, 'm.room.power_levels')
-                users = current_pl['users'].serialize()
-                updated_user_map = dict(users)
-                try:
-                    roomname = None
-                    roomnamestate = await self.client.get_state_event(room, 'm.room.name')
-                    roomname = roomnamestate['name']
-                except Exception as e:
-                    self.log.warning(e)
+        msg = await evt.respond("truing up power levels, this could take a minute...")
+        admins = self.config['admins']
+        moderators = self.config['moderators']
+        roomlist = await self.get_space_roomlist()
+        # don't forget to include the space itself
+        roomlist.append(self.config["parent_room"])
+        success_list = []
+        error_list = []
+        adminpl = 100
+        modpl = 50
+        defaultpl = 0
 
-                # update our powerlevel map values
-                for user in admins:
-                    updated_user_map[user] = adminpl
-                for user in moderators:
-                    updated_user_map[user] = modpl
+        for room in roomlist:
+            # need to get and evaluate the current state that contains powerlevels first
+            current_pl = await self.client.get_state_event(room, 'm.room.power_levels')
+            users = current_pl['users'].serialize()
+            updated_user_map = dict(users)
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(room, 'm.room.name')
+                roomname = roomnamestate['name']
+            except Exception as e:
+                self.log.warning(e)
 
-                # revoke values for people no longer in the config
-                for user in users.keys():
-                    if ( user not in admins and 
-                            user not in moderators and 
-                            updated_user_map[user] > defaultpl and 
-                            user != self.client.mxid ):
-                        del updated_user_map[user]
+            # update our powerlevel map values
+            for user in admins:
+                updated_user_map[user] = adminpl
+            for user in moderators:
+                updated_user_map[user] = modpl
+
+            # revoke values for people no longer in the config
+            for user in users.keys():
+                if ( user not in admins and 
+                        user not in moderators and 
+                        updated_user_map[user] > defaultpl and 
+                        user != self.client.mxid ):
+                    del updated_user_map[user]
 
 
-                # and send the new state event back to the room
-                new_pl = current_pl
-                new_pl['users'] = updated_user_map
-                try:
-                    #self.log.debug(f"DEBUG sending finalized PL map to room {room}: {updated_user_map}")
-                    await self.client.send_state_event(room, 'm.room.power_levels', new_pl)
-                    success_list.append(roomname or room)
-                except Exception as e:
-                    self.log.warning(e)
-                    error_list.append(roomname or room)
+            # and send the new state event back to the room
+            new_pl = current_pl
+            new_pl['users'] = updated_user_map
+            try:
+                #self.log.debug(f"DEBUG sending finalized PL map to room {room}: {updated_user_map}")
+                await self.client.send_state_event(room, 'm.room.power_levels', new_pl)
+                success_list.append(roomname or room)
+            except Exception as e:
+                self.log.warning(e)
+                error_list.append(roomname or room)
 
-                time.sleep(self.config['sleep'])
+            time.sleep(self.config['sleep'])
 
-            results = "the following rooms were updated:<p><code>{success_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(success_list=success_list, error_list=error_list)
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following rooms were updated:<p><code>{success_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(success_list=success_list, error_list=error_list)
+        await evt.respond(results, allow_html=True, edits=msg)
         
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
-
-        else:
-            await evt.reply("lol you don't have permission to do that")
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     
 
