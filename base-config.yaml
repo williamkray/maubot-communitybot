@@ -1,12 +1,15 @@
 # the room-id of the matrix room or space to use as your "full user list"
+# changes to user power levelsin this room will affect all rooms in the space
 parent_room: "!somerandomcharacters:server.tld"
 
 # sleep time between actions. you can drop this to 0 if your bot has no
 # ratelimits imposed on its homeserver, otherwise you may want to increase this
 # to avoid errors.
-sleep: 1
+sleep: 5
 
-# whether to encrypt rooms when using the room creation commands 
+# whether to encrypt rooms when using the room creation commands
+# when this is false, you can still use the --encrypt flag to force encryption
+# when creating new rooms
 encrypt: False
 
 # number of days of inactivity to be considered in the "warning zone"
@@ -27,18 +30,14 @@ track_messages: True
 track_reactions: True
 
 # list of users who can use administrative commands. these users will also be made room admins (PL100)
-# DEPRECATED: set powerlevels in the parent room instead.
-admins:
-  - '@user1:server.tld'
-  - '@user2:server.tld'
+# DEPRECATED: set user powerlevels in the parent room instead.
+admins: []
 
 # list of users who should be considered community moderators. these users will be made room mods (PL50)
-# DEPRECATED: set powerlevels in the parent room instead.
-moderators:
-  - '@user3:server.tld'
-  - '@user4:server.tld'
+# DEPRECATED: set userpowerlevels in the parent room instead.
+moderators: []
 
-# list of users who should be invited to new rooms immediately (other bots perhaps)
+# list of users who should be invited to new rooms immediately (other bots, moderators, perhaps)
 invitees:
 - "@mybot:server.tld"
 - "@secondaryadmin:server.tld"

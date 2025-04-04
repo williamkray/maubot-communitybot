@@ -943,21 +943,21 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
 
-            try:
-                Client.parse_user_id(mxid)
-                await self.database.execute(
-                    "UPDATE user_events SET ignore_inactivity = 1 WHERE \
-                        mxid = $1",
-                    mxid,
-                )
-                self.log.info(f"{mxid} set to ignore inactivity")
-                await evt.react("✅")
-            except Exception as e:
-                await evt.respond(f"{e}")
+        try:
+            Client.parse_user_id(mxid)
+            await self.database.execute(
+                "UPDATE user_events SET ignore_inactivity = 1 WHERE \
+                    mxid = $1",
+                mxid,
+            )
+            self.log.info(f"{mxid} set to ignore inactivity")
+            await evt.react("✅")
+        except Exception as e:
+            await evt.respond(f"{e}")
 
     @community.subcommand(
         "unignore", help="re-enable activity tracking for a specific matrix ID"
@@ -968,21 +968,21 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
 
-            try:
-                Client.parse_user_id(mxid)
-                await self.database.execute(
-                    "UPDATE user_events SET ignore_inactivity = 0 WHERE \
-                        mxid = $1",
-                    mxid,
-                )
-                self.log.info(f"{mxid} set to track inactivity")
-                await evt.react("✅")
-            except Exception as e:
-                await evt.respond(f"{e}")
+        try:
+            Client.parse_user_id(mxid)
+            await self.database.execute(
+                "UPDATE user_events SET ignore_inactivity = 0 WHERE \
+                    mxid = $1",
+                mxid,
+            )
+            self.log.info(f"{mxid} set to track inactivity")
+            await evt.react("✅")
+        except Exception as e:
+            await evt.respond(f"{e}")
 
     @community.subcommand(
         "report", help="generate a list of matrix IDs that have been inactive"
@@ -992,22 +992,22 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            if not self.config["track_users"]:
-                await evt.reply("user tracking is disabled")
-                return
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
 
-            sync_results = await self.do_sync()
-            report = await self.generate_report()
-            await evt.respond(
-                f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
-                    {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['warn_inactive'])} <br /></p>\
-                    <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                    {'<br />'.join(report['kick_inactive'])} <br /></p> \
-                    <p><b>Ignored users:</b><br /> \
-                    {'<br />'.join(report['ignored'])}</p>",
-                allow_html=True,
-            )
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(
+            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
+                {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['warn_inactive'])} <br /></p>\
+                <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['kick_inactive'])} <br /></p> \
+                <p><b>Ignored users:</b><br /> \
+                {'<br />'.join(report['ignored'])}</p>",
+            allow_html=True,
+        )
 
     @community.subcommand("purge", help="kick users for excessive inactivity")
     async def kick_users(self, evt: MessageEvent) -> None:
@@ -1016,49 +1016,49 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            msg = await evt.respond("starting the purge...")
-            report = await self.generate_report()
-            purgeable = report["kick_inactive"]
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            purge_list = {}
-            error_list = {}
+        msg = await evt.respond("starting the purge...")
+        report = await self.generate_report()
+        purgeable = report["kick_inactive"]
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        purge_list = {}
+        error_list = {}
 
-            for user in purgeable:
-                purge_list[user] = []
-                for room in roomlist:
-                    try:
-                        roomname = None
-                        roomnamestate = await self.client.get_state_event(
-                            room, "m.room.name"
-                        )
-                        roomname = roomnamestate["name"]
+        for user in purgeable:
+            purge_list[user] = []
+            for room in roomlist:
+                try:
+                    roomname = None
+                    roomnamestate = await self.client.get_state_event(
+                        room, "m.room.name"
+                    )
+                    roomname = roomnamestate["name"]
 
-                        await self.client.get_state_event(
-                            room, EventType.ROOM_MEMBER, user
-                        )
-                        await self.client.kick_user(room, user, reason="inactivity")
-                        if roomname:
-                            purge_list[user].append(roomname)
-                        else:
-                            purge_list[user].append(room)
-                        time.sleep("sleep")
-                    except MNotFound:
-                        pass
-                    except Exception as e:
-                        self.log.warning(e)
-                        error_list[user] = []
-                        error_list[user].append(roomname or room)
+                    await self.client.get_state_event(
+                        room, EventType.ROOM_MEMBER, user
+                    )
+                    await self.client.kick_user(room, user, reason="inactivity")
+                    if roomname:
+                        purge_list[user].append(roomname)
+                    else:
+                        purge_list[user].append(room)
+                    time.sleep("sleep")
+                except MNotFound:
+                    pass
+                except Exception as e:
+                    self.log.warning(e)
+                    error_list[user] = []
+                    error_list[user].append(roomname or room)
 
-            results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(
-                purge_list=purge_list, error_list=error_list
-            )
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            purge_list=purge_list, error_list=error_list
+        )
+        await evt.respond(results, allow_html=True, edits=msg)
 
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     @community.subcommand(
         "kick", help="kick a specific user from the community and all rooms"
@@ -1070,45 +1070,45 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            user = mxid
-            msg = await evt.respond("starting the purge...")
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            purge_list = {}
-            error_list = {}
+        user = mxid
+        msg = await evt.respond("starting the purge...")
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        purge_list = {}
+        error_list = {}
 
-            purge_list[user] = []
-            for room in roomlist:
-                try:
-                    roomname = None
-                    roomnamestate = await self.client.get_state_event(
-                        room, "m.room.name"
-                    )
-                    roomname = roomnamestate["name"]
+        purge_list[user] = []
+        for room in roomlist:
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(
+                    room, "m.room.name"
+                )
+                roomname = roomnamestate["name"]
 
-                    await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                    await self.client.kick_user(room, user, reason="kicked")
-                    if roomname:
-                        purge_list[user].append(roomname)
-                    else:
-                        purge_list[user].append(room)
-                    time.sleep(self.config["sleep"])
-                except MNotFound:
-                    pass
-                except Exception as e:
-                    self.log.warning(e)
-                    error_list[user] = []
-                    error_list[user].append(roomname or room)
+                await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                await self.client.kick_user(room, user, reason="kicked")
+                if roomname:
+                    purge_list[user].append(roomname)
+                else:
+                    purge_list[user].append(room)
+                time.sleep(self.config["sleep"])
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(e)
+                error_list[user] = []
+                error_list[user].append(roomname or room)
 
-            results = "the following users were kicked:<p><code>{purge_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(
-                purge_list=purge_list, error_list=error_list
-            )
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were kicked:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            purge_list=purge_list, error_list=error_list
+        )
+        await evt.respond(results, allow_html=True, edits=msg)
 
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     @community.subcommand(
         "ban", help="kick and ban a specific user from the community and all rooms"
@@ -1120,18 +1120,18 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            user = mxid
-            msg = await evt.respond("starting the ban...")
-            results_map = await self.ban_this_user(user, all_rooms=True)
+        user = mxid
+        msg = await evt.respond("starting the ban...")
+        results_map = await self.ban_this_user(user, all_rooms=True)
 
-            results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(
-                ban_list=results_map["ban_list"], error_list=results_map["error_list"]
-            )
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            ban_list=results_map["ban_list"], error_list=results_map["error_list"]
+        )
+        await evt.respond(results, allow_html=True, edits=msg)
 
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     @community.subcommand(
         "unban", help="unban a specific user from the community and all rooms"
@@ -1143,45 +1143,45 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-            user = mxid
-            msg = await evt.respond("starting the unban...")
-            roomlist = await self.get_space_roomlist()
-            # don't forget to kick from the space itself
-            roomlist.append(self.config["parent_room"])
-            unban_list = {}
-            error_list = {}
+        user = mxid
+        msg = await evt.respond("starting the unban...")
+        roomlist = await self.get_space_roomlist()
+        # don't forget to kick from the space itself
+        roomlist.append(self.config["parent_room"])
+        unban_list = {}
+        error_list = {}
 
-            unban_list[user] = []
-            for room in roomlist:
-                try:
-                    roomname = None
-                    roomnamestate = await self.client.get_state_event(
-                        room, "m.room.name"
-                    )
-                    roomname = roomnamestate["name"]
+        unban_list[user] = []
+        for room in roomlist:
+            try:
+                roomname = None
+                roomnamestate = await self.client.get_state_event(
+                    room, "m.room.name"
+                )
+                roomname = roomnamestate["name"]
 
-                    await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-                    await self.client.unban_user(room, user, reason="unbanned")
-                    if roomname:
-                        unban_list[user].append(roomname)
-                    else:
-                        unban_list[user].append(room)
-                    time.sleep(self.config["sleep"])
-                except MNotFound:
-                    pass
-                except Exception as e:
-                    self.log.warning(e)
-                    error_list[user] = []
-                    error_list[user].append(roomname or room)
+                await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
+                await self.client.unban_user(room, user, reason="unbanned")
+                if roomname:
+                    unban_list[user].append(roomname)
+                else:
+                    unban_list[user].append(room)
+                time.sleep(self.config["sleep"])
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(e)
+                error_list[user] = []
+                error_list[user].append(roomname or room)
 
-            results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
-                    recorded:<p><code>{error_list}</code></p>".format(
-                unban_list=unban_list, error_list=error_list
-            )
-            await evt.respond(results, allow_html=True, edits=msg)
+        results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            unban_list=unban_list, error_list=error_list
+        )
+        await evt.respond(results, allow_html=True, edits=msg)
 
-            # sync our database after we've made changes to room memberships
-            await self.do_sync()
+        # sync our database after we've made changes to room memberships
+        await self.do_sync()
 
     @community.subcommand(
         "redact",
