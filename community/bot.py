@@ -1779,6 +1779,57 @@ Please send a message to this chat with the phrase: "{verification_phrase}" """
             self.log.error(error_msg)
             await evt.respond(error_msg, edits=msg)
 
+    @community.subcommand(
+        "verify-migrate",
+        help="migrate a room to a verification-based permission model, ensuring current members can still send messages while new joiners require verification",
+    )
+    async def verify_migrate(self, evt: MessageEvent) -> None:
+        await evt.mark_read()
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        msg = await evt.respond("Starting room migration...")
+
+        try:
+            # Get current room members
+            members = await self.client.get_joined_members(evt.room_id)
+            member_list = list(members.keys())
+
+            # Get current power levels
+            power_levels = await self.client.get_state_event(
+                evt.room_id, EventType.ROOM_POWER_LEVELS
+            )
+
+            # Get the required power level for sending messages
+            events_default = power_levels.events_default
+            events = power_levels.events
+            required_level = events.get(str(EventType.ROOM_MESSAGE), events_default)
+
+            # Set default power level to n-1 (usually 0)
+            power_levels.users_default = required_level - 1
+
+            # Set members to required level only if their current level is lower
+            for member in member_list:
+                current_level = power_levels.get_user_level(member)
+                if current_level < required_level:
+                    power_levels.users[member] = required_level
+
+            # Send updated power levels
+            await self.client.send_state_event(
+                evt.room_id, EventType.ROOM_POWER_LEVELS, power_levels
+            )
+
+            await evt.respond(
+                f"Room migration complete. Current members can send messages, new joiners will require verification.",
+                edits=msg
+            )
+
+        except Exception as e:
+            error_msg = f"Failed to migrate room: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg, edits=msg)
+
     @classmethod
     def get_db_upgrade_table(cls) -> None:
         return upgrade_table
