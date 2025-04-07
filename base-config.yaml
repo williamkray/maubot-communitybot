@@ -116,3 +116,25 @@ proactive_banning: true
 
 # should we redact messages when a user is banned?
 redact_on_ban: true
+
+# should we verify that users are human before allowing them to send messages?
+# can be boolean (true/false) for all-or-nothing behavior,
+# or pass a list of room IDs to only verify users in certain rooms
+# use this in conjunction with room power-levels that require elevated permission
+# to send messages in a room.
+check_if_human: false
+
+# list of phrases that users must type to verify they are human
+# if check_if_human is true but this list is empty, verification will be skipped
+# make these your favorite movie quotes, core values of your community, or
+# whatever you want. the more unique and obscure, the better.
+verification_phrases: 
+- Yes, I am a human!
+- I am a robot, but I'm nice.
+- My name is Inigo Montoya.
+- The wet bird flies at night.
+- Be excellent to each other.
+- Party on, dudes.
+
+# number of attempts a user has to enter the correct verification phrase
+verification_attempts: 3

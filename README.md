@@ -148,6 +148,26 @@ please keep in mind that wordlist-based censorship is problematic and may redact
 algorithm that is perfect is impossible. consider configuring your community such that censorship need only be applied
 in a limited subset of rooms.
 
+# user verification
+
+configure your rooms (all, or a list of room-ids) to use the `check_if_human` setting. use this in conjunction with a room power-level configuration that
+requires elevated permission to send messages. for example, a "waiting-room"
+with a default power level of -1 for new users, while the power-level required
+to send messages in that room remains 0.
+
+enabling this and associated configuration will perform the following
+validation:
+
+1. when a user joins one of these rooms, the bot will check to see if they have
+   permission to send messages.
+2. if not, the bot will start a DM with that user and ask them to repeat a phrase,
+   randomly chosen from your list of verification phrases. they have three tries.
+3. when they send the matching verification phrase, the bot will bump their power
+   level up to that required to send messages in your room, and leave the DM.
+
+not the most user-friendly experience, but may help cut down if you are experiencing
+significant spam in your rooms.
+
 # installation
 
 install this like any other maubot plugin: zip the contents of this repo into a file and upload via the web interface,
