@@ -627,13 +627,13 @@ class CommunityBot(Plugin):
                     list_id = l_id["room_id"]
                     time.sleep(self.config["sleep"])
                     # self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
-                except:
-                    self.log.error(f"Banlist fetching failed for {l}")
-                    return
+                    banlist_roomids.append(list_id)
+                except Exception as e:
+                    self.log.error(f"Banlist fetching failed for {l}: {e}")
+                    continue
             else:
                 list_id = l
-
-            banlist_roomids.append(list_id)
+                banlist_roomids.append(list_id)
 
         return banlist_roomids
 
@@ -1649,6 +1649,37 @@ Please send a message to this chat with the phrase: "{verification_phrase}" """
             await evt.respond(
                 "Failed to archive old room, but new room has been created"
             )
+
+        # update instances of the old room id in any config values that use it
+        config_keys = [
+            "parent_room",
+            "notification_room",
+            "censor",
+            "check_if_human",
+            "banlists",
+            "greeting_rooms"
+        ]
+        
+        for key in config_keys:
+            value = self.config[key]
+            if isinstance(value, str):
+                if value == room_id:
+                    self.config[key] = new_room_id
+            elif isinstance(value, list):
+                # Handle lists that might contain room IDs
+                if room_id in value:
+                    self.config[key] = [new_room_id if x == room_id else x for x in value]
+            elif isinstance(value, dict):
+                # Handle dictionaries that might use room IDs as keys
+                if room_id in value:
+                    self.config[key][new_room_id] = self.config[key].pop(room_id)
+                # Also check if any values in the dict are room IDs
+                for dict_key, dict_value in value.items():
+                    if dict_value == room_id:
+                        self.config[key][dict_key] = new_room_id
+
+        # Save the updated config
+        self.config.save()
 
     @community.subcommand(
         "guests",
