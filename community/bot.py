@@ -373,7 +373,7 @@ class CommunityBot(Plugin):
             required_permissions: List of specific permissions to check. If None, checks basic room access.
 
         Returns:
-            tuple: (bool, str, dict) - (has_permissions, error_message, permission_details)
+            tuple: (has_permissions, error_message, permission_details)
         """
         try:
             # Check if bot is in the room
@@ -753,6 +753,54 @@ class CommunityBot(Plugin):
 
         except Exception as e:
             self.log.error(f"Error syncing power levels: {e}")
+
+    async def handle_leave_events(self, evt: StateEvent) -> None:
+        """Common logic for handling membership changes (leave/kick/ban)."""
+        if evt.source & SyncStream.STATE:
+            self.log.debug(f"Sync stream leave event for {evt.state_key} in {evt.room_id} detected")
+            return
+        else:
+            # check if the room the person left is protected by check_if_human
+            # kick and ban events are sent by other people, so we need to use the state_key
+            # when referring to the user who left
+            user_id = evt.state_key
+            self.log.debug(f"membership change event for {user_id} in {evt.room_id} detected")
+            if (
+                isinstance(self.config["check_if_human"], bool) and self.config["check_if_human"]
+            ) or (
+                isinstance(self.config["check_if_human"], list) and evt.room_id in self.config["check_if_human"]
+            ):
+                self.log.debug(f"Checking if {user_id} is a verified user in {evt.room_id}")
+                pl_state = await self.client.get_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS)
+                try:
+                    user_level = pl_state.get_user_level(user_id)
+                except Exception as e:
+                    self.log.error(f"Failed to get user level for {user_id} in {evt.room_id}: {e}")
+                    return
+                default_level = pl_state.users_default
+                self.log.debug(f"User {user_id} has power level {user_level}, default level is {default_level}")
+                if user_level == ( default_level + 1 ): # indicates verified user
+                    self.log.debug(f"Removing {user_id} from power levels state event in {evt.room_id}")
+                    pl_state.users.pop(user_id)
+                    try:
+                        await self.client.send_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS, pl_state)
+                    except Exception as e:
+                        self.log.error(f"Failed to update power levels state event in {evt.room_id}: {e}")
+
+    @event.on(InternalEventType.LEAVE)
+    async def handle_leave(self, evt: StateEvent) -> None:
+        """Handle voluntary leave events."""
+        await self.handle_leave_events(evt)
+
+    @event.on(InternalEventType.KICK)
+    async def handle_kick(self, evt: StateEvent) -> None:
+        """Handle kick events."""
+        await self.handle_leave_events(evt)
+
+    @event.on(InternalEventType.BAN)
+    async def handle_ban(self, evt: StateEvent) -> None:
+        """Handle ban events."""
+        await self.handle_leave_events(evt)
 
     @event.on(InternalEventType.JOIN)
     async def newjoin(self, evt: StateEvent) -> None:
