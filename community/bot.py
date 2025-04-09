@@ -302,9 +302,10 @@ class CommunityBot(Plugin):
                     else:
                         pass
                 except Exception as e:
-                    self.log.debug(
-                        f"Found something funny in the banlist {list_id} for {rule['content']}: {e}"
-                    )
+                    # commenting this out because it generates a lot of noise
+                    #self.log.debug(
+                    #    f"Found something funny in the banlist {list_id} for {rule['content']}: {e}"
+                    #)
                     pass
         # if we haven't exited by now, we must not be banned!
         return is_banned
@@ -767,6 +768,11 @@ class CommunityBot(Plugin):
                 await self.do_sync()
             # greeting activities
             room_id = str(evt.room_id)
+            self.log.debug(f"New join in room {room_id} by {evt.sender}")
+            self.log.debug(f"Greeting rooms config: {self.config['greeting_rooms']}")
+            self.log.debug(f"Check if human config: {self.config['check_if_human']}")
+            self.log.debug(f"Verification phrases config: {self.config['verification_phrases']}")
+            
             if room_id in self.config["greeting_rooms"]:
                 if on_banlist:
                     return
@@ -804,6 +810,8 @@ class CommunityBot(Plugin):
                     elif isinstance(self.config["check_if_human"], list):
                         verification_enabled = evt.room_id in self.config["check_if_human"]
                     
+                    self.log.debug(f"Verification enabled for room {room_id}: {verification_enabled}")
+                    
                     if not verification_enabled:
                         return
 
@@ -827,6 +835,8 @@ class CommunityBot(Plugin):
                         # Get the required power level for sending messages
                         required_level = events.get(str(EventType.ROOM_MESSAGE), events_default)
                         
+                        self.log.debug(f"User {evt.sender} has power level {user_level}, required level is {required_level}")
+                        
                         # If user already has sufficient power level, skip verification
                         if user_level >= required_level:
                             self.log.debug(f"User {evt.sender} already has sufficient power level ({user_level} >= {required_level})")
@@ -836,17 +846,24 @@ class CommunityBot(Plugin):
                         return
 
                     # Create DM room with name
-                    dm_room = await self.client.create_room(
-                        preset=RoomCreatePreset.PRIVATE,
-                        invitees=[evt.sender],
-                        is_direct=True,
-                        initial_state=[
-                            {
-                                "type": str(EventType.ROOM_NAME),
-                                "content": {"name": f"{roomname} join verification check"}
-                            }
-                        ]
-                    )
+                    try:
+                        dm_room = await self.client.create_room(
+                            preset=RoomCreatePreset.PRIVATE,
+                            invitees=[evt.sender],
+                            is_direct=True,
+                            initial_state=[
+                                {
+                                    "type": str(EventType.ROOM_NAME),
+                                    "content": {"name": f"{roomname} join verification check"}
+                                }
+                            ]
+                        )
+                        self.log.info(f"Created DM room {dm_room} for {evt.sender}")
+                        
+                            
+                    except Exception as e:
+                        self.log.error(f"Failed to initiate verification process: {e}")
+                        return
 
                     # Select random verification phrase
                     verification_phrase = random.choice(self.config["verification_phrases"])
@@ -865,6 +882,7 @@ class CommunityBot(Plugin):
 
 Please send a message to this chat with the phrase: "{verification_phrase}" """
                     await self.client.send_notice(dm_room, greeting)
+                    self.log.info(f"Started verification process for {evt.sender} in room {room_id}")
 
                 except Exception as e:
                     self.log.error(f"Failed to start verification process: {e}")
@@ -902,6 +920,11 @@ Please send a message to this chat with the phrase: "{verification_phrase}" """
                     evt.room_id, 
                     f"Something went wrong: {str(e)}. Please report this to the room moderators."
                 )
+                if self.config["notification_room"]:
+                    await self.client.send_notice(
+                        self.config["notification_room"],
+                        f"User verification failed for {evt.sender} in room {evt.room_id}, you may need to manually verify them."
+                    )
             finally:
                 await self.client.leave_room(evt.room_id)
                 del self._verification_states[evt.room_id]
@@ -912,6 +935,11 @@ Please send a message to this chat with the phrase: "{verification_phrase}" """
                     evt.room_id, 
                     "You have run out of attempts. Please contact a room moderator for assistance."
                 )
+                if self.config["notification_room"]:
+                    await self.client.send_notice(
+                        self.config["notification_room"],
+                        f"User verification failed for {evt.sender} in room {evt.room_id}, you may need to manually verify them."
+                    )
                 await self.client.leave_room(evt.room_id)
                 del self._verification_states[evt.room_id]
             else:

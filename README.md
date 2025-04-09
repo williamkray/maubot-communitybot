@@ -166,7 +166,9 @@ validation:
    level up to that required to send messages in your room, and leave the DM.
 
 not the most user-friendly experience, but may help cut down if you are experiencing
-significant spam in your rooms.
+significant spam in your rooms. every permitted user goes in the state event, so this
+will become problematic and expensive for very large rooms... strong recommend not to
+use this if you expect to have thousands of room members.
 
 # installation
 

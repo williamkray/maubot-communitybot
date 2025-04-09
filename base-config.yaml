@@ -121,7 +121,8 @@ redact_on_ban: true
 # can be boolean (true/false) for all-or-nothing behavior,
 # or pass a list of room IDs to only verify users in certain rooms
 # use this in conjunction with room power-levels that require elevated permission
-# to send messages in a room.
+# to send messages in a room. do not enable this for rooms that will have more than
+# a few hundred users as this will be very expensive when it comes to state resolution!
 check_if_human: false
 
 # list of phrases that users must type to verify they are human
