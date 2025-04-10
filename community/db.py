@@ -22,3 +22,17 @@ async def upgrade_v2(conn: Connection) -> None:
                 room_id TEXT NOT NULL
             )"""
     )
+
+@upgrade_table.register(description="Add verification states table")
+async def upgrade_v3(conn: Connection) -> None:
+    await conn.execute(
+            """CREATE TABLE verification_states (
+                dm_room_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                target_room_id TEXT NOT NULL,
+                verification_phrase TEXT NOT NULL,
+                attempts_remaining INTEGER NOT NULL,
+                required_power_level INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"""
+    )
