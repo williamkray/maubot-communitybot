@@ -139,3 +139,10 @@ verification_phrases:
 
 # number of attempts a user has to enter the correct verification phrase
 verification_attempts: 3
+
+# message to send to users when they need to verify they are human
+# use {room} for the room name and {phrase} for the verification phrase
+verification_message: |
+  Thank you for joining {room}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
+
+  Please send a message to this chat with the phrase: "{phrase}"

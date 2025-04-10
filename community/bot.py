@@ -76,6 +76,7 @@ class Config(BaseProxyConfig):
         helper.copy("check_if_human")
         helper.copy("verification_phrases")
         helper.copy("verification_attempts")
+        helper.copy("verification_message")
 
 
 class CommunityBot(Plugin):
@@ -807,6 +808,13 @@ class CommunityBot(Plugin):
         if evt.source & SyncStream.STATE:
             return
         else:
+            # we only care about join events in rooms in the space
+            # this avoids trying to verify users in other rooms the bot might be in,
+            # such as public banlist policy rooms
+            space_rooms = await self.get_space_roomlist()
+            if evt.room_id not in space_rooms:
+                return
+            
             on_banlist = await self.check_if_banned(evt.sender)
             if on_banlist:
                 await self.ban_this_user(evt.sender)
@@ -902,7 +910,7 @@ class CommunityBot(Plugin):
                             initial_state=[
                                 {
                                     "type": str(EventType.ROOM_NAME),
-                                    "content": {"name": f"{roomname} join verification check"}
+                                    "content": {"name": f"[{roomname}] join verification"}
                                 }
                             ]
                         )
@@ -926,11 +934,12 @@ class CommunityBot(Plugin):
                     }
 
                     # Send greeting
-                    greeting = f"""Thank you for joining {roomname}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
-
-Please send a message to this chat with the phrase: "{verification_phrase}" """
-                    await self.client.send_notice(dm_room, greeting)
-                    self.log.info(f"Started verification process for {evt.sender} in room {room_id}")
+                    greeting = self.config["verification_message"].format(
+                        room=roomname,
+                        phrase=verification_phrase
+                    )
+                    await self.client.send_notice(dm_room, html=greeting)
+                    self.log.info(f"Started verification process for {evt.sender} in room {room_id} for room {roomname}")
 
                 except Exception as e:
                     self.log.error(f"Failed to start verification process: {e}")
