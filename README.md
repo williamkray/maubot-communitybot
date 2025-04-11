@@ -148,7 +148,7 @@ please keep in mind that wordlist-based censorship is problematic and may redact
 algorithm that is perfect is impossible. consider configuring your community such that censorship need only be applied
 in a limited subset of rooms.
 
-# user verification
+## user verification
 
 configure your rooms (all, or a list of room-ids) to use the `check_if_human` setting. use this in conjunction with a room power-level configuration that
 requires elevated permission to send messages. for example, a "waiting-room"
@@ -169,6 +169,13 @@ not the most user-friendly experience, but may help cut down if you are experien
 significant spam in your rooms. every permitted user goes in the state event, so this
 will become problematic and expensive for very large rooms... strong recommend not to
 use this if you expect to have thousands of room members.
+
+if you enable user verification in an existing room, but you don't want to disrupt the
+current users' ability to send messages, you can use the `!community verify-migrate`
+command to set permissions correctly. **DO NOT DO THIS IN LARGE ROOMS**. if you have more
+than a handful of people, consider how many of them actually say anything in a given day
+and whether or not it's worth filling your state event with them. consider alternative
+options.
 
 # installation
 
