@@ -1477,8 +1477,11 @@ class CommunityBot(Plugin):
                 self.config["parent_room"], EventType.ROOM_POWER_LEVELS
             )
 
+            user_power_levels = power_levels.users
+
             # ensure bot has highest power
-            power_levels.users[self.client.mxid] = 1000
+            user_power_levels[self.client.mxid] = 1000
+            self.log.debug(f"DEBUG user power levels: {user_power_levels}")
 
             if evt:
                 mymsg = await evt.respond(
@@ -1487,10 +1490,6 @@ class CommunityBot(Plugin):
 
             # Prepare initial state events
             initial_state = [
-                {
-                    "type": str(EventType.ROOM_POWER_LEVELS),
-                    "content": power_levels.serialize()
-                },
                 {
                     "type": str(EventType.SPACE_PARENT),
                     "state_key": parent_room,
@@ -1525,7 +1524,8 @@ class CommunityBot(Plugin):
                 alias_localpart=sanitized_name,
                 name=roomname,
                 invitees=invitees,
-                initial_state=initial_state
+                initial_state=initial_state,
+                power_level_override={"users": user_power_levels}
             )
 
             # The space child relationship needs to be set in the parent room separately
