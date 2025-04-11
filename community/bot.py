@@ -1834,7 +1834,7 @@ class CommunityBot(Plugin):
             await evt.respond(f"something went wrong: {e}")
 
     @community.subcommand(
-        "setpower", help="sync power levels from parent room to all child rooms"
+        "setpower", help="sync user power levels from parent room to all child rooms. this will override existing user power levels in child rooms!"
     )
     async def set_powerlevels(
         self,
@@ -1858,8 +1858,10 @@ class CommunityBot(Plugin):
                 self.config["parent_room"], EventType.ROOM_POWER_LEVELS
             )
 
+            user_power_levels = parent_power_levels.users
+
             # Ensure bot's power level stays at 1000 for safety
-            parent_power_levels.users[self.client.mxid] = 1000
+            user_power_levels[self.client.mxid] = 1000
 
             for room in roomlist:
                 try:
@@ -1872,9 +1874,17 @@ class CommunityBot(Plugin):
                     except Exception as e:
                         self.log.warning(f"Could not get room name for {room}: {e}")
 
+                    # get the room's power levels object
+                    room_power_levels = await self.client.get_state_event(
+                        room, EventType.ROOM_POWER_LEVELS
+                    )
+
+                    # plug our parent power levels into the room's power levels object
+                    room_power_levels.users = user_power_levels
+
                     # Send the parent room's power levels to this room
                     await self.client.send_state_event(
-                        room, EventType.ROOM_POWER_LEVELS, parent_power_levels
+                        room, EventType.ROOM_POWER_LEVELS, room_power_levels
                     )
                     success_list.append(roomname or room)
                     await asyncio.sleep(self.config["sleep"])
