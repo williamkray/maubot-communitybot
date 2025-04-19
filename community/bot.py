@@ -967,15 +967,20 @@ class CommunityBot(Plugin):
 
         if user_phrase == expected_phrase:
             try:
-                # Update power levels in target room
-                power_levels = await self.client.get_state_event(
-                    state["target_room"], EventType.ROOM_POWER_LEVELS
-                )
-                power_levels.users[state["user"]] = state["required_level"]
-                await self.client.send_state_event(
-                    state["target_room"], EventType.ROOM_POWER_LEVELS, power_levels
-                )
-                await self.client.send_notice(evt.room_id, "Success! My work here is done. You can leave this room now.")
+                # confirm user is still in target room
+                members = await self.client.get_joined_members(state["target_room"])
+                if state["user"] not in members:
+                    await self.client.send_notice(evt.room_id, "Looks like you've left the target room. Rejoin to try again.")
+                else:
+                    # Update power levels in target room
+                    power_levels = await self.client.get_state_event(
+                        state["target_room"], EventType.ROOM_POWER_LEVELS
+                    )
+                    power_levels.users[state["user"]] = state["required_level"]
+                    await self.client.send_state_event(
+                        state["target_room"], EventType.ROOM_POWER_LEVELS, power_levels
+                    )
+                    await self.client.send_notice(evt.room_id, "Success! My work here is done. You can leave this room now.")
             except Exception as e:
                 await self.client.send_notice(
                     evt.room_id, 
