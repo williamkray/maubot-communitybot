@@ -905,24 +905,33 @@ class CommunityBot(Plugin):
                         return
 
                     # Create DM room with name
-                    try:
-                        dm_room = await self.client.create_room(
-                            preset=RoomCreatePreset.PRIVATE,
-                            invitees=[evt.sender],
-                            is_direct=True,
-                            initial_state=[
-                                {
-                                    "type": str(EventType.ROOM_NAME),
-                                    "content": {"name": f"[{roomname}] join verification"}
-                                }
-                            ]
-                        )
-                        self.log.info(f"Created DM room {dm_room} for {evt.sender}")
-                        
-                            
-                    except Exception as e:
-                        self.log.error(f"Failed to initiate verification process: {e}")
-                        return
+                    max_retries = 3
+                    retry_delay = 1  # seconds
+                    last_error = None
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            dm_room = await self.client.create_room(
+                                preset=RoomCreatePreset.PRIVATE,
+                                invitees=[evt.sender],
+                                is_direct=True,
+                                initial_state=[
+                                    {
+                                        "type": str(EventType.ROOM_NAME),
+                                        "content": {"name": f"[{roomname}] join verification"}
+                                    }
+                                ]
+                            )
+                            self.log.info(f"Created DM room {dm_room} for {evt.sender}")
+                            break
+                        except Exception as e:
+                            last_error = e
+                            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                                self.log.warning(f"Failed to create DM room (attempt {attempt + 1}/{max_retries}): {e}")
+                                await asyncio.sleep(retry_delay)
+                            else:
+                                self.log.error(f"Failed to initiate verification process after {max_retries} attempts: {e}")
+                                return
 
                     # Select random verification phrase
                     verification_phrase = random.choice(self.config["verification_phrases"])
