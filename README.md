@@ -98,13 +98,14 @@ to this bot, as those concepts are probably best left to more featureful tools.
 
 ## admin/moderator management
 
-set consistent power levels across all your rooms for your community administrators! the config defines a list of both
-admins and moderators (admins have a Power Level of 100, mods have PL50). running the setpower subcommand (i.e.
-`!community setpower`) will roll through all rooms in the space (including the space itself) and attempt to true-up user
-permissions to match. if you are running legacy rooms not managed by the bot, and the bot does not have permission to
-send power-level state events to the room, it will return a list for you to handle manually. users who have a PL greater
-than 0 and are not listed as either an admin or moderator will be removed from the permission list, effectively
-returning their power to whatever the room default is (usually 0).
+set consistent power levels across all your rooms for your community administrators! user powerlevels will be
+cascaded to all rooms when changed in your parent space. running the setpower subcommand (i.e.
+`!community setpower`) will roll through all rooms in the space and attempt to true-up user
+permissions to match. it will skip rooms that you have enabled verification flows on, unless you pass the room-id
+as an argument to the command. this ensures you don't accidentally un-verify everyone unless you mean to.
+
+if you are running legacy rooms not managed by the bot, and the bot does not have permission to
+send power-level state events to the room, it will return a list for you to handle manually.
 
 ## room creation
 
@@ -113,8 +114,10 @@ include the `--encrypt` flag in your command to encrypt the room even if the def
 unencrypted.
 
 will attempt to sanitize the room name and assign a room alias automatically. the bot user will be assigned very high
-power level (1000) and set an admin power level (100) to plugin administrators, 50 to moderators. this ensures that the
-bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured.
+power level (1000) and set permissions based on the parent space user power-levels. this ensures that the
+bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured in the
+`invitees` list. populate this list with your space admins, other bots, or any other account you want to make sure gets
+invited to the new room!
 
 rooms created by the bot will have join restriction limited to members of the space.
 
@@ -129,6 +132,9 @@ use the `replaceroom` subcommand to replace an existing room with a new one. thi
 
 the replacement process will create a new room with the same name and avatar, transfer all room aliases to the new room, and archive the old room with a pointer to the new room. the new room will have standard join rules that restrict membership to space members. this logic is a little clunky, but it seems to work.
 
+replacement will also prompt the bot to review its config, and rotate instances of the old room-id with the new room id to retain
+functionality where necessary.
+
 ## get room ID
 
 sometimes you need to know a rooms identifier, but if the room has an alias associated with it not all clients make it
@@ -141,7 +147,7 @@ roomid #whatisthisroom:myserver.tld`).
 the bot can be configured to redact messages automatically to protect your users. set `censor` to either `true`,
 `false`, or a list of room IDs to enable censorship in.
 
-set `censor_files` to have the bot immediately redact file uploads in the censored rooms. define trigger words in
+set `censor_files` to have the bot immediately redact file uploads in any censored rooms. define trigger words in
 `censor_wordlist` to flag messages for automatic redaction.
 
 please keep in mind that wordlist-based censorship is problematic and may redact false positives. writing a matching

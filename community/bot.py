@@ -1841,20 +1841,31 @@ class CommunityBot(Plugin):
     @community.subcommand(
         "setpower", help="sync user power levels from parent room to all child rooms. this will override existing user power levels in child rooms!"
     )
+    @command.argument("target_room", required=False)
     async def set_powerlevels(
         self,
         evt: MessageEvent,
+        target_room: str = None
     ) -> None:
         await evt.mark_read()
         if not await self.user_permitted(evt.sender, min_level=100):
             await evt.reply("You don't have permission to use this command")
             return
 
+        if target_room:
+            roomlist = [target_room]
+            target_msg = target_room
+        else:
+            roomlist = await self.get_space_roomlist()
+            target_msg = "space rooms"
+
+
         msg = await evt.respond(
-            "Syncing power levels from parent room to all child rooms..."
+            f"Syncing power levels from parent room to {target_msg}..."
         )
-        roomlist = await self.get_space_roomlist()
+        
         success_list = []
+        skipped_list = []
         error_list = []
 
         try:
@@ -1878,6 +1889,19 @@ class CommunityBot(Plugin):
                         roomname = roomnamestate["name"]
                     except Exception as e:
                         self.log.warning(f"Could not get room name for {room}: {e}")
+
+                    # Skip rooms that are protected by verification, unless its the only target room,
+                    # in which case we have explicitly asked to set power levels in that room
+                    if (
+                        len(roomlist) > 1 and 
+                        (
+                            (isinstance(self.config["check_if_human"], bool) and self.config["check_if_human"]) or
+                            (isinstance(self.config["check_if_human"], list) and room in self.config["check_if_human"])
+                        )
+                    ):
+                        self.log.info(f"Skipping {roomname or room} as it requires human verification. You can explicitly run this command for this room to override.")
+                        skipped_list.append(roomname or room)
+                        continue
 
                     # get the room's power levels object
                     room_power_levels = await self.client.get_state_event(
@@ -1903,6 +1927,8 @@ class CommunityBot(Plugin):
             results = "Power levels synced from parent room.\n\n"
             if success_list:
                 results += f"Successfully updated rooms:\n<code>{', '.join(success_list)}</code>\n\n"
+            if skipped_list:
+                results += f"Skipped rooms due to verification settings:\n<code>{', '.join(skipped_list)}</code>\n\n"
             if error_list:
                 results += (
                     f"Failed to update rooms:\n<code>{', '.join(error_list)}</code>"
