@@ -183,20 +183,24 @@ class CommunityBot(Plugin):
                 results["dropped"].append(user)
 
         except Exception as e:
-            self.log.exception(e)
+            self.log.error(f"Error syncing space members: {e}")
 
         return results
 
     async def get_space_roomlist(self) -> None:
         space = self.config["parent_room"]
         rooms = []
-        state = await self.client.get_state(space)
-        for evt in state:
-            if evt.type == EventType.SPACE_CHILD:
+        try:
+            self.log.debug(f"DEBUG getting roomlist from {space} space")
+            state = await self.client.get_state(space)
+            for evt in state:
+                if evt.type == EventType.SPACE_CHILD:
                 # only look for rooms that include a via path, otherwise they
                 # are not really in the space!
-                if evt.content and evt.content.via:
-                    rooms.append(evt.state_key)
+                    if evt.content and evt.content.via:
+                        rooms.append(evt.state_key)
+        except Exception as e:
+            self.log.error(f"Error getting space roomlist: {e}")
         return rooms
 
     async def generate_report(self) -> None:
