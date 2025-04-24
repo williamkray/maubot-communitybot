@@ -1,5 +1,6 @@
 # the room-id of the matrix room or space to use as your "full user list"
 # changes to user power levelsin this room will affect all rooms in the space
+# some features may not work if this is a regular room. use a space.
 parent_room: "!somerandomcharacters:server.tld"
 
 # sleep time between actions. you can drop this to 0 if your bot has no
