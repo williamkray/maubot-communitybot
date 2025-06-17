@@ -98,6 +98,9 @@ categories.
 
 ## user management
 
+prevent people from inviting randos to your community rooms and bypassing space membership requirements by setting the
+`invite_power_level` value in your config. this is used for all room creation commands.
+
 purge inactive users with the `purge` subcommand (i.e. `!community purge`).
 
 kick an individual user from your space and all child rooms, regardless of activity status, with the `kick` subcommand
