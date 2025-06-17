@@ -1235,7 +1235,7 @@ class CommunityBot(Plugin):
             await evt.respond(f"{e}")
 
     @community.subcommand(
-        "report", help="generate a list of matrix IDs that have been inactive"
+        "report", help="generate a full list of activity tracking status"
     )
     async def get_report(self, evt: MessageEvent) -> None:
         if not await self.user_permitted(evt.sender):
@@ -1258,6 +1258,68 @@ class CommunityBot(Plugin):
                 {'<br />'.join(report['ignored'])}</p>",
             allow_html=True,
         )
+
+    @community.subcommand(
+        "inactive", help="generate a list of mxids who have been inactive"
+    )
+    async def get_inactive_report(self, evt: MessageEvent) -> None:
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(
+            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
+                {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['warn_inactive'])} <br /></p>",
+            allow_html=True,
+        )
+
+    @community.subcommand(
+        "purgable", help="generate a list of matrix IDs that have been inactive long enough to be purged"
+    )
+    async def get_purgable_report(self, evt: MessageEvent) -> None:
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(
+            f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['kick_inactive'])} <br /></p>",
+            allow_html=True,
+        )
+
+    @community.subcommand(
+        "ignored", help="generate a list of matrix IDs that have activity tracking disabled"
+    )
+    async def get_ignored_report(self, evt: MessageEvent) -> None:
+        if not await self.user_permitted(evt.sender):
+            await evt.reply("You don't have permission to use this command")
+            return
+
+        if not self.config["track_users"]:
+            await evt.reply("user tracking is disabled")
+            return
+
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(
+            f"<p><b>Ignored users:</b><br /> \
+                {'<br />'.join(report['ignored'])}</p>",
+            allow_html=True,
+        )
+
 
     @community.subcommand("purge", help="kick users for excessive inactivity")
     async def kick_users(self, evt: MessageEvent) -> None:
