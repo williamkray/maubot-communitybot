@@ -823,7 +823,11 @@ class CommunityBot(Plugin):
             if evt.room_id not in space_rooms:
                 return
             
-            on_banlist = await self.check_if_banned(evt.sender)
+            try:
+                on_banlist = await self.check_if_banned(evt.sender)
+            except Exception as e:
+                self.log.error(f"Failed to check if {evt.sender} is banned: {e}")
+                on_banlist = False
             if on_banlist:
                 await self.ban_this_user(evt.sender)
                 return
