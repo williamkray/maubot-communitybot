@@ -78,6 +78,7 @@ class Config(BaseProxyConfig):
         helper.copy("verification_phrases")
         helper.copy("verification_attempts")
         helper.copy("verification_message")
+        helper.copy("invite_power_level")
 
 
 class CommunityBot(Plugin):
@@ -1109,11 +1110,22 @@ class CommunityBot(Plugin):
     async def community(self) -> None:
         pass
 
+    async def check_parent_room(self, evt: MessageEvent) -> bool:
+        """Check if parent room is configured and handle the response if not."""
+        if not self.config["parent_room"]:
+            await evt.reply(
+                "No parent room configured. Please use the 'initialize' command to set up your community space first."
+            )
+            return False
+        return True
+
     @community.subcommand(
         "bancheck", help="check subscribed banlists for a user's mxid"
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def check_banlists(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         ban_status = await self.check_if_banned(mxid)
         await evt.reply(f"user on banlist: {ban_status}")
 
@@ -1123,6 +1135,8 @@ class CommunityBot(Plugin):
             in case they are missing",
     )
     async def sync_space_members(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1189,6 +1203,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def ignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1214,6 +1230,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def unignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1238,6 +1256,8 @@ class CommunityBot(Plugin):
         "report", help="generate a full list of activity tracking status"
     )
     async def get_report(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1263,6 +1283,8 @@ class CommunityBot(Plugin):
         "inactive", help="generate a list of mxids who have been inactive"
     )
     async def get_inactive_report(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1284,6 +1306,8 @@ class CommunityBot(Plugin):
         "purgable", help="generate a list of matrix IDs that have been inactive long enough to be purged"
     )
     async def get_purgable_report(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1304,6 +1328,8 @@ class CommunityBot(Plugin):
         "ignored", help="generate a list of matrix IDs that have activity tracking disabled"
     )
     async def get_ignored_report(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
             return
@@ -1323,6 +1349,8 @@ class CommunityBot(Plugin):
 
     @community.subcommand("purge", help="kick users for excessive inactivity")
     async def kick_users(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -1377,6 +1405,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def kick_user(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -1427,6 +1457,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def ban_user(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -1450,6 +1482,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("mxid", "full matrix ID", required=True)
     async def unban_user(self, evt: MessageEvent, mxid: UserID) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -1504,6 +1538,8 @@ class CommunityBot(Plugin):
     async def mark_for_redaction(
         self, evt: MessageEvent, mxid: UserID, room: str
     ) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -1532,12 +1568,14 @@ class CommunityBot(Plugin):
             )
         await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
 
-    async def create_room(self, roomname: str, evt: MessageEvent = None) -> None:
+    async def create_room(self, roomname: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None, creation_content: Optional[dict] = None) -> None:
         """Create a new room and add it to the parent space.
         
         Args:
             roomname: The name for the new room
             evt: Optional MessageEvent for progress updates. If provided, will send status messages.
+            power_level_override: Optional power levels to use. If not provided, will try to get from parent room.
+            creation_content: Optional creation content to use when creating the room.
             
         Returns:
             tuple: (room_id, room_alias) if successful, None if failed
@@ -1552,16 +1590,25 @@ class CommunityBot(Plugin):
             parent_room = self.config["parent_room"]
             server = self.client.parse_user_id(self.client.mxid)[1]
 
-            # Get parent room power levels to use as template
-            power_levels = await self.client.get_state_event(
-                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
-            )
-
-            user_power_levels = power_levels.users
-
-            # ensure bot has highest power
-            user_power_levels[self.client.mxid] = 1000
-            self.log.debug(f"DEBUG user power levels: {user_power_levels}")
+            # Get power levels from parent room if not provided
+            if not power_level_override and parent_room:
+                power_levels = await self.client.get_state_event(
+                    parent_room, EventType.ROOM_POWER_LEVELS
+                )
+                user_power_levels = power_levels.users
+                # ensure bot has highest power
+                user_power_levels[self.client.mxid] = 1000
+                power_levels.users = user_power_levels
+                power_level_override = power_levels
+            elif not power_level_override:
+                # If no parent room and no override provided, create default power levels
+                power_levels = PowerLevelStateEventContent()
+                power_levels.users = {
+                    self.client.mxid: 1000,  # Bot gets highest power
+                }
+                # Set invite power level from config
+                power_levels.invite = self.config["invite_power_level"]
+                power_level_override = power_levels
 
             if evt:
                 mymsg = await evt.respond(
@@ -1569,26 +1616,30 @@ class CommunityBot(Plugin):
                 )
 
             # Prepare initial state events
-            initial_state = [
-                {
-                    "type": str(EventType.SPACE_PARENT),
-                    "state_key": parent_room,
-                    "content": {
-                        "via": [server],
-                        "canonical": True
+            initial_state = []
+            
+            # Only add space parent state if we have a parent room
+            if parent_room:
+                initial_state.extend([
+                    {
+                        "type": str(EventType.SPACE_PARENT),
+                        "state_key": parent_room,
+                        "content": {
+                            "via": [server],
+                            "canonical": True
+                        }
+                    },
+                    {
+                        "type": str(EventType.ROOM_JOIN_RULES),
+                        "content": {
+                            "join_rule": "restricted",
+                            "allow": [{
+                                "type": "m.room_membership",
+                                "room_id": parent_room
+                            }]
+                        }
                     }
-                },
-                {
-                    "type": str(EventType.ROOM_JOIN_RULES),
-                    "content": {
-                        "join_rule": "restricted",
-                        "allow": [{
-                            "type": "m.room_membership",
-                            "room_id": parent_room
-                        }]
-                    }
-                }
-            ]
+                ])
 
             # Add encryption if needed
             if self.config["encrypt"] or force_encryption:
@@ -1605,20 +1656,22 @@ class CommunityBot(Plugin):
                 name=roomname,
                 invitees=invitees,
                 initial_state=initial_state,
-                power_level_override={"users": user_power_levels}
+                power_level_override=power_level_override,
+                creation_content=creation_content
             )
 
             # The space child relationship needs to be set in the parent room separately
-            await self.client.send_state_event(
-                parent_room,
-                EventType.SPACE_CHILD,
-                {
-                    "via": [server],
-                    "suggested": False
-                },
-                state_key=room_id
-            )
-            await asyncio.sleep(self.config["sleep"])
+            if parent_room:
+                await self.client.send_state_event(
+                    parent_room,
+                    EventType.SPACE_CHILD,
+                    {
+                        "via": [server],
+                        "suggested": False
+                    },
+                    state_key=room_id
+                )
+                await asyncio.sleep(self.config["sleep"])
 
             if evt:
                 await evt.respond(
@@ -1643,6 +1696,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("roomname", pass_raw=True, required=True)
     async def create_that_room(self, evt: MessageEvent, roomname: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
         if (roomname == "help") or len(roomname) == 0:
             await evt.reply(
                 'pass me a room name (like "cool topic") and i will create it and add it to the space. \
@@ -1662,6 +1717,8 @@ class CommunityBot(Plugin):
     @community.subcommand("archive", help="archive a room")
     @command.argument("room", required=False)
     async def archive_room(self, evt: MessageEvent, room: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
 
         if not await self.user_permitted(evt.sender):
@@ -1697,6 +1754,8 @@ class CommunityBot(Plugin):
     @community.subcommand("replaceroom", help="replace a room with a new one")
     @command.argument("room", required=False)
     async def replace_room(self, evt: MessageEvent, room: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
 
         if not await self.user_permitted(evt.sender):
@@ -1857,6 +1916,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("room", required=False)
     async def get_guestlist(self, evt: MessageEvent, room: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
         space_members_obj = await self.client.get_joined_members(
             self.config["parent_room"]
         )
@@ -1895,6 +1956,8 @@ class CommunityBot(Plugin):
     )
     @command.argument("room", required=False)
     async def get_roomid(self, evt: MessageEvent, room: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
         room_id = None
         if room:
             if room.startswith("#"):
@@ -1922,6 +1985,8 @@ class CommunityBot(Plugin):
         evt: MessageEvent,
         target_room: str = None
     ) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender, min_level=100):
             await evt.reply("You don't have permission to use this command")
@@ -2021,6 +2086,8 @@ class CommunityBot(Plugin):
         help="migrate a room to a verification-based permission model, ensuring current members can still send messages while new joiners require verification",
     )
     async def verify_migrate(self, evt: MessageEvent) -> None:
+        if not await self.check_parent_room(evt):
+            return
         await evt.mark_read()
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
@@ -2137,6 +2204,8 @@ class CommunityBot(Plugin):
                 # If we can't check the state, assume it's stale
                 await self.delete_verification_state(state["dm_room_id"])
 
+    
+
     @classmethod
     def get_db_upgrade_table(cls) -> None:
         return upgrade_table
@@ -2144,3 +2213,122 @@ class CommunityBot(Plugin):
     @classmethod
     def get_config_class(cls) -> Type[BaseProxyConfig]:
         return Config
+
+    @community.subcommand(
+        "initialize",
+        help="initialize a new community space with the given name. this command can only be used if no parent room is configured."
+    )
+    @command.argument("community_name", pass_raw=True, required=True)
+    async def initialize_community(self, evt: MessageEvent, community_name: str) -> None:
+        await evt.mark_read()
+
+        # Check if parent room is already configured
+        if self.config["parent_room"]:
+            await evt.reply("Cannot initialize: a parent room is already configured. Please remove the parent_room configuration first.")
+            return
+
+        # Validate community name
+        if not community_name or community_name.isspace():
+            await evt.reply("Please provide a community name. Usage: !community initialize <community_name>")
+            return
+
+        msg = await evt.respond("Initializing new community space...")
+
+        try:
+            # Add initiator to invitees list if not already there
+            if evt.sender not in self.config["invitees"]:
+                self.config["invitees"].append(evt.sender)
+            # Save the updated config
+            self.config.save()
+
+            # Create the space
+            server = self.client.parse_user_id(self.client.mxid)[1]
+            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", community_name).lower()
+
+            # Set up power levels for the space
+            power_levels = PowerLevelStateEventContent()
+            power_levels.users = {
+                self.client.mxid: 1000,  # Bot gets highest power
+                evt.sender: 100  # Initiator gets admin power
+            }
+            # Set invite power level from config
+            power_levels.invite = self.config["invite_power_level"]
+
+            # Create the space with appropriate metadata and power levels
+            space_id, space_alias = await self.create_room(
+                community_name,
+                evt,
+                power_level_override=power_levels,
+                creation_content={"type": "m.space"}
+            )
+
+            # Set the space as the parent room in config
+            self.config["parent_room"] = space_id
+
+            # Save the updated config
+            self.config.save()
+
+            # Verify the space exists and has correct power levels
+            try:
+                space_power_levels = await self.client.get_state_event(space_id, EventType.ROOM_POWER_LEVELS)
+                if space_power_levels.users.get(self.client.mxid) != 1000:
+                    raise Exception("Space power levels not set correctly")
+            except Exception as e:
+                error_msg = f"Failed to verify space setup: {e}"
+                self.log.error(error_msg)
+                await evt.respond(error_msg, edits=msg)
+                return
+
+            # Create moderators room
+            mod_room_id, mod_room_alias = await self.create_room(
+                f"{community_name} Moderators",
+                evt
+            )
+
+            # Set moderators room to invite-only
+            await self.client.send_state_event(
+                mod_room_id,
+                EventType.ROOM_JOIN_RULES,
+                JoinRulesStateEventContent(join_rule=JoinRule.INVITE)
+            )
+
+            # Create waiting room
+            waiting_room_id, waiting_room_alias = await self.create_room(
+                f"{community_name} Waiting Room",
+                evt
+            )
+
+            # Set waiting room to be joinable by anyone
+            await self.client.send_state_event(
+                waiting_room_id,
+                EventType.ROOM_JOIN_RULES,
+                JoinRulesStateEventContent(join_rule=JoinRule.PUBLIC)
+            )
+
+            # Update censor configuration based on current value
+            current_censor = self.config["censor"]
+            if current_censor is False:
+                # If censor is false, set it to a list with just the waiting room
+                self.config["censor"] = [waiting_room_id]
+            elif isinstance(current_censor, list) and waiting_room_id not in current_censor:
+                # If censor is already a list and waiting room isn't in it, append it
+                current_censor.append(waiting_room_id)
+                self.config["censor"] = current_censor
+            # If censor is True or waiting room is already in the list, leave it as is
+
+            # Save the updated config
+            self.config.save()
+
+            await evt.respond(
+                f"Community space initialized successfully!\n\n"
+                f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a>\n"
+                f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a>\n"
+                f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>",
+                edits=msg,
+                allow_html=True
+            )
+
+        except Exception as e:
+            error_msg = f"Failed to initialize community: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg, edits=msg)

@@ -1,7 +1,9 @@
 # the room-id of the matrix room or space to use as your "full user list"
 # changes to user power levelsin this room will affect all rooms in the space
 # some features may not work if this is a regular room. use a space.
-parent_room: "!somerandomcharacters:server.tld"
+# leave this empty to use the initialize command to create a new community to manage,
+# based on opinionated defaults.
+parent_room: ''
 
 # sleep time between actions. you can drop this to 0 if your bot has no
 # ratelimits imposed on its homeserver, otherwise you may want to increase this
@@ -13,10 +15,19 @@ sleep: 5
 # when creating new rooms
 encrypt: False
 
+# when creating a new room, what power-level should be required to invite users?
+# this is helpful to prevent malicious accounts from inviting spam bots by restricting
+# room defaults to moderators being the only people who can invite new users from outside
+# of your managed community. otherwise, you must be a space member to join the rooms.
+invite_power_level: 50
+
 # number of days of inactivity to be considered in the "warning zone"
+# users in this category will appear in the report as inactive
 warn_threshold_days: 30
 
 # number of days of inactivity to be considered in the "danger zone"
+# users in this category will appear in the purgable report and are
+# subject to removal by the purge command.
 kick_threshold_days: 60
 
 # track users? if false, will disable all tracking and avoid writing anything to the database.
@@ -39,9 +50,8 @@ admins: []
 moderators: []
 
 # list of users who should be invited to new rooms immediately (other bots, moderators, perhaps)
-invitees:
-- "@mybot:server.tld"
-- "@secondaryadmin:server.tld"
+# use full matrix IDs here
+invitees: []
 
 # auto-greet users in rooms with these messages
 # map greeting messages to a room
@@ -66,7 +76,7 @@ greeting_rooms:
   '!someotherroom:server.tld': generic
   '!myencryptedroomid:server.tld': encrypted
 
-# how long to wait (in seconds) before sending a greeting to a new
+# how long to wait (in seconds) before sending a greeting to a new joiner
 welcome_sleep: 0
 
 # add a room ID here to send a message to when someone joins the above rooms
@@ -109,13 +119,14 @@ censor_wordlist_instaban: []
 banlists: 
   - '#community-moderation-effort-bl:neko.dev'
 
-# should we ban proactively? this will generate ban events across all rooms every time
-# the ban lists have a new policy added, which may be noisy. however, without this enabled,
+# should we ban proactively? this will ban users in your rooms if a new ban event is added to
+# the banlist policy room for their account. however, without this enabled,
 # an account may join your rooms, THEN get added to the banlist, and you will have to manually
 # ban them from your rooms.
 proactive_banning: true
 
-# should we redact messages when a user is banned?
+# should we redact messages when a user is banned? limited to their last 100 messages in each room.
+# redactions are processed every minute, they are not immediate.
 redact_on_ban: true
 
 # should we verify that users are human before allowing them to send messages?
@@ -146,4 +157,4 @@ verification_attempts: 3
 verification_message: |
   Thank you for joining {room}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
 
-  Please send a message to this chat with the phrase: "{phrase}"
+  Please send a message to this chat with the content: "{phrase}"

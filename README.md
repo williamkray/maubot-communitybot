@@ -33,15 +33,37 @@ with this plugin's capabilities:
   to the space
 
 by following this structure, you reduce the amount of surface area you have to spend time defending against spam and
-implementing censorship rules.
+implementing censorship rules. the handy `!community initialize <some name for your community>` command will get you
+from zero to an opinionated community structured this way quickly and easily.
 
 if that doesn't sound like how you want to structure your online community, you might be better off using something like
-Draupnir or Mjolnir.
+Draupnir, Meowlnir, or Mjolnir.
 
 # features
 
 please read through the comments in the `base-config.yaml` for more thorough explanations, but this covers the high
 points.
+
+## initialize a community from scratch
+
+just installed the plugin for the first time, and want to get started on the right foot? start a DM with your bot and run:
+
+`!community initialize <your community name>`
+
+this will perform several actions on your behalf:
+
+1. create a space named for your community, with an appropriate alias on the homeserver, and save the config with this parent room ID
+2. add you to the "invitee" list in the config to be invited to all new rooms
+3. set the bot's power level to 1000, and invite you as an administrator with power level 100
+4. create a room within the space for admins/moderators to execute bot commands, this room is invite only
+5. create a publicly facing room called the waiting room to allow newcomers to join and ask for invitation to your space
+6. enable basic keyword and file upload censorship only on the waiting room
+7. all rooms will require moderator permissions to invite additional users, to prevent rogue invitations or unexpected guests
+
+once these actions have been taken, you can manage moderators, change room avatars, etc as you like, and add more rooms with
+other commands. happy community-managing!
+
+attempts to run this command once a parent room has been set will fail. 
 
 ## greet new users on joining a room
 
@@ -70,7 +92,9 @@ purging admin accounts, backup accounts, rarely used bots, etc.
 members to the space automatically trigger a sync, as do most other commands. this command is mostly deprecated but you
 may want to run it just to see what it does.
 
-generate a report with the `report` subcommand (i.e. `!community report`) to see your inactive users. 
+generate a report with the `report` subcommand (i.e. `!community report`) to see your inactive users. you can also
+generate more specific reports using the `inactive`, `purgable`, and `ignored` commands to see users in those specific
+categories.
 
 ## user management
 
