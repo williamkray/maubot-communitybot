@@ -1585,10 +1585,14 @@ class CommunityBot(Plugin):
             tuple: (room_id, room_alias) if successful, None if failed
         """
         encrypted_flag_regex = re.compile(r"(\s+|^)-+encrypt(ed)?\s?")
+        unencrypted_flag_regex = re.compile(r"(\s+|^)-+unencrypt(ed)?\s?")
         force_encryption = bool(encrypted_flag_regex.search(roomname))
+        force_unencryption = bool(unencrypted_flag_regex.search(roomname))
         try:
             if force_encryption:
                 roomname = encrypted_flag_regex.sub("", roomname)
+            if force_unencryption:
+                roomname = unencrypted_flag_regex.sub("", roomname)
             sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
             invitees = self.config["invitees"]
             parent_room = self.config["parent_room"]
@@ -1646,7 +1650,7 @@ class CommunityBot(Plugin):
                 ])
 
             # Add encryption if needed
-            if self.config["encrypt"] or force_encryption:
+            if ( self.config["encrypt"] and not force_unencryption ) or force_encryption:
                 initial_state.append({
                     "type": str(EventType.ROOM_ENCRYPTION),
                     "content": {
@@ -1696,7 +1700,7 @@ class CommunityBot(Plugin):
     @community.subcommand(
         "createroom",
         help="create a new room titled <roomname> and add it to the parent space. \
-                          optionally include `--encrypt` to encrypt it regardless of the default settings.",
+                          optionally include `--encrypted` or `--unencrypted` to force regardless of the default settings.",
     )
     @command.argument("roomname", pass_raw=True, required=True)
     async def create_that_room(self, evt: MessageEvent, roomname: str) -> None:
@@ -1705,7 +1709,7 @@ class CommunityBot(Plugin):
         if (roomname == "help") or len(roomname) == 0:
             await evt.reply(
                 'pass me a room name (like "cool topic") and i will create it and add it to the space. \
-                            use `--encrypt` to ensure it is encrypted at creation time even if that isnt my default \
+                            use `--encrypted` or `--unencrypted` to ensure encryption is enabled/disabled at creation time even if that isnt my default \
                             setting.'
             )
             return
