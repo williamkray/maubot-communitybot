@@ -55,6 +55,7 @@ class Config(BaseProxyConfig):
         helper.copy("admins")
         helper.copy("moderators")
         helper.copy("parent_room")
+        helper.copy("community_slug")
         helper.copy("track_users")
         helper.copy("track_messages")
         helper.copy("track_reactions")
@@ -119,6 +120,73 @@ class CommunityBot(Plugin):
         except Exception as e:
             self.log.error(f"Failed to check user power level: {e}")
             return False
+
+    def generate_community_slug(self, community_name: str) -> str:
+        """Generate a community slug from the community name.
+        
+        Args:
+            community_name: The full community name
+            
+        Returns:
+            str: A slug made from the first letter of each word, lowercase
+        """
+        # Split by whitespace and get first letter of each word
+        words = community_name.strip().split()
+        slug = ''.join(word[0].lower() for word in words if word)
+        return slug
+
+    async def validate_room_alias(self, alias_localpart: str, server: str) -> bool:
+        """Check if a room alias already exists.
+        
+        Args:
+            alias_localpart: The localpart of the alias (without # and :server)
+            server: The server domain
+            
+        Returns:
+            bool: True if alias is available, False if it already exists
+        """
+        try:
+            full_alias = f"#{alias_localpart}:{server}"
+            await self.client.resolve_room_alias(full_alias)
+            # If we get here, the alias exists
+            return False
+        except MNotFound:
+            # Alias doesn't exist, so it's available
+            return True
+        except Exception as e:
+            # For other errors, assume alias is available to be safe
+            self.log.warning(f"Error checking alias {full_alias}: {e}")
+            return True
+
+    async def validate_room_aliases(self, room_names: list[str], evt: MessageEvent = None) -> tuple[bool, list[str]]:
+        """Validate that all room aliases are available.
+        
+        Args:
+            room_names: List of room names to validate
+            evt: Optional MessageEvent for progress updates
+            
+        Returns:
+            tuple: (is_valid, list_of_conflicting_aliases)
+        """
+        if not self.config["community_slug"]:
+            if evt:
+                await evt.respond("Error: No community slug configured. Please run initialize command first.")
+            return False, []
+            
+        server = self.client.parse_user_id(self.client.mxid)[1]
+        conflicting_aliases = []
+        
+        for room_name in room_names:
+            # Clean the room name and create alias
+            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", room_name).lower()
+            alias_localpart = f"{sanitized_name}-{self.config['community_slug']}"
+            
+            # Check if alias is available
+            is_available = await self.validate_room_alias(alias_localpart, server)
+            if not is_available:
+                conflicting_aliases.append(f"#{alias_localpart}:{server}")
+        
+        return len(conflicting_aliases) == 0, conflicting_aliases
 
     async def _redaction_loop(self) -> None:
         while True:
@@ -1607,6 +1675,26 @@ class CommunityBot(Plugin):
             parent_room = self.config["parent_room"]
             server = self.client.parse_user_id(self.client.mxid)[1]
 
+            # Check if community slug is configured
+            if not self.config["community_slug"]:
+                error_msg = "No community slug configured. Please run initialize command first."
+                self.log.error(error_msg)
+                if evt:
+                    await evt.respond(error_msg)
+                return None
+
+            # Create alias with community slug
+            alias_localpart = f"{sanitized_name}-{self.config['community_slug']}"
+            
+            # Validate that the alias is available
+            is_available = await self.validate_room_alias(alias_localpart, server)
+            if not is_available:
+                error_msg = f"Room alias #{alias_localpart}:{server} already exists. Cannot create room."
+                self.log.error(error_msg)
+                if evt:
+                    await evt.respond(error_msg)
+                return None
+
             # Get power levels from parent room if not provided
             if not power_level_override and parent_room:
                 power_levels = await self.client.get_state_event(
@@ -1629,7 +1717,7 @@ class CommunityBot(Plugin):
 
             if evt:
                 mymsg = await evt.respond(
-                    f"creating {sanitized_name}, give me a minute..."
+                    f"creating {alias_localpart}, give me a minute..."
                 )
 
             # Prepare initial state events
@@ -1669,7 +1757,7 @@ class CommunityBot(Plugin):
 
             # Create the room with all initial states
             room_id = await self.client.create_room(
-                alias_localpart=sanitized_name,
+                alias_localpart=alias_localpart,
                 name=roomname,
                 invitees=invitees,
                 initial_state=initial_state,
@@ -1692,12 +1780,12 @@ class CommunityBot(Plugin):
 
             if evt:
                 await evt.respond(
-                    f"<a href='https://matrix.to/#/#{sanitized_name}:{server}'>#{sanitized_name}:{server}</a> has been created and added to the space.",
+                    f"<a href='https://matrix.to/#/#{alias_localpart}:{server}'>#{alias_localpart}:{server}</a> has been created and added to the space.",
                     edits=mymsg,
                     allow_html=True
                 )
 
-            return room_id, f"#{sanitized_name}:{server}"
+            return room_id, f"#{alias_localpart}:{server}"
 
         except Exception as e:
             error_msg = f"Failed to create room: {e}"
@@ -1725,6 +1813,17 @@ class CommunityBot(Plugin):
 
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
+            return
+
+        # Check if community slug is configured
+        if not self.config["community_slug"]:
+            await evt.reply("No community slug configured. Please run initialize command first.")
+            return
+
+        # Validate the room alias before creating
+        is_valid, conflicting_aliases = await self.validate_room_aliases([roomname], evt)
+        if not is_valid:
+            await evt.reply(f"Cannot create room: {conflicting_aliases[0]} already exists.")
             return
 
         result = await self.create_room(roomname, evt)
@@ -1820,6 +1919,17 @@ class CommunityBot(Plugin):
 
         # Get list of aliases to transfer while removing them from the old room
         aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
+
+        # Check if community slug is configured
+        if not self.config["community_slug"]:
+            await evt.respond("No community slug configured. Please run initialize command first.")
+            return
+
+        # Validate that the new room alias is available
+        is_valid, conflicting_aliases = await self.validate_room_aliases([room_name], evt)
+        if not is_valid:
+            await evt.respond(f"Cannot replace room: {conflicting_aliases[0]} already exists.")
+            return
 
         # Now we can start the process of replacing the room
         # First we need to create the new room. this will create the initial alias,
@@ -2277,6 +2387,26 @@ class CommunityBot(Plugin):
         msg = await evt.respond("Initializing new community space...")
 
         try:
+            # Generate community slug if not already set
+            if not self.config["community_slug"]:
+                community_slug = self.generate_community_slug(community_name)
+                self.config["community_slug"] = community_slug
+                self.log.info(f"Generated community slug: {community_slug}")
+            
+            # Define all rooms that will be created during initialization
+            rooms_to_create = [
+                community_name,  # Main space
+                f"{community_name} Moderators",  # Moderators room
+                f"{community_name} Waiting Room"  # Waiting room
+            ]
+            
+            # Validate all room aliases before creating any rooms
+            is_valid, conflicting_aliases = await self.validate_room_aliases(rooms_to_create, evt)
+            if not is_valid:
+                error_msg = f"Cannot initialize community: The following room aliases already exist:\n" + "\n".join(conflicting_aliases)
+                await evt.respond(error_msg, edits=msg)
+                return
+
             # Add initiator to invitees list if not already there
             if evt.sender not in self.config["invitees"]:
                 self.config["invitees"].append(evt.sender)
@@ -2363,6 +2493,7 @@ class CommunityBot(Plugin):
 
             await evt.respond(
                 f"Community space initialized successfully!\n\n"
+                f"Community Slug: {self.config['community_slug']}\n"
                 f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a>\n"
                 f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a>\n"
                 f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>",
