@@ -1,0 +1,240 @@
+# save a copy of this as config.yaml and adjust to your liking
+# Bot account details
+user:
+    credentials:
+        id: "@bot:example.com"
+        homeserver: https://example.com
+        access_token: foo
+        # If you want to enable encryption, set the device ID corresponding to the access token here.
+        # When using an appservice, you should use appservice login manually to generate a device ID and access token.
+        device_id: null
+    # Enable /sync? This is not needed for purely unencrypted webhook-based bots, but is necessary in most other cases.
+    sync: true
+    # Receive appservice transactions? This will add a /_matrix/app/v1/transactions endpoint on
+    # the HTTP server configured below. The base_path will not be applied for the /transactions path.
+    appservice: false
+    # When appservice mode is enabled, the hs_token for the appservice.
+    hs_token: null
+    # Automatically accept invites?
+    autojoin: false
+    # The displayname and avatar URL to set for the bot on startup.
+    # Set to "disable" to not change the the current displayname/avatar.
+    displayname: disable
+    avatar_url: disable
+
+    # Should events from the initial sync be ignored? This should usually always be true.
+    ignore_initial_sync: true
+    # Should events from the first sync after starting be ignored? This can be set to false
+    # if you want the bot to handle messages that were sent while the bot was down.
+    ignore_first_sync: true
+
+# Web server settings. These will only take effect if the plugin requests it using `webapp: true` in the meta file,
+# or if user -> appservice is set to true.
+server:
+    # The IP and port to listen to.
+    hostname: 0.0.0.0
+    port: 8080
+    # The base path where the plugin's web resources will be served. Unlike the normal mode,
+    # the webserver is dedicated for a single bot in standalone mode, so the default path
+    # is just /. If you want to emulate normal mode, set this to /_matrix/maubot/plugin/something
+    base_path: /
+    # The public URL where the resources are available. The base path is automatically appended to this.
+    public_url: https://example.com
+
+# The database for the plugin. Used for plugin data, the sync token and e2ee data (if enabled).
+# SQLite and Postgres are supported.
+database: sqlite:/data/bot.db
+
+# Additional arguments for asyncpg.create_pool() or sqlite3.connect()
+# https://magicstack.github.io/asyncpg/current/api/index.html#asyncpg.pool.create_pool
+# https://docs.python.org/3/library/sqlite3.html#sqlite3.connect
+# For sqlite, min_size is used as the connection thread pool size and max_size is ignored.
+database_opts:
+    min_size: 1
+    max_size: 10
+
+# Config for the plugin. Refer to the plugin's base-config.yaml to find what (if anything) to put here.
+plugin_config: 
+    
+    # the room-id of the matrix room or space to use as your "full user list"
+    # changes to user power levelsin this room will affect all rooms in the space
+    # some features may not work if this is a regular room. use a space.
+    # leave this empty to use the initialize command to create a new community to manage,
+    # based on opinionated defaults.
+    parent_room: ''
+
+    # sleep time between actions. you can drop this to 0 if your bot has no
+    # ratelimits imposed on its homeserver, otherwise you may want to increase this
+    # to avoid errors.
+    sleep: 5
+
+    # whether to encrypt rooms when using the room creation commands
+    # when this is false, you can still use the --encrypt flag to force encryption
+    # when creating new rooms
+    encrypt: False
+
+    # when creating a new room, what power-level should be required to invite users?
+    # this is helpful to prevent malicious accounts from inviting spam bots by restricting
+    # room defaults to moderators being the only people who can invite new users from outside
+    # of your managed community. otherwise, you must be a space member to join the rooms.
+    invite_power_level: 50
+
+    # number of days of inactivity to be considered in the "warning zone"
+    # users in this category will appear in the report as inactive
+    warn_threshold_days: 30
+
+    # number of days of inactivity to be considered in the "danger zone"
+    # users in this category will appear in the purgable report and are
+    # subject to removal by the purge command.
+    kick_threshold_days: 60
+
+    # track users? if false, will disable all tracking and avoid writing anything to the database.
+    track_users: True
+
+    # track messages? if false, will not track user activity timestamps. enable if you'd like to track
+    # inactive users in your community
+    track_messages: True
+
+    # track reactions? if false, will only track activity based on normal message events, but if true
+    # will update the user's last-active date when they add a reaction to a message
+    track_reactions: True
+
+    # list of users who can use administrative commands. these users will also be made room admins (PL100)
+    # DEPRECATED: set user powerlevels in the parent room instead.
+    admins: []
+
+    # list of users who should be considered community moderators. these users will be made room mods (PL50)
+    # DEPRECATED: set userpowerlevels in the parent room instead.
+    moderators: []
+
+    # list of users who should be invited to new rooms immediately (other bots, moderators, perhaps)
+    # use full matrix IDs here
+    invitees: []
+
+    # auto-greet users in rooms with these messages
+    # map greeting messages to a room
+    # you can use {user} to reference the joining user in this message using a
+    # matrix.to link (rendered as a "pill" in element clients)
+    # html formatting is supported
+    # set to {} if you don't care about greetings
+    greetings:
+      generic: |
+        Welcome {user}! Please be sure to read the topic for helpful links and information.
+        Use <a href="https://google.com">Google</a> for all other queries ;)
+      encrypted: |
+        welcome {user}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
+        alarmed.
+
+    # which of the above greetings should be used in which rooms? use the exact name of each greeting
+    # you've assigned, e.g. 'generic' or 'encrypted'. you must use the room ID here.
+    # enter 'none' to avoid sending a message, but still be notified in the notification_room listed below.
+    # set to {} if you don't care about greetings or join notifications
+    greeting_rooms:
+      '!someroomid:server.tld': generic
+      '!someotherroom:server.tld': generic
+      '!myencryptedroomid:server.tld': encrypted
+
+    # how long to wait (in seconds) before sending a greeting to a new joiner
+    welcome_sleep: 0
+
+    # add a room ID here to send a message to when someone joins the above rooms
+    # (optional)
+    notification_room: 
+
+    # message to send to the notification room when someone joins one of the above rooms:
+    join_notification_message: |
+      User <code>{user}</code> has joined <code>{room}</code>.
+
+    # whether to censor files/messages
+    # can be boolean (true/false) for all-or-nothing behavior,
+    # or pass a list of room IDs to only censor certain rooms. this may be helpful
+    # if certain rooms are publicly facing while others are more trustworthy.
+    # this bot, bot admins and bot moderators are immune to censorship.
+    censor: false
+
+    # if censoring content, what minimum Power Level is required to not be censored?
+    # this allows easy permission of trusted users in a room to post images or files on demand.
+    # rooms usually default to 0 power level for normal users.
+    uncensor_pl: 1
+
+    # whether to redact file and image uploads. this will apply to all rooms defined
+    # in the censor variable (either boolean or a list of room IDs).
+    censor_files: true
+
+    # what words should trigger message redaction if censorship is enabled?
+    censor_wordlist:
+      - 'effword'
+      - 'essword'
+
+    # using one of these words results in redaction AND an instant ban. use with EXTREME caution. wordlist pattern matching can have
+    # unintended consequences! set to an empty list [] to avoid using.
+    censor_wordlist_instaban: []
+
+    # list of banlists that should be subscribed to, such as #community-moderation-effort-bl:neko.dev
+    # when users join any room managed by this bot, they are compared against these existing banlists
+    # if found, they will immediately be banned.
+    # your bot MUST be in the banlist room already!
+    banlists: 
+      - '#community-moderation-effort-bl:neko.dev'
+
+    # should we ban proactively? this will ban users in your rooms if a new ban event is added to
+    # the banlist policy room for their account. however, without this enabled,
+    # an account may join your rooms, THEN get added to the banlist, and you will have to manually
+    # ban them from your rooms.
+    proactive_banning: true
+
+    # should we redact messages when a user is banned? limited to their last 100 messages in each room.
+    # redactions are processed every minute, they are not immediate.
+    redact_on_ban: true
+
+    # should we verify that users are human before allowing them to send messages?
+    # can be boolean (true/false) for all-or-nothing behavior,
+    # or pass a list of room IDs to only verify users in certain rooms
+    # use this in conjunction with room power-levels that require elevated permission
+    # to send messages in a room. do not enable this for rooms that will have more than
+    # a few hundred users as this will be very expensive when it comes to state resolution!
+    check_if_human: false
+
+    # list of phrases that users must type to verify they are human
+    # if check_if_human is true but this list is empty, verification will be skipped
+    # make these your favorite movie quotes, core values of your community, or
+    # whatever you want. the more unique and obscure, the better.
+    verification_phrases: 
+    - Yes, I am a human!
+    - I am a robot, but I'm nice.
+    - My name is Inigo Montoya.
+    - The wet bird flies at night.
+    - Be excellent to each other.
+    - Party on, dudes.
+
+    # number of attempts a user has to enter the correct verification phrase
+    verification_attempts: 3
+
+    # message to send to users when they need to verify they are human
+    # use {room} for the room name and {phrase} for the verification phrase
+    verification_message: |
+      Thank you for joining {room}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
+
+      Please send a message to this chat with the content: "{phrase}"
+
+# Standard Python logging configuration
+logging:
+    version: 1
+    formatters:
+        colored:
+            (): maubot.lib.color_log.ColorFormatter
+            format: "[%(asctime)s] [%(levelname)s@%(name)s] %(message)s"
+    handlers:
+        console:
+            class: logging.StreamHandler
+            formatter: colored
+    loggers:
+        maubot:
+            level: DEBUG
+        mau:
+            level: DEBUG
+        aiohttp:
+            level: INFO
+    root:
+        level: DEBUG
+        handlers: [console]
