@@ -35,7 +35,7 @@ from mautrix.types import (
     SpaceParentStateEventContent,
     JoinRulesStateEventContent,
     JoinRule,
-    RoomCreatePreset,
+    RoomCreatePreset
 )
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
@@ -188,6 +188,60 @@ class CommunityBot(Plugin):
         
         return len(conflicting_aliases) == 0, conflicting_aliases
 
+    async def create_space(self, space_name: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None) -> tuple[str, str]:
+        """Create a new space without community slug suffix.
+        
+        Args:
+            space_name: The name for the new space
+            evt: Optional MessageEvent for progress updates
+            power_level_override: Optional power levels to use
+            
+        Returns:
+            tuple: (space_id, space_alias) if successful, None if failed
+        """
+        try:
+            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", space_name).lower()
+            invitees = self.config["invitees"]
+            server = self.client.parse_user_id(self.client.mxid)[1]
+
+            # Validate that the space alias is available
+            is_available = await self.validate_room_alias(sanitized_name, server)
+            if not is_available:
+                error_msg = f"Space alias #{sanitized_name}:{server} already exists. Cannot create space."
+                self.log.error(error_msg)
+                if evt:
+                    await evt.respond(error_msg)
+                return None, None
+
+            if evt:
+                mymsg = await evt.respond(
+                    f"creating space {sanitized_name}, give me a minute..."
+                )
+
+            # Create the space with space-specific content
+            space_id = await self.client.create_room(
+                alias_localpart=sanitized_name,
+                name=space_name,
+                invitees=invitees,
+                power_level_override=power_level_override,
+                creation_content={"type": "m.space"}
+            )
+
+            if evt:
+                await evt.respond(
+                    f"<a href='https://matrix.to/#/#{sanitized_name}:{server}'>#{sanitized_name}:{server}</a> has been created.",
+                    edits=mymsg,
+                    allow_html=True
+                )
+
+            return space_id, f"#{sanitized_name}:{server}"
+
+        except Exception as e:
+            error_msg = f"Failed to create space: {e}"
+            self.log.error(error_msg)
+            if evt:
+                await evt.respond(error_msg, edits=mymsg)
+            return None, None
     async def _redaction_loop(self) -> None:
         while True:
             try:
@@ -1755,6 +1809,15 @@ class CommunityBot(Plugin):
                     }
                 })
 
+            # Add history visibility if specified in creation_content
+            if creation_content and "m.room.history_visibility" in creation_content:
+                initial_state.append({
+                    "type": str(EventType.ROOM_HISTORY_VISIBILITY),
+                    "content": {
+                        "history_visibility": creation_content["m.room.history_visibility"]
+                    }
+                })
+
             # Create the room with all initial states
             room_id = await self.client.create_room(
                 alias_localpart=alias_localpart,
@@ -2393,15 +2456,14 @@ class CommunityBot(Plugin):
                 self.config["community_slug"] = community_slug
                 self.log.info(f"Generated community slug: {community_slug}")
             
-            # Define all rooms that will be created during initialization
-            rooms_to_create = [
-                community_name,  # Main space
+            # Define child rooms that will be created during initialization (excluding the space itself)
+            child_rooms_to_create = [
                 f"{community_name} Moderators",  # Moderators room
                 f"{community_name} Waiting Room"  # Waiting room
             ]
             
-            # Validate all room aliases before creating any rooms
-            is_valid, conflicting_aliases = await self.validate_room_aliases(rooms_to_create, evt)
+            # Validate child room aliases before creating any rooms
+            is_valid, conflicting_aliases = await self.validate_room_aliases(child_rooms_to_create, evt)
             if not is_valid:
                 error_msg = f"Cannot initialize community: The following room aliases already exist:\n" + "\n".join(conflicting_aliases)
                 await evt.respond(error_msg, edits=msg)
@@ -2427,12 +2489,15 @@ class CommunityBot(Plugin):
             power_levels.invite = self.config["invite_power_level"]
 
             # Create the space with appropriate metadata and power levels
-            space_id, space_alias = await self.create_room(
+            space_id, space_alias = await self.create_space(
                 community_name,
                 evt,
-                power_level_override=power_levels,
-                creation_content={"type": "m.space"}
+                power_level_override=power_levels
             )
+
+            if not space_id:
+                await evt.respond("Failed to create space", edits=msg)
+                return
 
             # Set the space as the parent room in config
             self.config["parent_room"] = space_id
@@ -2466,9 +2531,17 @@ class CommunityBot(Plugin):
 
             # Create waiting room
             waiting_room_id, waiting_room_alias = await self.create_room(
-                f"{community_name} Waiting Room",
-                evt
+                f"{community_name} Waiting Room --unencrypted",
+                evt,
+                creation_content={
+                    "m.federate": True,
+                    "m.room.history_visibility": "joined"
+                }
             )
+
+            if not waiting_room_id:
+                await evt.respond("Failed to create waiting room", edits=msg)
+                return
 
             # Set waiting room to be joinable by anyone
             await self.client.send_state_event(
@@ -2491,12 +2564,17 @@ class CommunityBot(Plugin):
             # Save the updated config
             self.config.save()
 
+            # Check if default encryption is enabled and add warning for waiting room
+            warning_msg = ""
+            if self.config.get("encrypt", False):
+                warning_msg = "\n\n⚠️ **Note: Waiting room created without encryption (as it is a public room)**"
+
             await evt.respond(
                 f"Community space initialized successfully!\n\n"
                 f"Community Slug: {self.config['community_slug']}\n"
                 f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a>\n"
                 f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a>\n"
-                f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>",
+                f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>{warning_msg}",
                 edits=msg,
                 allow_html=True
             )
