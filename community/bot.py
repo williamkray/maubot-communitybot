@@ -1035,6 +1035,25 @@ class CommunityBot(Plugin):
                     f"Phrase does not match, you have {state['attempts']} tries remaining."
                 )
 
+    async def upsert_user_timestamp(self, mxid: str, timestamp: int) -> None:
+        """Database-agnostic upsert for user timestamp updates."""
+        try:
+            # Try insert first
+            await self.database.execute(
+                "INSERT INTO user_events(mxid, last_message_timestamp) VALUES ($1, $2)",
+                mxid, timestamp
+            )
+        except Exception as e:
+            # If insert fails due to existing record, update instead
+            if "UNIQUE constraint failed" in str(e) or "duplicate key" in str(e).lower():
+                await self.database.execute(
+                    "UPDATE user_events SET last_message_timestamp = $2 WHERE mxid = $1",
+                    mxid, timestamp
+                )
+            else:
+                # Re-raise if it's not a constraint violation
+                raise
+
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
         power_levels = await self.client.get_state_event(
@@ -1085,13 +1104,7 @@ class CommunityBot(Plugin):
             if evt.room_id not in rooms_to_manage:
                 return
             else:
-                q = """
-                    INSERT INTO user_events(mxid, last_message_timestamp) 
-                    VALUES ($1, $2)
-                    ON CONFLICT(mxid)
-                    DO UPDATE SET last_message_timestamp=$2
-                """
-                await self.database.execute(q, evt.sender, evt.timestamp)
+                await self.upsert_user_timestamp(evt.sender, evt.timestamp)
 
     @event.on(EventType.REACTION)
     async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
@@ -1104,13 +1117,7 @@ class CommunityBot(Plugin):
             if evt.room_id not in rooms_to_manage:
                 return
             else:
-                q = """
-                    INSERT INTO user_events(mxid, last_message_timestamp) 
-                    VALUES ($1, $2)
-                    ON CONFLICT(mxid)
-                    DO UPDATE SET last_message_timestamp=$2
-                """
-                await self.database.execute(q, evt.sender, evt.timestamp)
+                await self.upsert_user_timestamp(evt.sender, evt.timestamp)
 
     @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
@@ -2146,29 +2153,8 @@ class CommunityBot(Plugin):
 
     async def store_verification_state(self, dm_room_id: str, state: dict) -> None:
         """Store verification state in the database."""
-        # First try to update
-        update_query = """UPDATE verification_states
-                          SET verification_phrase  = $4, \
-                              attempts_remaining   = $5, \
-                              required_power_level = $6, \
-                              user_id              = $2, \
-                              target_room_id       = $3 \
-                          WHERE dm_room_id = $1"""
-        self.log.debug(f"Attempting update for verification state begin, specifically for {dm_room_id}")
-        result = await self.database.execute(update_query, dm_room_id,
-                                             state["user"],
-                                             state["target_room"],
-                                             state["phrase"],
-                                             state["attempts"],
-                                             state["required_level"]
-                                             )
-        self.log.debug(f"Result is: {result}")
-
-        # If no rows were updated, insert a new record
-        # postgresql response is "UPDATE 0"
-        # sqllite response is ???
-        if result == "UPDATE 0":  # No rows affected
-            self.log.debug("No rows updated, so doing insert!")
+        # Try to insert first, if it fails due to existing record, then update
+        try:
             insert_query = """INSERT INTO verification_states
                               (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, \
                                required_power_level)
@@ -2180,7 +2166,29 @@ class CommunityBot(Plugin):
                                         state["attempts"],
                                         state["required_level"]
                                         )
-        self.log.debug("Should be done with verification state storage, should've updated or inserted!")
+            self.log.debug(f"Inserted new verification state for {dm_room_id}")
+        except Exception as e:
+            # If insert fails (likely due to existing record), try update
+            if "UNIQUE constraint failed" in str(e) or "duplicate key" in str(e).lower():
+                self.log.debug(f"Record exists for {dm_room_id}, updating instead")
+                update_query = """UPDATE verification_states
+                                  SET verification_phrase  = $4, \
+                                      attempts_remaining   = $5, \
+                                      required_power_level = $6, \
+                                      user_id              = $2, \
+                                      target_room_id       = $3 \
+                                  WHERE dm_room_id = $1"""
+                await self.database.execute(update_query, dm_room_id,
+                                             state["user"],
+                                             state["target_room"],
+                                             state["phrase"],
+                                             state["attempts"],
+                                             state["required_level"]
+                                             )
+                self.log.debug(f"Updated verification state for {dm_room_id}")
+            else:
+                # Re-raise if it's not a constraint violation
+                raise
 
     async def get_verification_state(self, dm_room_id: str) -> Optional[dict]:
         """Retrieve verification state from the database."""

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-docker run \
+docker run --rm \
   -v "$PWD"/data:/data \
   -v "$PWD":/opt/communitybot \
   --user $UID:$GID \
