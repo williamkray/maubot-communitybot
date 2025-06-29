@@ -2166,8 +2166,8 @@ class CommunityBot(Plugin):
 
         # If no rows were updated, insert a new record
         # postgresql response is "UPDATE 0"
-        # sqllite response is ???
-        if result == "UPDATE 0":  # No rows affected
+        # sqllite response is an object with a rowcount attached to it.
+        if result == "UPDATE 0" or (hasattr(result, 'rowcount') and result.rowcount == 0):
             self.log.debug("No rows updated, so doing insert!")
             insert_query = """INSERT INTO verification_states
                               (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, \
