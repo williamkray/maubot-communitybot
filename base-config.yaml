@@ -5,6 +5,11 @@
 # based on opinionated defaults.
 parent_room: ''
 
+# community slug
+# this will be used to suffix room aliases in order to avoid collisions with other communities
+# leave blank to generate an acronym of your community name during initialization
+community_slug: ''
+
 # sleep time between actions. you can drop this to 0 if your bot has no
 # ratelimits imposed on its homeserver, otherwise you may want to increase this
 # to avoid errors.
