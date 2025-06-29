@@ -974,8 +974,10 @@ class CommunityBot(Plugin):
 
         state = await self.get_verification_state(evt.room_id)
         if not state:
+            # self.log.debug(f"No verification state stored for {evt.room_id}")
             return
 
+        #self.log.debug(f"Checking verification for {evt.sender} in {evt.room_id}")
         user_phrase = evt.content.body.strip().lower()
         expected_phrase = state["phrase"].lower()
 
@@ -2144,17 +2146,41 @@ class CommunityBot(Plugin):
 
     async def store_verification_state(self, dm_room_id: str, state: dict) -> None:
         """Store verification state in the database."""
-        await self.database.execute(
-            """INSERT OR REPLACE INTO verification_states 
-               (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, required_power_level)
-               VALUES ($1, $2, $3, $4, $5, $6)""",
-            dm_room_id,
-            state["user"],
-            state["target_room"],
-            state["phrase"],
-            state["attempts"],
-            state["required_level"]
-        )
+        # First try to update
+        update_query = """UPDATE verification_states
+                          SET verification_phrase  = $4, \
+                              attempts_remaining   = $5, \
+                              required_power_level = $6, \
+                              user_id              = $2, \
+                              target_room_id       = $3 \
+                          WHERE dm_room_id = $1"""
+        self.log.debug(f"Attempting update for verification state begin, specifically for {dm_room_id}")
+        result = await self.database.execute(update_query, dm_room_id,
+                                             state["user"],
+                                             state["target_room"],
+                                             state["phrase"],
+                                             state["attempts"],
+                                             state["required_level"]
+                                             )
+        self.log.debug(f"Result is: {result}")
+
+        # If no rows were updated, insert a new record
+        # postgresql response is "UPDATE 0"
+        # sqllite response is ???
+        if result == "UPDATE 0":  # No rows affected
+            self.log.debug("No rows updated, so doing insert!")
+            insert_query = """INSERT INTO verification_states
+                              (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, \
+                               required_power_level)
+                              VALUES ($1, $2, $3, $4, $5, $6)"""
+            await self.database.execute(insert_query, dm_room_id,
+                                        state["user"],
+                                        state["target_room"],
+                                        state["phrase"],
+                                        state["attempts"],
+                                        state["required_level"]
+                                        )
+        self.log.debug("Should be done with verification state storage, should've updated or inserted!")
 
     async def get_verification_state(self, dm_room_id: str) -> Optional[dict]:
         """Retrieve verification state from the database."""
