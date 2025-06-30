@@ -2282,14 +2282,14 @@ class CommunityBot(Plugin):
                     )
                     error_list.append(roomname or room)
 
-            results = "Power levels synced from parent room.\n\n"
+            results = "Power levels synced from parent room.<br /><br />"
             if success_list:
-                results += f"Successfully updated rooms:\n<code>{', '.join(success_list)}</code>\n\n"
+                results += f"Successfully updated rooms:<br /><code>{', '.join(success_list)}</code><br /><br />"
             if skipped_list:
-                results += f"Skipped rooms due to verification settings:\n<code>{', '.join(skipped_list)}</code>\n\n"
+                results += f"Skipped rooms due to verification settings:<br /><code>{', '.join(skipped_list)}</code><br /><br />"
             if error_list:
                 results += (
-                    f"Failed to update rooms:\n<code>{', '.join(error_list)}</code>"
+                    f"Failed to update rooms:<br /><code>{', '.join(error_list)}</code>"
                 )
 
             await evt.respond(results, allow_html=True, edits=msg)
@@ -2606,13 +2606,13 @@ class CommunityBot(Plugin):
             # Check if default encryption is enabled and add warning for waiting room
             warning_msg = ""
             if self.config.get("encrypt", False):
-                warning_msg = "\n\n⚠️ **Note: Waiting room created without encryption (as it is a public room)**"
+                warning_msg = "<br /><br />⚠️ **Note: Waiting room created without encryption (as it is a public room)**"
 
             await evt.respond(
-                f"Community space initialized successfully!\n\n"
-                f"Community Slug: {self.config['community_slug']}\n"
-                f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a>\n"
-                f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a>\n"
+                f"Community space initialized successfully!<br /><br />"
+                f"Community Slug: {self.config['community_slug']}<br />"
+                f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a><br />"
+                f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a><br />"
                 f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>{warning_msg}",
                 edits=msg,
                 allow_html=True
@@ -2780,24 +2780,24 @@ class CommunityBot(Plugin):
                     report["issues"].append(f"Failed to check room {room_id}: {e}")
 
             # Generate concise summary response
-            response = "<h3>🔍 Bot Permission Diagnostic Summary</h3>\n\n"
+            response = "<h3>🔍 Bot Permission Diagnostic Summary</h3><br /><br />"
 
             # Space summary - only show if there are issues
             space_has_issues = False
             if "error" in report["space"]:
                 space_has_issues = True
-                response += "<h4>📋 Parent Space</h4>\n"
-                response += f"❌ <b>Error:</b> {report['space']['error']}\n\n"
+                response += "<h4>📋 Parent Space</h4><br />"
+                response += f"❌ <b>Error:</b> {report['space']['error']}<br /><br />"
             elif report["space"].get("bot_power_level", 0) < 100 or report["space"].get("users_higher") or report["space"].get("users_equal"):
                 space_has_issues = True
-                response += "<h4>📋 Parent Space</h4>\n"
+                response += "<h4>📋 Parent Space</h4><br />"
                 space_status = "✅" if report["space"]["has_admin"] else "❌"
-                response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if report['space']['has_admin'] else 'No'} (level: {report['space']['bot_power_level']})\n"
+                response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if report['space']['has_admin'] else 'No'} (level: {report['space']['bot_power_level']})<br />"
                 if report["space"]["users_higher"]:
-                    response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}\n"
+                    response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}<br />"
                 if report["space"]["users_equal"]:
-                    response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}\n"
-                response += "\n"
+                    response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}<br />"
+                response += "<br />"
 
             # Rooms summary - only show problematic rooms with room IDs
             problematic_rooms = []
@@ -2831,39 +2831,39 @@ class CommunityBot(Plugin):
 
             # Only show rooms section if there are problematic rooms
             if problematic_rooms:
-                response += f"<h4>🏠 Problematic Rooms ({len(problematic_rooms)} of {len(report['rooms'])} total)</h4>\n"
-                response += "<i>Use <code>!community doctor &lt;room_id&gt;</code> for detailed analysis of specific rooms</i>\n\n"
+                response += f"<h4>🏠 Problematic Rooms ({len(problematic_rooms)} of {len(report['rooms'])} total)</h4><br />"
+                response += "<i>Use <code>!community doctor &lt;room_id&gt;</code> for detailed analysis of specific rooms</i><br /><br />"
                 for room_info in problematic_rooms:
-                    response += f"{room_info}\n"
-                response += "\n"
+                    response += f"{room_info}<br />"
+                response += "<br />"
 
             # Summary - always show
-            response += f"<h4>📊 Summary</h4>\n"
-            response += f"• Parent space: {'✅ Admin' if report['space'].get('has_admin', False) else '❌ No admin'}\n"
-            response += f"• Rooms with admin: {admin_rooms}\n"
-            response += f"• Rooms without admin: {non_admin_rooms}\n"
+            response += f"<h4>📊 Summary</h4><br />"
+            response += f"• Parent space: {'✅ Admin' if report['space'].get('has_admin', False) else '❌ No admin'}<br />"
+            response += f"• Rooms with admin: {admin_rooms}<br />"
+            response += f"• Rooms without admin: {non_admin_rooms}<br />"
             if not_in_room_count > 0:
-                response += f"• Rooms bot not in: {not_in_room_count}\n"
+                response += f"• Rooms bot not in: {not_in_room_count}<br />"
             if error_rooms > 0:
-                response += f"• Rooms with errors: {error_rooms}\n"
-            response += "\n"
+                response += f"• Rooms with errors: {error_rooms}<br />"
+            response += "<br />"
 
             # Issues and warnings - only show if they exist
             if report["issues"]:
-                response += f"<h4>🚨 Critical Issues</h4>\n"
+                response += f"<h4>🚨 Critical Issues</h4><br />"
                 for issue in report["issues"]:
-                    response += f"• {issue}\n"
-                response += "\n"
+                    response += f"• {issue}<br />"
+                response += "<br />"
 
             if report["warnings"]:
-                response += f"<h4>⚠️ Warnings</h4>\n"
+                response += f"<h4>⚠️ Warnings</h4><br />"
                 for warning in report["warnings"]:
-                    response += f"• {warning}\n"
-                response += "\n"
+                    response += f"• {warning}<br />"
+                response += "<br />"
 
             if not report["issues"] and not report["warnings"] and not space_has_issues and not problematic_rooms:
-                response += f"<h4>✅ All Clear</h4>\n"
-                response += "No permission issues detected. The bot should be able to manage all rooms and users effectively.\n"
+                response += f"<h4>✅ All Clear</h4><br />"
+                response += "No permission issues detected. The bot should be able to manage all rooms and users effectively.<br />"
 
             # Try to send the response, and if it's too large, break it up
             try:
@@ -3002,15 +3002,15 @@ class CommunityBot(Plugin):
             except:
                 pass
 
-            response = f"<h3>🔍 Detailed Analysis: {room_name}</h3>\n"
-            response += f"<b>Room ID:</b> {room_id}\n\n"
+            response = f"<h3>🔍 Detailed Analysis: {room_name}</h3><br />"
+            response += f"<b>Room ID:</b> {room_id}<br /><br />"
 
             # Check if bot is in the room
             try:
                 await self.client.get_state_event(room_id, EventType.ROOM_MEMBER, self.client.mxid)
-                response += "✅ <b>Bot membership:</b> Bot is a member of this room\n\n"
+                response += "✅ <b>Bot membership:</b> Bot is a member of this room<br /><br />"
             except Exception:
-                response += "❌ <b>Bot membership:</b> Bot is not a member of this room\n\n"
+                response += "❌ <b>Bot membership:</b> Bot is not a member of this room<br /><br />"
                 await evt.respond(response, edits=msg, allow_html=True)
                 return
 
@@ -3019,14 +3019,14 @@ class CommunityBot(Plugin):
                 power_levels = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
                 bot_level = power_levels.get_user_level(self.client.mxid)
                 
-                response += f"<h4>📊 Power Level Analysis</h4>\n"
-                response += f"• <b>Bot power level:</b> {bot_level}\n"
-                response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}\n"
-                response += f"• <b>Default user level:</b> {power_levels.users_default}\n"
-                response += f"• <b>Invite level:</b> {power_levels.invite}\n"
-                response += f"• <b>Kick level:</b> {power_levels.kick}\n"
-                response += f"• <b>Ban level:</b> {power_levels.ban}\n"
-                response += f"• <b>Redact level:</b> {power_levels.redact}\n\n"
+                response += f"<h4>📊 Power Level Analysis</h4><br />"
+                response += f"• <b>Bot power level:</b> {bot_level}<br />"
+                response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}<br />"
+                response += f"• <b>Default user level:</b> {power_levels.users_default}<br />"
+                response += f"• <b>Invite level:</b> {power_levels.invite}<br />"
+                response += f"• <b>Kick level:</b> {power_levels.kick}<br />"
+                response += f"• <b>Ban level:</b> {power_levels.ban}<br />"
+                response += f"• <b>Redact level:</b> {power_levels.redact}<br /><br />"
 
                 # Check for users with equal or higher power level
                 users_higher = []
@@ -3040,22 +3040,22 @@ class CommunityBot(Plugin):
                             users_higher.append({"user": user, "level": level})
 
                 if users_higher:
-                    response += f"<h4>⚠️ Users with Higher Power Level</h4>\n"
+                    response += f"<h4>⚠️ Users with Higher Power Level</h4><br />"
                     for user_info in users_higher:
-                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})\n"
-                    response += "\n"
+                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
+                    response += "<br />"
 
                 if users_equal:
-                    response += f"<h4>⚠️ Users with Equal Power Level</h4>\n"
+                    response += f"<h4>⚠️ Users with Equal Power Level</h4><br />"
                     for user_info in users_equal:
-                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})\n"
-                    response += "\n"
+                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
+                    response += "<br />"
 
                 if not users_higher and not users_equal:
-                    response += "✅ <b>No power level conflicts detected</b>\n\n"
+                    response += "✅ <b>No power level conflicts detected</b><br /><br />"
 
                 # Check specific permissions
-                response += f"<h4>🔐 Permission Analysis</h4>\n"
+                response += f"<h4>🔐 Permission Analysis</h4><br />"
                 
                 # Get required levels for various actions
                 events_default = power_levels.events_default
@@ -3075,38 +3075,38 @@ class CommunityBot(Plugin):
                 for perm_name, required_level in permissions:
                     has_perm = bot_level >= required_level
                     status = "✅" if has_perm else "❌"
-                    response += f"• {status} <b>{perm_name}:</b> {'Yes' if has_perm else 'No'} (required: {required_level})\n"
+                    response += f"• {status} <b>{perm_name}:</b> {'Yes' if has_perm else 'No'} (required: {required_level})<br />"
 
             except Exception as e:
-                response += f"❌ <b>Error getting power levels:</b> {e}\n\n"
+                response += f"❌ <b>Error getting power levels:</b> {e}<br /><br />"
 
             # Check room state
             try:
-                response += f"<h4>🏠 Room State</h4>\n"
+                response += f"<h4>🏠 Room State</h4><br />"
                 
                 # Check join rules
                 try:
                     join_rules = await self.client.get_state_event(room_id, EventType.ROOM_JOIN_RULES)
-                    response += f"• <b>Join rule:</b> {join_rules.join_rule}\n"
+                    response += f"• <b>Join rule:</b> {join_rules.join_rule}<br />"
                 except:
-                    response += "• <b>Join rule:</b> Could not determine\n"
+                    response += "• <b>Join rule:</b> Could not determine<br />"
 
                 # Check encryption
                 try:
                     encryption = await self.client.get_state_event(room_id, EventType.ROOM_ENCRYPTION)
-                    response += f"• <b>Encryption:</b> ✅ Enabled ({encryption.algorithm})\n"
+                    response += f"• <b>Encryption:</b> ✅ Enabled ({encryption.algorithm})<br />"
                 except:
-                    response += "• <b>Encryption:</b> ❌ Not enabled\n"
+                    response += "• <b>Encryption:</b> ❌ Not enabled<br />"
 
                 # Check space parent
                 try:
                     space_parent = await self.client.get_state_event(room_id, EventType.SPACE_PARENT)
-                    response += f"• <b>Space parent:</b> ✅ {space_parent.state_key}\n"
+                    response += f"• <b>Space parent:</b> ✅ {space_parent.state_key}<br />"
                 except:
-                    response += "• <b>Space parent:</b> ❌ Not set\n"
+                    response += "• <b>Space parent:</b> ❌ Not set<br />"
 
             except Exception as e:
-                response += f"❌ <b>Error checking room state:</b> {e}\n"
+                response += f"❌ <b>Error checking room state:</b> {e}<br />"
 
             await evt.respond(response, edits=msg, allow_html=True)
 
