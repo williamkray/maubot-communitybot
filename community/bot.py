@@ -2774,11 +2774,15 @@ class CommunityBot(Plugin):
             # Generate response
             response = "<h3>🔍 Bot Permission Diagnostic Report</h3>\n\n"
 
-            # Space summary
-            response += "<h4>📋 Parent Space</h4>\n"
+            # Space summary - only show if there are issues
+            space_has_issues = False
             if "error" in report["space"]:
+                space_has_issues = True
+                response += "<h4>📋 Parent Space</h4>\n"
                 response += f"❌ <b>Error:</b> {report['space']['error']}\n\n"
-            else:
+            elif report["space"].get("bot_power_level", 0) < 100 or report["space"].get("users_higher") or report["space"].get("users_equal"):
+                space_has_issues = True
+                response += "<h4>📋 Parent Space</h4>\n"
                 space_status = "✅" if report["space"]["has_admin"] else "❌"
                 response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if report['space']['has_admin'] else 'No'} (level: {report['space']['bot_power_level']})\n"
                 if report["space"]["users_higher"]:
@@ -2787,9 +2791,8 @@ class CommunityBot(Plugin):
                     response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}\n"
                 response += "\n"
 
-            # Rooms summary
-            response += f"<h4>🏠 Rooms in Space ({len(report['rooms'])} total)</h4>\n"
-            
+            # Rooms summary - only show problematic rooms
+            problematic_rooms = []
             admin_rooms = 0
             non_admin_rooms = 0
             error_rooms = 0
@@ -2800,25 +2803,32 @@ class CommunityBot(Plugin):
                     error_rooms += 1
                     if room_data["error"] == "Bot not in room":
                         not_in_room_count += 1
-                        response += f"❌ <b>{room_data.get('room_name', room_id)}:</b> Bot not in room\n"
+                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}:</b> Bot not in room")
                     else:
-                        response += f"❌ <b>{room_data.get('room_name', room_id)}:</b> Error - {room_data['error']}\n"
+                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}:</b> Error - {room_data['error']}")
                 else:
                     if room_data["has_admin"]:
                         admin_rooms += 1
-                        status = "✅"
+                        # Only show if there are power level conflicts
+                        if room_data["users_higher"] or room_data["users_equal"]:
+                            room_info = f"✅ <b>{room_data['room_name']}:</b> Admin: Yes (level: {room_data['bot_power_level']})"
+                            if room_data["users_higher"]:
+                                room_info += f"\n  ⚠️ Higher power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_higher']])}"
+                            if room_data["users_equal"]:
+                                room_info += f"\n  ⚠️ Equal power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_equal']])}"
+                            problematic_rooms.append(room_info)
                     else:
                         non_admin_rooms += 1
-                        status = "❌"
-                    
-                    response += f"{status} <b>{room_data['room_name']}:</b> Admin: {'Yes' if room_data['has_admin'] else 'No'} (level: {room_data['bot_power_level']})\n"
-                    
-                    if room_data["users_higher"]:
-                        response += f"  ⚠️ Higher power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_higher']])}\n"
-                    if room_data["users_equal"]:
-                        response += f"  ⚠️ Equal power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_equal']])}\n"
+                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}:</b> Admin: No (level: {room_data['bot_power_level']})")
+
+            # Only show rooms section if there are problematic rooms
+            if problematic_rooms:
+                response += f"<h4>🏠 Problematic Rooms ({len(problematic_rooms)} of {len(report['rooms'])} total)</h4>\n"
+                for room_info in problematic_rooms:
+                    response += f"{room_info}\n"
                 response += "\n"
 
+            # Summary - always show
             response += f"<h4>📊 Summary</h4>\n"
             response += f"• Parent space: {'✅ Admin' if report['space'].get('has_admin', False) else '❌ No admin'}\n"
             response += f"• Rooms with admin: {admin_rooms}\n"
@@ -2829,7 +2839,7 @@ class CommunityBot(Plugin):
                 response += f"• Rooms with errors: {error_rooms}\n"
             response += "\n"
 
-            # Issues and warnings
+            # Issues and warnings - only show if they exist
             if report["issues"]:
                 response += f"<h4>🚨 Critical Issues</h4>\n"
                 for issue in report["issues"]:
@@ -2842,13 +2852,104 @@ class CommunityBot(Plugin):
                     response += f"• {warning}\n"
                 response += "\n"
 
-            if not report["issues"] and not report["warnings"]:
+            if not report["issues"] and not report["warnings"] and not space_has_issues and not problematic_rooms:
                 response += f"<h4>✅ All Clear</h4>\n"
                 response += "No permission issues detected. The bot should be able to manage all rooms and users effectively.\n"
 
-            await evt.respond(response, edits=msg, allow_html=True)
+            # Try to send the response, and if it's too large, break it up
+            try:
+                await evt.respond(response, edits=msg, allow_html=True)
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(phrase in error_str for phrase in ["event too large", "413", "payload too large", "message too long"]):
+                    self.log.info(f"Doctor report too large ({len(response)} chars), breaking into multiple messages")
+                    
+                    # Break up the response into smaller chunks
+                    chunks = self._split_doctor_report(response)
+                    self.log.info(f"Split report into {len(chunks)} chunks")
+                    
+                    # Send the first chunk as an edit to the original message
+                    if chunks:
+                        await evt.respond(chunks[0], edits=msg, allow_html=True)
+                        
+                        # Send remaining chunks as new messages
+                        for i, chunk in enumerate(chunks[1:], 2):
+                            await evt.respond(f"<h4>🔍 Bot Permission Diagnostic Report (Part {i}/{len(chunks)})</h4>\n{chunk}", allow_html=True)
+                            await asyncio.sleep(0.5)  # Small delay between messages
+                else:
+                    # Re-raise if it's not a size issue
+                    raise
 
         except Exception as e:
             error_msg = f"Failed to run diagnostic check: {e}"
             self.log.error(error_msg)
             await evt.respond(error_msg, edits=msg)
+
+    def _split_doctor_report(self, report_text: str, max_chunk_size: int = 4000) -> list[str]:
+        """Split a large doctor report into smaller chunks.
+        
+        Args:
+            report_text: The full report text to split
+            max_chunk_size: Maximum size of each chunk in characters
+            
+        Returns:
+            list: List of text chunks
+        """
+        if len(report_text) <= max_chunk_size:
+            return [report_text]
+        
+        chunks = []
+        lines = report_text.split('\n')
+        current_chunk = ""
+        
+        for line in lines:
+            # If adding this line would exceed the limit, start a new chunk
+            if len(current_chunk) + len(line) + 1 > max_chunk_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            
+            current_chunk += line + '\n'
+        
+        # Add the last chunk if it has content
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        
+        # If we still have chunks that are too large, split them more aggressively
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) <= max_chunk_size:
+                final_chunks.append(chunk)
+            else:
+                # Split by sections (headers) if possible
+                section_chunks = self._split_by_sections(chunk, max_chunk_size)
+                final_chunks.extend(section_chunks)
+        
+        return final_chunks
+    
+    def _split_by_sections(self, text: str, max_size: int) -> list[str]:
+        """Split text by section headers to maintain logical grouping.
+        
+        Args:
+            text: Text to split
+            max_size: Maximum size per chunk
+            
+        Returns:
+            list: List of text chunks
+        """
+        # Split by headers (h3, h4)
+        import re
+        sections = re.split(r'(<h[34][^>]*>.*?</h[34]>)', text, flags=re.DOTALL)
+        
+        chunks = []
+        current_chunk = ""
+        
+        for section in sections:
+            if len(current_chunk) + len(section) > max_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            current_chunk += section
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        
+        return chunks
