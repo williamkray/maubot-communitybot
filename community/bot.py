@@ -188,6 +188,25 @@ class CommunityBot(Plugin):
         
         return len(conflicting_aliases) == 0, conflicting_aliases
 
+    async def get_moderators_and_above(self) -> list[str]:
+        """Get list of users with moderator or higher permissions from the parent space.
+        
+        Returns:
+            list: List of user IDs with power level >= 50 (moderator or above)
+        """
+        try:
+            power_levels = await self.client.get_state_event(
+                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
+            )
+            moderators = []
+            for user, level in power_levels.users.items():
+                if level >= 50:  # Moderator level or above
+                    moderators.append(user)
+            return moderators
+        except Exception as e:
+            self.log.error(f"Failed to get moderators from parent space: {e}")
+            return []
+
     async def create_space(self, space_name: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None) -> tuple[str, str]:
         """Create a new space without community slug suffix.
         
@@ -1707,7 +1726,7 @@ class CommunityBot(Plugin):
             )
         await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
 
-    async def create_room(self, roomname: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None, creation_content: Optional[dict] = None) -> None:
+    async def create_room(self, roomname: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None, creation_content: Optional[dict] = None, invitees: Optional[list[str]] = None) -> None:
         """Create a new room and add it to the parent space.
         
         Args:
@@ -1715,6 +1734,7 @@ class CommunityBot(Plugin):
             evt: Optional MessageEvent for progress updates. If provided, will send status messages.
             power_level_override: Optional power levels to use. If not provided, will try to get from parent room.
             creation_content: Optional creation content to use when creating the room.
+            invitees: Optional list of users to invite. If not provided, uses config invitees.
             
         Returns:
             tuple: (room_id, room_alias) if successful, None if failed
@@ -1730,7 +1750,8 @@ class CommunityBot(Plugin):
             if force_unencryption:
                 roomname = unencrypted_flag_regex.sub("", roomname)
             sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
-            invitees = self.config["invitees"]
+            # Use provided invitees or fall back to config invitees
+            room_invitees = invitees if invitees is not None else self.config["invitees"]
             parent_room = self.config["parent_room"]
             server = self.client.parse_user_id(self.client.mxid)[1]
 
@@ -1827,7 +1848,7 @@ class CommunityBot(Plugin):
             room_id = await self.client.create_room(
                 alias_localpart=alias_localpart,
                 name=roomname,
-                invitees=invitees,
+                invitees=room_invitees,
                 initial_state=initial_state,
                 power_level_override=power_level_override,
                 creation_content=creation_content
@@ -2524,9 +2545,20 @@ class CommunityBot(Plugin):
                 return
 
             # Create moderators room
+            # Get moderators and above from the space instead of using config invitees
+            moderators = await self.get_moderators_and_above()
+            if not moderators:
+                self.log.warning("No moderators found in space, moderators room will be created without initial members")
+            else:
+                # Filter out the bot's own user ID to prevent self-invitation
+                moderators = [user for user in moderators if user != self.client.mxid]
+                if not moderators:
+                    self.log.info("Only bot found in moderators list, moderators room will be created without initial members")
+            
             mod_room_id, mod_room_alias = await self.create_room(
                 f"{community_name} Moderators",
-                evt
+                evt,
+                invitees=moderators  # Use moderators list instead of config invitees
             )
 
             # Set moderators room to invite-only
