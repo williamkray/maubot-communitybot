@@ -2627,11 +2627,17 @@ class CommunityBot(Plugin):
         "doctor",
         help="review bot permissions across the space and all rooms to identify potential issues"
     )
-    async def doctor_check(self, evt: MessageEvent) -> None:
+    @command.argument("room", required=False)
+    async def doctor_check(self, evt: MessageEvent, room: str = None) -> None:
         if not await self.check_parent_room(evt):
             return
         if not await self.user_permitted(evt.sender):
             await evt.reply("You don't have permission to use this command")
+            return
+
+        # If a room is specified, show detailed report for that room
+        if room:
+            await self._doctor_room_detail(evt, room)
             return
 
         msg = await evt.respond("Running diagnostic check...")
@@ -2681,11 +2687,12 @@ class CommunityBot(Plugin):
                 if bot_level < 100:
                     report["issues"].append(f"Bot lacks administrative privileges in parent space (level: {bot_level})")
                 
-                if report["space"]["users_higher"]:
-                    report["warnings"].append(f"Users with higher power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}")
-                
-                if report["space"]["users_equal"]:
-                    report["warnings"].append(f"Users with equal power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}")
+                # Remove verbose warnings from summary - these will be shown in detailed room reports
+                # if report["space"]["users_higher"]:
+                #     report["warnings"].append(f"Users with higher power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}")
+                # 
+                # if report["space"]["users_equal"]:
+                #     report["warnings"].append(f"Users with equal power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}")
 
             except Exception as e:
                 report["space"] = {
@@ -2756,11 +2763,12 @@ class CommunityBot(Plugin):
                     if bot_level < 100:
                         report["issues"].append(f"Bot lacks administrative privileges in room '{room_name}' ({room_id}) - level: {bot_level}")
                     
-                    if room_report["users_higher"]:
-                        report["warnings"].append(f"Users with higher power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_higher']])}")
-                    
-                    if room_report["users_equal"]:
-                        report["warnings"].append(f"Users with equal power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_equal']])}")
+                    # Remove verbose warnings from summary - these will be shown in detailed room reports
+                    # if room_report["users_higher"]:
+                    #     report["warnings"].append(f"Users with higher power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_higher']])}")
+                    # 
+                    # if room_report["users_equal"]:
+                    #     report["warnings"].append(f"Users with equal power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_equal']])}")
 
                     report["rooms"][room_id] = room_report
 
@@ -2771,8 +2779,8 @@ class CommunityBot(Plugin):
                     }
                     report["issues"].append(f"Failed to check room {room_id}: {e}")
 
-            # Generate response
-            response = "<h3>🔍 Bot Permission Diagnostic Report</h3>\n\n"
+            # Generate concise summary response
+            response = "<h3>🔍 Bot Permission Diagnostic Summary</h3>\n\n"
 
             # Space summary - only show if there are issues
             space_has_issues = False
@@ -2791,7 +2799,7 @@ class CommunityBot(Plugin):
                     response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}\n"
                 response += "\n"
 
-            # Rooms summary - only show problematic rooms
+            # Rooms summary - only show problematic rooms with room IDs
             problematic_rooms = []
             admin_rooms = 0
             non_admin_rooms = 0
@@ -2803,27 +2811,28 @@ class CommunityBot(Plugin):
                     error_rooms += 1
                     if room_data["error"] == "Bot not in room":
                         not_in_room_count += 1
-                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}:</b> Bot not in room")
+                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}</b> ({room_id}): Bot not in room")
                     else:
-                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}:</b> Error - {room_data['error']}")
+                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}</b> ({room_id}): Error - {room_data['error']}")
                 else:
                     if room_data["has_admin"]:
                         admin_rooms += 1
                         # Only show if there are power level conflicts
                         if room_data["users_higher"] or room_data["users_equal"]:
-                            room_info = f"✅ <b>{room_data['room_name']}:</b> Admin: Yes (level: {room_data['bot_power_level']})"
+                            room_info = f"⚠️ <b>{room_data['room_name']}</b> ({room_id}): Admin: Yes (level: {room_data['bot_power_level']})"
                             if room_data["users_higher"]:
-                                room_info += f"\n  ⚠️ Higher power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_higher']])}"
+                                room_info += f" - Higher power users: {len(room_data['users_higher'])}"
                             if room_data["users_equal"]:
-                                room_info += f"\n  ⚠️ Equal power users: {', '.join([f'{u['user']} ({u['level']})' for u in room_data['users_equal']])}"
+                                room_info += f" - Equal power users: {len(room_data['users_equal'])}"
                             problematic_rooms.append(room_info)
                     else:
                         non_admin_rooms += 1
-                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}:</b> Admin: No (level: {room_data['bot_power_level']})")
+                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}</b> ({room_id}): Admin: No (level: {room_data['bot_power_level']})")
 
             # Only show rooms section if there are problematic rooms
             if problematic_rooms:
                 response += f"<h4>🏠 Problematic Rooms ({len(problematic_rooms)} of {len(report['rooms'])} total)</h4>\n"
+                response += "<i>Use <code>!community doctor &lt;room_id&gt;</code> for detailed analysis of specific rooms</i>\n\n"
                 for room_info in problematic_rooms:
                     response += f"{room_info}\n"
                 response += "\n"
@@ -2953,3 +2962,155 @@ class CommunityBot(Plugin):
             chunks.append(current_chunk.strip())
         
         return chunks
+
+    async def _doctor_room_detail(self, evt: MessageEvent, room: str) -> None:
+        """Generate detailed diagnostic report for a specific room.
+        
+        Args:
+            evt: The message event
+            room: Room ID or alias to analyze
+        """
+        msg = await evt.respond(f"Analyzing room {room}...")
+        
+        try:
+            # Resolve room ID if alias provided
+            room_id = None
+            if room.startswith("#"):
+                try:
+                    room_info = await self.client.resolve_room_alias(room)
+                    room_id = room_info["room_id"]
+                except Exception as e:
+                    await evt.respond(f"Could not resolve room alias {room}: {e}", edits=msg)
+                    return
+            elif room.startswith("!"):
+                room_id = room
+            else:
+                await evt.respond(f"Invalid room format. Use room ID (!roomid:server) or alias (#alias:server)", edits=msg)
+                return
+
+            # Check if room is in the space
+            space_rooms = await self.get_space_roomlist()
+            if room_id not in space_rooms:
+                await evt.respond(f"Room {room} is not part of the configured space.", edits=msg)
+                return
+
+            # Get room name
+            room_name = room_id
+            try:
+                room_name_event = await self.client.get_state_event(room_id, EventType.ROOM_NAME)
+                room_name = room_name_event.name
+            except:
+                pass
+
+            response = f"<h3>🔍 Detailed Analysis: {room_name}</h3>\n"
+            response += f"<b>Room ID:</b> {room_id}\n\n"
+
+            # Check if bot is in the room
+            try:
+                await self.client.get_state_event(room_id, EventType.ROOM_MEMBER, self.client.mxid)
+                response += "✅ <b>Bot membership:</b> Bot is a member of this room\n\n"
+            except Exception:
+                response += "❌ <b>Bot membership:</b> Bot is not a member of this room\n\n"
+                await evt.respond(response, edits=msg, allow_html=True)
+                return
+
+            # Get power levels
+            try:
+                power_levels = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
+                bot_level = power_levels.get_user_level(self.client.mxid)
+                
+                response += f"<h4>📊 Power Level Analysis</h4>\n"
+                response += f"• <b>Bot power level:</b> {bot_level}\n"
+                response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}\n"
+                response += f"• <b>Default user level:</b> {power_levels.users_default}\n"
+                response += f"• <b>Invite level:</b> {power_levels.invite}\n"
+                response += f"• <b>Kick level:</b> {power_levels.kick}\n"
+                response += f"• <b>Ban level:</b> {power_levels.ban}\n"
+                response += f"• <b>Redact level:</b> {power_levels.redact}\n\n"
+
+                # Check for users with equal or higher power level
+                users_higher = []
+                users_equal = []
+                
+                for user, level in power_levels.users.items():
+                    if user != self.client.mxid and level >= bot_level:
+                        if level == bot_level:
+                            users_equal.append({"user": user, "level": level})
+                        else:
+                            users_higher.append({"user": user, "level": level})
+
+                if users_higher:
+                    response += f"<h4>⚠️ Users with Higher Power Level</h4>\n"
+                    for user_info in users_higher:
+                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})\n"
+                    response += "\n"
+
+                if users_equal:
+                    response += f"<h4>⚠️ Users with Equal Power Level</h4>\n"
+                    for user_info in users_equal:
+                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})\n"
+                    response += "\n"
+
+                if not users_higher and not users_equal:
+                    response += "✅ <b>No power level conflicts detected</b>\n\n"
+
+                # Check specific permissions
+                response += f"<h4>🔐 Permission Analysis</h4>\n"
+                
+                # Get required levels for various actions
+                events_default = power_levels.events_default
+                events = power_levels.events
+                
+                permissions = [
+                    ("Send messages", events.get(str(EventType.ROOM_MESSAGE), events_default)),
+                    ("Send state events", power_levels.state_default),
+                    ("Change power levels", events.get(str(EventType.ROOM_POWER_LEVELS), events_default)),
+                    ("Send tombstone", events.get("m.room.tombstone", events_default)),
+                    ("Invite users", power_levels.invite),
+                    ("Kick users", power_levels.kick),
+                    ("Ban users", power_levels.ban),
+                    ("Redact messages", power_levels.redact)
+                ]
+                
+                for perm_name, required_level in permissions:
+                    has_perm = bot_level >= required_level
+                    status = "✅" if has_perm else "❌"
+                    response += f"• {status} <b>{perm_name}:</b> {'Yes' if has_perm else 'No'} (required: {required_level})\n"
+
+            except Exception as e:
+                response += f"❌ <b>Error getting power levels:</b> {e}\n\n"
+
+            # Check room state
+            try:
+                response += f"<h4>🏠 Room State</h4>\n"
+                
+                # Check join rules
+                try:
+                    join_rules = await self.client.get_state_event(room_id, EventType.ROOM_JOIN_RULES)
+                    response += f"• <b>Join rule:</b> {join_rules.join_rule}\n"
+                except:
+                    response += "• <b>Join rule:</b> Could not determine\n"
+
+                # Check encryption
+                try:
+                    encryption = await self.client.get_state_event(room_id, EventType.ROOM_ENCRYPTION)
+                    response += f"• <b>Encryption:</b> ✅ Enabled ({encryption.algorithm})\n"
+                except:
+                    response += "• <b>Encryption:</b> ❌ Not enabled\n"
+
+                # Check space parent
+                try:
+                    space_parent = await self.client.get_state_event(room_id, EventType.SPACE_PARENT)
+                    response += f"• <b>Space parent:</b> ✅ {space_parent.state_key}\n"
+                except:
+                    response += "• <b>Space parent:</b> ❌ Not set\n"
+
+            except Exception as e:
+                response += f"❌ <b>Error checking room state:</b> {e}\n"
+
+            await evt.respond(response, edits=msg, allow_html=True)
+
+        except Exception as e:
+            error_msg = f"Failed to analyze room {room}: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg, edits=msg)
