@@ -80,6 +80,7 @@ class Config(BaseProxyConfig):
         helper.copy("verification_attempts")
         helper.copy("verification_message")
         helper.copy("invite_power_level")
+        helper.copy("room_version")
 
 
 class CommunityBot(Plugin):
@@ -101,19 +102,27 @@ class CommunityBot(Plugin):
             self._redaction_tasks.cancel()
         await super().stop()
 
-    async def user_permitted(self, user_id: UserID, min_level: int = 50) -> bool:
-        """Check if a user has sufficient power level in the parent room.
+    async def user_permitted(self, user_id: UserID, min_level: int = 50, room_id: str = None) -> bool:
+        """Check if a user has sufficient power level in a room.
 
         Args:
             user_id: The Matrix ID of the user to check
             min_level: Minimum required power level (default 50 for moderator)
+            room_id: The room ID to check permissions in. If None, uses parent room.
 
         Returns:
             bool: True if user has sufficient power level
         """
         try:
+            target_room = room_id or self.config["parent_room"]
+            
+            # First check if user has unlimited power (creator in modern room versions)
+            if await self.user_has_unlimited_power(user_id, target_room):
+                return True
+            
+            # Then check power level
             power_levels = await self.client.get_state_event(
-                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
+                target_room, EventType.ROOM_POWER_LEVELS
             )
             user_level = power_levels.get_user_level(user_id)
             return user_level >= min_level
@@ -235,17 +244,79 @@ class CommunityBot(Plugin):
 
             if evt:
                 mymsg = await evt.respond(
-                    f"creating space {sanitized_name}, give me a minute..."
+                    f"creating space {sanitized_name} with room version {self.config['room_version']}, give me a minute..."
                 )
 
+            # Prepare creation content with space type
+            creation_content = {
+                "type": "m.space"
+            }
+            
+            # For modern room versions (12+), remove the bot from power levels
+            # as creators have unlimited power by default and cannot appear in power levels
+            if self.is_modern_room_version(self.config["room_version"]) and power_level_override:
+                self.log.info(f"Modern room version {self.config['room_version']} detected - removing bot from power levels")
+                if power_level_override.users:
+                    # Remove bot from users list but keep other important settings
+                    power_level_override.users.pop(self.client.mxid, None)
+            
             # Create the space with space-specific content
+            # Note: room_version is set via the room_version parameter, not creation_content
+            self.log.info(f"Creating space with room_version={self.config['room_version']}")
+            self.log.info(f"Creation content: {creation_content}")
+            self.log.info(f"Calling client.create_room with parameters:")
+            self.log.info(f"  - alias_localpart: {sanitized_name}")
+            self.log.info(f"  - name: {space_name}")
+            self.log.info(f"  - invitees: {invitees}")
+            self.log.info(f"  - power_level_override: {power_level_override}")
+            self.log.info(f"  - creation_content: {creation_content}")
+            self.log.info(f"  - room_version: {self.config['room_version']}")
+            
             space_id = await self.client.create_room(
                 alias_localpart=sanitized_name,
                 name=space_name,
                 invitees=invitees,
                 power_level_override=power_level_override,
-                creation_content={"type": "m.space"}
+                creation_content=creation_content,
+                room_version=self.config["room_version"]
             )
+
+            # Verify the space version and type were set correctly
+            try:
+                actual_version, actual_creators = await self.get_room_version_and_creators(space_id)
+                self.log.info(f"Space {space_id} created with version {actual_version} (requested: {self.config['room_version']})")
+                if actual_version != self.config["room_version"]:
+                    self.log.warning(f"Space version mismatch: requested {self.config['room_version']}, got {actual_version}")
+                
+                # Verify the space type was set
+                state_events = await self.client.get_state(space_id)
+                space_type_set = False
+                for event in state_events:
+                    if event.type == EventType.ROOM_CREATE:
+                        space_type = event.content.get("type")
+                        self.log.info(f"Space creation event type: {space_type}")
+                        space_type_set = (space_type == "m.space")
+                        break
+                
+                if not space_type_set:
+                    self.log.error(f"Space type was not set correctly in {space_id}")
+                    # Try to set the space type after creation as a fallback
+                    try:
+                        self.log.info(f"Attempting to set space type after creation for {space_id}")
+                        await self.client.send_state_event(
+                            space_id,
+                            EventType.ROOM_CREATE,
+                            {"type": "m.space"},
+                            state_key=""
+                        )
+                        self.log.info(f"Successfully set space type after creation for {space_id}")
+                    except Exception as e2:
+                        self.log.error(f"Failed to set space type after creation: {e2}")
+                else:
+                    self.log.info(f"Space type verified as 'm.space' in {space_id}")
+                    
+            except Exception as e:
+                self.log.warning(f"Could not verify space creation: {e}")
 
             if evt:
                 await evt.respond(
@@ -538,6 +609,10 @@ class CommunityBot(Plugin):
             except MNotFound:
                 return False, "Bot is not a member of this room", {}
 
+            # Check if bot has unlimited power (creator in modern room versions)
+            if await self.user_has_unlimited_power(self.client.mxid, room_id):
+                return True, "", {"unlimited_power": True}
+
             # Get power levels
             power_levels = await self.client.get_state_event(
                 room_id, EventType.ROOM_POWER_LEVELS
@@ -792,6 +867,89 @@ class CommunityBot(Plugin):
 
         return banlist_roomids
 
+    async def get_room_version_and_creators(self, room_id: str) -> tuple[str, list[str]]:
+        """Get the room version and creators for a room.
+        
+        Args:
+            room_id: The room ID to check
+            
+        Returns:
+            tuple: (room_version, list_of_creators)
+        """
+        try:
+            # Get all state events to find the creation event
+            state_events = await self.client.get_state(room_id)
+            
+            # Find the m.room.create event
+            creation_event = None
+            for event in state_events:
+                if event.type == EventType.ROOM_CREATE:
+                    creation_event = event
+                    break
+            
+            if not creation_event:
+                # Default to version 1 if no creation event found
+                return "1", []
+            
+            room_version = creation_event.content.get("room_version", "1")
+            creators = []
+            
+            # Add the sender of the creation event as a creator
+            if creation_event.sender:
+                creators.append(creation_event.sender)
+            
+            # Add any additional creators from the content
+            additional_creators = creation_event.content.get("additional_creators", [])
+            if isinstance(additional_creators, list):
+                creators.extend(additional_creators)
+            
+            return room_version, creators
+            
+        except Exception as e:
+            self.log.error(f"Failed to get room version and creators for {room_id}: {e}")
+            # Default to version 1 if there's an error
+            return "1", []
+
+    def is_modern_room_version(self, room_version: str) -> bool:
+        """Check if a room version is 12 or newer (modern room versions).
+        
+        Args:
+            room_version: The room version string to check
+            
+        Returns:
+            bool: True if room version is 12 or newer
+        """
+        try:
+            version_num = int(room_version)
+            return version_num >= 12
+        except (ValueError, TypeError):
+            # If we can't parse the version, assume it's not modern
+            return False
+
+    async def user_has_unlimited_power(self, user_id: UserID, room_id: str) -> bool:
+        """Check if a user has unlimited power in a room (creator in modern room versions).
+        
+        Args:
+            user_id: The user ID to check
+            room_id: The room ID to check in
+            
+        Returns:
+            bool: True if user has unlimited power
+        """
+        try:
+            room_version, creators = await self.get_room_version_and_creators(room_id)
+            
+            # In modern room versions (12+), creators have unlimited power
+            if self.is_modern_room_version(room_version):
+                return user_id in creators
+            
+            # In older room versions, creators don't have special unlimited power
+            return False
+            
+        except Exception as e:
+            self.log.error(f"Failed to check unlimited power for {user_id} in {room_id}: {e}")
+            return False
+
     @event.on(BAN_STATE_EVENT)
     async def check_ban_event(self, evt: StateEvent) -> None:
         if not self.config["proactive_banning"]:
@@ -914,32 +1072,38 @@ class CommunityBot(Plugin):
             self.log.debug(f"Sync stream leave event for {evt.state_key} in {evt.room_id} detected")
             return
         else:
-            # check if the room the person left is protected by check_if_human
-            # kick and ban events are sent by other people, so we need to use the state_key
-            # when referring to the user who left
-            user_id = evt.state_key
-            self.log.debug(f"membership change event for {user_id} in {evt.room_id} detected")
-            if (
-                isinstance(self.config["check_if_human"], bool) and self.config["check_if_human"]
-            ) or (
-                isinstance(self.config["check_if_human"], list) and evt.room_id in self.config["check_if_human"]
-            ):
-                self.log.debug(f"Checking if {user_id} is a verified user in {evt.room_id}")
-                pl_state = await self.client.get_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS)
-                try:
-                    user_level = pl_state.get_user_level(user_id)
-                except Exception as e:
-                    self.log.error(f"Failed to get user level for {user_id} in {evt.room_id}: {e}")
-                    return
-                default_level = pl_state.users_default
-                self.log.debug(f"User {user_id} has power level {user_level}, default level is {default_level}")
-                if user_level == ( default_level + 1 ): # indicates verified user
-                    self.log.debug(f"Removing {user_id} from power levels state event in {evt.room_id}")
-                    pl_state.users.pop(user_id)
+                            # check if the room the person left is protected by check_if_human
+                # kick and ban events are sent by other people, so we need to use the state_key
+                # when referring to the user who left
+                user_id = evt.state_key
+                self.log.debug(f"membership change event for {user_id} in {evt.room_id} detected")
+                if (
+                    isinstance(self.config["check_if_human"], bool) and self.config["check_if_human"]
+                ) or (
+                    isinstance(self.config["check_if_human"], list) and evt.room_id in self.config["check_if_human"]
+                ):
+                    self.log.debug(f"Checking if {user_id} is a verified user in {evt.room_id}")
+                    
+                    # Check if user has unlimited power (creator in modern room versions)
+                    if await self.user_has_unlimited_power(user_id, evt.room_id):
+                        self.log.debug(f"User {user_id} has unlimited power in {evt.room_id}, skipping power level cleanup")
+                        return
+                    
+                    pl_state = await self.client.get_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS)
                     try:
-                        await self.client.send_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS, pl_state)
+                        user_level = pl_state.get_user_level(user_id)
                     except Exception as e:
-                        self.log.error(f"Failed to update power levels state event in {evt.room_id}: {e}")
+                        self.log.error(f"Failed to get user level for {user_id} in {evt.room_id}: {e}")
+                        return
+                    default_level = pl_state.users_default
+                    self.log.debug(f"User {user_id} has power level {user_level}, default level is {default_level}")
+                    if user_level == ( default_level + 1 ): # indicates verified user
+                        self.log.debug(f"Removing {user_id} from power levels state event in {evt.room_id}")
+                        pl_state.users.pop(user_id)
+                        try:
+                            await self.client.send_state_event(evt.room_id, EventType.ROOM_POWER_LEVELS, pl_state)
+                        except Exception as e:
+                            self.log.error(f"Failed to update power levels state event in {evt.room_id}: {e}")
 
     @event.on(InternalEventType.LEAVE)
     async def handle_leave(self, evt: StateEvent) -> None:
@@ -1036,8 +1200,13 @@ class CommunityBot(Plugin):
                     except:
                         pass
 
-                    # Check if user already has sufficient power level
+                    # Check if user already has sufficient power level or unlimited power
                     try:
+                        # First check if user has unlimited power (creator in modern room versions)
+                        if await self.user_has_unlimited_power(evt.sender, evt.room_id):
+                            self.log.debug(f"User {evt.sender} has unlimited power in {evt.room_id}, skipping verification")
+                            return
+                        
                         power_levels = await self.client.get_state_event(
                             evt.room_id, EventType.ROOM_POWER_LEVELS
                         )
@@ -1797,7 +1966,7 @@ class CommunityBot(Plugin):
 
             if evt:
                 mymsg = await evt.respond(
-                    f"creating {alias_localpart}, give me a minute..."
+                    f"creating {alias_localpart} with room version {self.config['room_version']}, give me a minute..."
                 )
 
             # Prepare initial state events
@@ -1844,15 +2013,40 @@ class CommunityBot(Plugin):
                     }
                 })
 
+            # For modern room versions (12+), remove the bot from power levels
+            # as creators have unlimited power by default and cannot appear in power levels
+            if self.is_modern_room_version(self.config["room_version"]) and power_level_override:
+                self.log.info(f"Modern room version {self.config['room_version']} detected - removing bot from power levels")
+                if power_level_override.users:
+                    # Remove bot from users list but keep other important settings
+                    power_level_override.users.pop(self.client.mxid, None)
+            
             # Create the room with all initial states
+            # Note: room_version is set via the room_version parameter, not creation_content
+            self.log.info(f"Creating room with room_version={self.config['room_version']}")
+            if power_level_override:
+                self.log.info(f"Power level override users: {list(power_level_override.users.keys()) if power_level_override.users else 'None'}")
+            else:
+                self.log.info("No power level override")
+            
             room_id = await self.client.create_room(
                 alias_localpart=alias_localpart,
                 name=roomname,
                 invitees=room_invitees,
                 initial_state=initial_state,
                 power_level_override=power_level_override,
-                creation_content=creation_content
+                creation_content=creation_content,
+                room_version=self.config["room_version"]
             )
+
+            # Verify the room version was set correctly
+            try:
+                actual_version, actual_creators = await self.get_room_version_and_creators(room_id)
+                self.log.info(f"Room {room_id} created with version {actual_version} (requested: {self.config['room_version']})")
+                if actual_version != self.config["room_version"]:
+                    self.log.warning(f"Room version mismatch: requested {self.config['room_version']}, got {actual_version}")
+            except Exception as e:
+                self.log.warning(f"Could not verify room version for {room_id}: {e}")
 
             # The space child relationship needs to be set in the parent room separately
             if parent_room:
@@ -2008,6 +2202,22 @@ class CommunityBot(Plugin):
             self.log.warning(f"Failed to get room topic: {e}")
             pass
 
+        # Check if the room being replaced is a space
+        is_space = False
+        try:
+            # Get the room creation event to check if it's a space
+            state_events = await self.client.get_state(room_id)
+            for event in state_events:
+                if event.type == EventType.ROOM_CREATE:
+                    is_space = event.content.get("type") == "m.space"
+                    break
+            if is_space:
+                self.log.info(f"Room {room_id} is a space - will create new space")
+        except Exception as e:
+            self.log.warning(f"Failed to check if room is a space: {e}")
+            # Assume it's not a space if we can't determine
+            is_space = False
+
         # Get list of aliases to transfer while removing them from the old room
         aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
 
@@ -2015,6 +2225,12 @@ class CommunityBot(Plugin):
         if not self.config["community_slug"]:
             await evt.respond("No community slug configured. Please run initialize command first.")
             return
+
+        # Inform user about what type of room is being replaced
+        if is_space:
+            await evt.respond(f"Replacing space '{room_name}' with a new space...")
+        else:
+            await evt.respond(f"Replacing room '{room_name}' with a new room...")
 
         # Validate that the new room alias is available
         is_valid, conflicting_aliases = await self.validate_room_aliases([room_name], evt)
@@ -2026,7 +2242,13 @@ class CommunityBot(Plugin):
         # First we need to create the new room. this will create the initial alias,
         # as well as bot defaults such as power levels, initial invitations, encryption,
         # and space membership
-        new_room_id, new_room_alias = await self.create_room(room_name, evt)
+        if is_space:
+            # Create a new space instead of a regular room
+            new_room_id, new_room_alias = await self.create_space(room_name, evt)
+        else:
+            # Create a regular room
+            new_room_id, new_room_alias = await self.create_room(room_name, evt)
+            
         if not new_room_id:
             await evt.respond("Failed to create new room")
             return
@@ -2096,6 +2318,56 @@ class CommunityBot(Plugin):
             await evt.respond(
                 "Failed to archive old room, but new room has been created"
             )
+
+        # If we're replacing a space, we need to handle child room relationships
+        if is_space:
+            try:
+                # Get all child rooms from the old space
+                old_child_rooms = []
+                state_events = await self.client.get_state(room_id)
+                for event in state_events:
+                    if event.type == EventType.SPACE_CHILD:
+                        old_child_rooms.append(event.state_key)
+                
+                if old_child_rooms:
+                    self.log.info(f"Found {len(old_child_rooms)} child rooms in old space")
+                    # Update child rooms to point to the new space
+                    for child_room_id in old_child_rooms:
+                        try:
+                            # Remove old space parent reference
+                            await self.client.send_state_event(
+                                child_room_id,
+                                EventType.SPACE_PARENT,
+                                {},  # Empty content removes the state
+                                state_key=room_id
+                            )
+                            # Add new space parent reference
+                            server = self.client.parse_user_id(self.client.mxid)[1]
+                            await self.client.send_state_event(
+                                child_room_id,
+                                EventType.SPACE_PARENT,
+                                {
+                                    "via": [server],
+                                    "canonical": True
+                                },
+                                state_key=new_room_id
+                            )
+                            # Update space child reference
+                            await self.client.send_state_event(
+                                new_room_id,
+                                EventType.SPACE_CHILD,
+                                {
+                                    "via": [server],
+                                    "suggested": False
+                                },
+                                state_key=child_room_id
+                            )
+                            self.log.info(f"Updated child room {child_room_id} to point to new space")
+                            await asyncio.sleep(self.config["sleep"])
+                        except Exception as e:
+                            self.log.error(f"Failed to update child room {child_room_id}: {e}")
+            except Exception as e:
+                self.log.error(f"Failed to handle child room relationships: {e}")
 
         # update instances of the old room id in any config values that use it
         config_keys = [
@@ -2195,6 +2467,53 @@ class CommunityBot(Plugin):
             await evt.respond(f"something went wrong: {e}")
 
     @community.subcommand(
+        "roomversion", help="return the room version and creators of this, or a given, room"
+    )
+    @command.argument("room", required=False)
+    async def get_roomversion(self, evt: MessageEvent, room: str) -> None:
+        if not await self.check_parent_room(evt):
+            return
+        room_id = None
+        if room:
+            if room.startswith("#"):
+                try:
+                    thatroom_id = await self.client.resolve_room_alias(room)
+                    room_id = thatroom_id["room_id"]
+                except:
+                    evt.reply("i don't recognize that room, sorry")
+                    return
+            else:
+                room_id = room
+        else:
+            room_id = evt.room_id
+        
+        try:
+            room_version, creators = await self.get_room_version_and_creators(room_id)
+            
+            # Get room name if available
+            room_name = room_id
+            try:
+                room_name_event = await self.client.get_state_event(room_id, EventType.ROOM_NAME)
+                room_name = room_name_event.name
+            except:
+                pass
+            
+            response = f"<b>Room:</b> {room_name}<br />"
+            response += f"<b>Room ID:</b> {room_id}<br />"
+            response += f"<b>Room Version:</b> {room_version}<br />"
+            
+            if creators:
+                response += f"<b>Creators:</b> {', '.join(creators)}<br />"
+                if self.is_modern_room_version(room_version):
+                    response += f"<br />ℹ️ <b>Note:</b> This room uses version {room_version}, which means creators have unlimited power and cannot be restricted by power levels."
+            else:
+                response += "<b>Creators:</b> None found<br />"
+            
+            await evt.reply(response, allow_html=True)
+        except Exception as e:
+            await evt.respond(f"something went wrong: {e}")
+
+    @community.subcommand(
         "setpower", help="sync user power levels from parent room to all child rooms. this will override existing user power levels in child rooms!"
     )
     @command.argument("target_room", required=False)
@@ -2227,15 +2546,34 @@ class CommunityBot(Plugin):
         error_list = []
 
         try:
-            # Get parent room power levels to use as source of truth
+            # Get parent room power levels and version to use as source of truth
             parent_power_levels = await self.client.get_state_event(
                 self.config["parent_room"], EventType.ROOM_POWER_LEVELS
             )
+            parent_version, parent_creators = await self.get_room_version_and_creators(self.config["parent_room"])
+            
+            self.log.info(f"Parent room version: {parent_version}")
+            self.log.info(f"Parent room creators: {parent_creators}")
+            self.log.info(f"Bot MXID: {self.client.mxid}")
+            self.log.info(f"Bot is creator in parent: {self.client.mxid in parent_creators}")
+            
+            user_power_levels = parent_power_levels.users.copy()
 
-            user_power_levels = parent_power_levels.users
-
-            # Ensure bot's power level stays at 1000 for safety
-            user_power_levels[self.client.mxid] = 1000
+            # Handle bot's power level based on room versions and actual creator status
+            if self.is_modern_room_version(parent_version):
+                # In modern parent rooms, check if bot is actually a creator
+                if self.client.mxid in parent_creators:
+                    # Bot is a creator, remove from power levels to prevent errors
+                    user_power_levels.pop(self.client.mxid, None)
+                    self.log.info(f"Parent room is modern (v{parent_version}), bot is creator and has unlimited power")
+                else:
+                    # Bot is not a creator, set appropriate power level
+                    user_power_levels[self.client.mxid] = 1000
+                    self.log.info(f"Parent room is modern (v{parent_version}), bot is not creator, power level set to 1000")
+            else:
+                # In legacy parent rooms, ensure bot has highest power level
+                user_power_levels[self.client.mxid] = 1000
+                self.log.info(f"Parent room is legacy (v{parent_version}), bot power level set to 1000")
 
             for room in roomlist:
                 try:
@@ -2261,15 +2599,86 @@ class CommunityBot(Plugin):
                         skipped_list.append(roomname or room)
                         continue
 
-                    # get the room's power levels object
+                    # Get the room's power levels object and version info
                     room_power_levels = await self.client.get_state_event(
                         room, EventType.ROOM_POWER_LEVELS
                     )
+                    room_version, room_creators = await self.get_room_version_and_creators(room)
+                    
+                    self.log.info(f"Processing room {roomname or room} (v{room_version}) - Parent is v{parent_version}")
 
-                    # plug our parent power levels into the room's power levels object
-                    room_power_levels.users = user_power_levels
+                    # Handle power level mapping based on room version differences
+                    if self.is_modern_room_version(room_version):
+                        # Target room is modern (v12+) - creators have unlimited power
+                        self.log.info(f"Target room {roomname or room} is modern - preserving creator power levels")
+                        
+                        # Filter out any users who are creators in the target room
+                        filtered_user_power_levels = {}
+                        for user, level in user_power_levels.items():
+                            if user not in room_creators:
+                                filtered_user_power_levels[user] = level
+                            else:
+                                self.log.info(f"Skipping power level for creator {user} in modern room {roomname or room}")
+                        
+                        # Preserve existing power levels for special cases (like verification rooms)
+                        # Only update non-creator users to avoid conflicts
+                        existing_users = set(room_power_levels.users.keys())
+                        creators_set = set(room_creators)
+                        special_users = existing_users - creators_set
+                        
+                        # Keep existing power levels for special users unless explicitly overridden
+                        for user in special_users:
+                            if user not in filtered_user_power_levels:
+                                filtered_user_power_levels[user] = room_power_levels.users[user]
+                                self.log.info(f"Preserving existing power level for special user {user} in {roomname or room}")
+                        
+                        # Handle bot power level in modern target room
+                        if self.client.mxid in room_creators:
+                            # Bot is creator in target room - don't set power level
+                            self.log.info(f"Bot is creator in modern target room {roomname or room} - no power level set")
+                        else:
+                            # Bot is not creator in target room - set appropriate power level
+                            filtered_user_power_levels[self.client.mxid] = 1000
+                            self.log.info(f"Bot is not creator in modern target room {roomname or room} - power level set to 1000")
+                        
+                        # Merge filtered power levels with existing room power levels
+                        room_power_levels.users.update(filtered_user_power_levels)
+                        
+                    elif self.is_modern_room_version(parent_version):
+                        # Target room is legacy but parent is modern
+                        # Map parent room "creators" to "admins" in legacy room
+                        self.log.info(f"Target room {roomname or room} is legacy, parent is modern - mapping creators to admins")
+                        
+                        # For legacy rooms, we can set all power levels including the bot
+                        # But map parent room creators to appropriate admin levels
+                        mapped_power_levels = {}
+                        for user, level in user_power_levels.items():
+                            if user in parent_creators and user != self.client.mxid:
+                                # Map parent creators to admin level (100) in legacy rooms
+                                mapped_power_levels[user] = 100
+                                self.log.info(f"Mapping parent creator {user} to admin level 100 in legacy room {roomname or room}")
+                            else:
+                                mapped_power_levels[user] = level
+                        
+                        # Handle bot power level based on whether it's a creator in the parent
+                        if self.client.mxid in parent_creators:
+                            # Bot is a creator in parent, but this is a legacy room
+                            # Set bot to highest power level since creators don't have unlimited power in legacy rooms
+                            mapped_power_levels[self.client.mxid] = 1000
+                            self.log.info(f"Bot is creator in parent but target is legacy room - setting power level to 1000")
+                        else:
+                            # Bot is not a creator in parent, set to highest power level
+                            mapped_power_levels[self.client.mxid] = 1000
+                            self.log.info(f"Bot is not creator in parent, setting power level to 1000 in legacy target room")
+                        
+                        room_power_levels.users = mapped_power_levels
+                        
+                    else:
+                        # Both rooms are legacy - direct power level transfer
+                        self.log.info(f"Both rooms are legacy - direct power level transfer")
+                        room_power_levels.users = user_power_levels
 
-                    # Send the parent room's power levels to this room
+                    # Send the updated power levels to this room
                     await self.client.send_state_event(
                         room, EventType.ROOM_POWER_LEVELS, room_power_levels
                     )
@@ -2283,6 +2692,25 @@ class CommunityBot(Plugin):
                     error_list.append(roomname or room)
 
             results = "Power levels synced from parent room.<br /><br />"
+            results += f"<b>Parent room version:</b> {parent_version}<br />"
+            results += f"<b>Parent room creators:</b> {', '.join(parent_creators) if parent_creators else 'None'}<br />"
+            results += f"<b>Bot creator status:</b> {'✅ Creator' if self.client.mxid in parent_creators else '❌ Not creator'} in parent room<br /><br />"
+            
+            # Add explanation of power level mapping strategy
+            if self.is_modern_room_version(parent_version):
+                results += f"<b>Mapping Strategy:</b> Parent room is modern (v{parent_version}), creators have unlimited power.<br />"
+                if self.client.mxid in parent_creators:
+                    results += "• Bot is creator in parent room (unlimited power)<br />"
+                else:
+                    results += "• Bot is not creator in parent room (power level 1000)<br />"
+                results += "• Parent creators mapped to admin level (100) in legacy child rooms<br />"
+                results += "• Modern child rooms preserve their creator power levels<br /><br />"
+            else:
+                results += f"<b>Mapping Strategy:</b> Parent room is legacy (v{parent_version}), using traditional power level system.<br />"
+                results += "• Bot power level set to 1000 for administrative control<br />"
+                results += "• Direct power level transfer to legacy child rooms<br />"
+                results += "• Modern child rooms preserve their creator power levels<br /><br />"
+            
             if success_list:
                 results += f"Successfully updated rooms:<br /><code>{', '.join(success_list)}</code><br /><br />"
             if skipped_list:
@@ -2332,7 +2760,12 @@ class CommunityBot(Plugin):
             power_levels.users_default = required_level - 1
 
             # Set members to required level only if their current level is lower
+            # and they don't have unlimited power (creators in modern room versions)
             for member in member_list:
+                # Check if member has unlimited power
+                if await self.user_has_unlimited_power(member, evt.room_id):
+                    continue  # Skip creators with unlimited power
+                
                 current_level = power_levels.get_user_level(member)
                 if current_level < required_level:
                     power_levels.users[member] = required_level
@@ -2509,10 +2942,19 @@ class CommunityBot(Plugin):
 
             # Set up power levels for the space
             power_levels = PowerLevelStateEventContent()
-            power_levels.users = {
-                self.client.mxid: 1000,  # Bot gets highest power
-                evt.sender: 100  # Initiator gets admin power
-            }
+            
+            # For modern room versions (12+), don't set power levels for creators
+            # as they have unlimited power by default
+            if self.is_modern_room_version(self.config["room_version"]):
+                # Don't set any user power levels for modern versions
+                # Creators have unlimited power by default
+                power_levels.users = {}
+            else:
+                power_levels.users = {
+                    self.client.mxid: 1000,  # Bot gets highest power
+                    evt.sender: 100  # Initiator gets admin power
+                }
+            
             # Set invite power level from config
             power_levels.invite = self.config["invite_power_level"]
 
@@ -2611,6 +3053,7 @@ class CommunityBot(Plugin):
             await evt.respond(
                 f"Community space initialized successfully!<br /><br />"
                 f"Community Slug: {self.config['community_slug']}<br />"
+                f"Room Version: {self.config['room_version']}<br />"
                 f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a><br />"
                 f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a><br />"
                 f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>{warning_msg}",
@@ -2732,11 +3175,20 @@ class CommunityBot(Plugin):
                     except:
                         pass
 
+                    # Get room version and creators
+                    room_version, creators = await self.get_room_version_and_creators(room_id)
+                    
+                    # Check if bot has unlimited power (creator in modern room versions)
+                    bot_has_unlimited_power = await self.user_has_unlimited_power(self.client.mxid, room_id)
+                    
                     room_report = {
                         "room_id": room_id,
                         "room_name": room_name,
+                        "room_version": room_version,
+                        "creators": creators,
                         "bot_power_level": bot_level,
-                        "has_admin": bot_level >= 100,
+                        "has_admin": bot_level >= 100 or bot_has_unlimited_power,
+                        "bot_has_unlimited_power": bot_has_unlimited_power,
                         "users_higher_or_equal": [],
                         "users_equal": [],
                         "users_higher": []
@@ -2760,8 +3212,10 @@ class CommunityBot(Plugin):
                                 "level": level
                             })
 
-                    if bot_level < 100:
+                    if bot_level < 100 and not bot_has_unlimited_power:
                         report["issues"].append(f"Bot lacks administrative privileges in room '{room_name}' ({room_id}) - level: {bot_level}")
+                    elif bot_has_unlimited_power:
+                        self.log.debug(f"Bot has unlimited power in room '{room_name}' ({room_id}) as creator")
                     
                     # Remove verbose warnings from summary - these will be shown in detailed room reports
                     # if room_report["users_higher"]:
@@ -2805,6 +3259,8 @@ class CommunityBot(Plugin):
             non_admin_rooms = 0
             error_rooms = 0
             not_in_room_count = 0
+            modern_rooms = 0
+            legacy_rooms = 0
             
             for room_id, room_data in report["rooms"].items():
                 if "error" in room_data:
@@ -2815,19 +3271,33 @@ class CommunityBot(Plugin):
                     else:
                         problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}</b> ({room_id}): Error - {room_data['error']}")
                 else:
+                    # Count room versions
+                    if self.is_modern_room_version(room_data.get("room_version", "1")):
+                        modern_rooms += 1
+                    else:
+                        legacy_rooms += 1
+                    
                     if room_data["has_admin"]:
                         admin_rooms += 1
+                        # Show unlimited power status for modern rooms
+                        if room_data.get("bot_has_unlimited_power", False):
+                            room_info = f"✅ <b>{room_data['room_name']}</b> ({room_id}): Unlimited Power (Creator) [v{room_data.get('room_version', '1')}]"
+                        else:
+                            room_info = f"✅ <b>{room_data['room_name']}</b> ({room_id}): Admin: Yes (level: {room_data['bot_power_level']}) [v{room_data.get('room_version', '1')}]"
+                        
                         # Only show if there are power level conflicts
                         if room_data["users_higher"] or room_data["users_equal"]:
-                            room_info = f"⚠️ <b>{room_data['room_name']}</b> ({room_id}): Admin: Yes (level: {room_data['bot_power_level']})"
-                            if room_data["users_higher"]:
-                                room_info += f" - Higher power users: {len(room_data['users_higher'])}"
-                            if room_data["users_equal"]:
-                                room_info += f" - Equal power users: {len(room_data['users_equal'])}"
+                            if room_data.get("bot_has_unlimited_power", False):
+                                room_info += f" - Note: Power level conflicts are irrelevant for creators with unlimited power"
+                            else:
+                                if room_data["users_higher"]:
+                                    room_info += f" - Higher power users: {len(room_data['users_higher'])}"
+                                if room_data["users_equal"]:
+                                    room_info += f" - Equal power users: {len(room_data['users_equal'])}"
                             problematic_rooms.append(room_info)
                     else:
                         non_admin_rooms += 1
-                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}</b> ({room_id}): Admin: No (level: {room_data['bot_power_level']})")
+                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}</b> ({room_id}): Admin: No (level: {room_data['bot_power_level']}) [v{room_data.get('room_version', '1')}]")
 
             # Only show rooms section if there are problematic rooms
             if problematic_rooms:
@@ -2842,6 +3312,13 @@ class CommunityBot(Plugin):
             response += f"• Parent space: {'✅ Admin' if report['space'].get('has_admin', False) else '❌ No admin'}<br />"
             response += f"• Rooms with admin: {admin_rooms}<br />"
             response += f"• Rooms without admin: {non_admin_rooms}<br />"
+            response += f"• Modern room versions (12+): {modern_rooms}<br />"
+            response += f"• Legacy room versions (1-11): {legacy_rooms}<br />"
+            
+            # Add note about unlimited power for modern rooms
+            if modern_rooms > 0:
+                response += f"<br />ℹ️ <b>Note:</b> In modern room versions (12+), creators have unlimited power and cannot be restricted by power levels.<br />"
+            
             if not_in_room_count > 0:
                 response += f"• Rooms bot not in: {not_in_room_count}<br />"
             if error_rooms > 0:
@@ -3003,7 +3480,14 @@ class CommunityBot(Plugin):
                 pass
 
             response = f"<h3>🔍 Detailed Analysis: {room_name}</h3><br />"
-            response += f"<b>Room ID:</b> {room_id}<br /><br />"
+            response += f"<b>Room ID:</b> {room_id}<br />"
+            
+            # Get room version and creators
+            room_version, creators = await self.get_room_version_and_creators(room_id)
+            response += f"<b>Room Version:</b> {room_version}<br />"
+            if creators:
+                response += f"<b>Creators:</b> {', '.join(creators)}<br />"
+            response += "<br />"
 
             # Check if bot is in the room
             try:
@@ -3019,9 +3503,15 @@ class CommunityBot(Plugin):
                 power_levels = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
                 bot_level = power_levels.get_user_level(self.client.mxid)
                 
+                # Check if bot has unlimited power (creator in modern room versions)
+                bot_has_unlimited_power = await self.user_has_unlimited_power(self.client.mxid, room_id)
+                
                 response += f"<h4>📊 Power Level Analysis</h4><br />"
                 response += f"• <b>Bot power level:</b> {bot_level}<br />"
-                response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}<br />"
+                if bot_has_unlimited_power:
+                    response += f"• <b>Administrative privileges:</b> ✅ Unlimited Power (Creator)<br />"
+                else:
+                    response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}<br />"
                 response += f"• <b>Default user level:</b> {power_levels.users_default}<br />"
                 response += f"• <b>Invite level:</b> {power_levels.invite}<br />"
                 response += f"• <b>Kick level:</b> {power_levels.kick}<br />"
@@ -3039,20 +3529,29 @@ class CommunityBot(Plugin):
                         else:
                             users_higher.append({"user": user, "level": level})
 
-                if users_higher:
-                    response += f"<h4>⚠️ Users with Higher Power Level</h4><br />"
-                    for user_info in users_higher:
-                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
-                    response += "<br />"
+                if bot_has_unlimited_power:
+                    response += f"<h4>ℹ️ Creator Status</h4><br />"
+                    response += f"✅ <b>No power level conflicts relevant:</b> Bot has unlimited power as creator in room version {room_version}<br /><br />"
+                else:
+                    if users_higher:
+                        response += f"<h4>⚠️ Users with Higher Power Level</h4><br />"
+                        for user_info in users_higher:
+                            response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
+                        response += "<br />"
 
-                if users_equal:
-                    response += f"<h4>⚠️ Users with Equal Power Level</h4><br />"
-                    for user_info in users_equal:
-                        response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
-                    response += "<br />"
+                    if users_equal:
+                        response += f"<h4>⚠️ Users with Equal Power Level</h4><br />"
+                        for user_info in users_equal:
+                            response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
+                        response += "<br />"
 
-                if not users_higher and not users_equal:
-                    response += "✅ <b>No power level conflicts detected</b><br /><br />"
+                    if not users_higher and not users_equal:
+                        response += "✅ <b>No power level conflicts detected</b><br /><br />"
+                
+                # Add note about creators in modern room versions
+                if self.is_modern_room_version(room_version):
+                    response += f"<h4>ℹ️ Modern Room Version Note</h4><br />"
+                    response += f"This room uses version {room_version}, which means creators have unlimited power and cannot be restricted by power levels.<br /><br />"
 
                 # Check specific permissions
                 response += f"<h4>🔐 Permission Analysis</h4><br />"
@@ -3073,7 +3572,7 @@ class CommunityBot(Plugin):
                 ]
                 
                 for perm_name, required_level in permissions:
-                    has_perm = bot_level >= required_level
+                    has_perm = bot_level >= required_level or bot_has_unlimited_power
                     status = "✅" if has_perm else "❌"
                     response += f"• {status} <b>{perm_name}:</b> {'Yes' if has_perm else 'No'} (required: {required_level})<br />"
 

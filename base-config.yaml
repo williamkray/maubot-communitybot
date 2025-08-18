@@ -157,6 +157,11 @@ verification_phrases:
 # number of attempts a user has to enter the correct verification phrase
 verification_attempts: 3
 
+# room version to use when creating new rooms
+# this should be a string value (e.g., "10", "11", "12")
+# for room versions 12+, creators have unlimited power and should not be given explicit power levels
+room_version: "10"
+
 # message to send to users when they need to verify they are human
 # use {room} for the room name and {phrase} for the verification phrase
 verification_message: |
