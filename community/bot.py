@@ -2155,7 +2155,11 @@ class CommunityBot(Plugin):
     @community.subcommand("replaceroom", help="replace a room with a new one")
     @command.argument("room", required=False)
     async def replace_room(self, evt: MessageEvent, room: str) -> None:
+        self.log.info(f"=== REPLACEROOM COMMAND STARTED ===")
+        self.log.info(f"Command arguments: room='{room}', evt.room_id='{evt.room_id}'")
+        
         if not await self.check_parent_room(evt):
+            self.log.info("Parent room check failed, returning")
             return
         await evt.mark_read()
 
@@ -2170,29 +2174,36 @@ class CommunityBot(Plugin):
         if room.startswith("#"):
             room_id = await self.client.resolve_room_alias(room)
             room_id = room_id["room_id"]
+            self.log.info(f"Resolved alias '{room}' to room ID: {room_id}")
         else:
             room_id = room
+            self.log.info(f"Using direct room ID: {room_id}")
 
         # Check bot permissions in the old room
+        self.log.info(f"=== CHECKING BOT PERMISSIONS ===")
         has_perms, error_msg, _ = await self.check_bot_permissions(
             room_id, evt, ["state", "tombstone", "power_levels"]
         )
+        self.log.info(f"Bot permissions check result: has_perms={has_perms}, error_msg='{error_msg}'")
         if not has_perms:
             await evt.respond(f"Cannot replace room: {error_msg}")
+            self.log.info("Bot permissions check failed, returning")
             return
 
         # Get the room name from the state event
+        room_name = None
         try:
             room_name_event = await self.client.get_state_event(
                 room_id, EventType.ROOM_NAME
             )
             room_name = room_name_event.name
+            self.log.info(f"Retrieved room name: '{room_name}'")
         except Exception as e:
             self.log.warning(f"Failed to get room name: {e}")
-            # await evt.respond("Could not find room name in state events")
-            pass
+            # room_name remains None
 
         # get the room topic from the state event
+        room_topic = None
         try:
             room_topic_event = await self.client.get_state_event(
                 room_id, EventType.ROOM_TOPIC
@@ -2200,23 +2211,82 @@ class CommunityBot(Plugin):
             room_topic = room_topic_event.topic
         except Exception as e:
             self.log.warning(f"Failed to get room topic: {e}")
-            pass
+            # room_topic remains None
 
         # Check if the room being replaced is a space
         is_space = False
+        self.log.info(f"=== ABOUT TO START SPACE DETECTION ===")
+        self.log.info(f"=== SPACE DETECTION DEBUG START ===")
+        self.log.info(f"Room ID being checked: {room_id}")
+        self.log.info(f"EventType module: {EventType}")
+        self.log.info(f"EventType.ROOM_CREATE exists: {hasattr(EventType, 'ROOM_CREATE')}")
+        if hasattr(EventType, 'ROOM_CREATE'):
+            self.log.info(f"EventType.ROOM_CREATE value: {getattr(EventType, 'ROOM_CREATE')}")
+        else:
+            self.log.warning("EventType.ROOM_CREATE does not exist!")
+        
         try:
             # Get the room creation event to check if it's a space
             state_events = await self.client.get_state(room_id)
-            for event in state_events:
-                if event.type == EventType.ROOM_CREATE:
-                    is_space = event.content.get("type") == "m.space"
+            self.log.info(f"Retrieved {len(state_events)} state events for space detection")
+            
+            # Log all event types for debugging
+            event_types = [event.type for event in state_events]
+            self.log.info(f"Event types found: {event_types}")
+            
+            # Debug EventType.ROOM_CREATE constant
+            self.log.info(f"EventType.ROOM_CREATE value: {EventType.ROOM_CREATE}")
+            self.log.info(f"EventType.ROOM_CREATE type: {type(EventType.ROOM_CREATE)}")
+            
+            # Also try string comparison as fallback
+            room_create_string = "m.room.create"
+            self.log.info(f"String comparison value: {room_create_string}")
+            
+            # Try to find the room creation event using multiple methods
+            room_create_event = None
+            
+            for i, event in enumerate(state_events):
+                self.log.info(f"Event {i}: type={event.type} (type: {type(event.type)})")
+                
+                # Try multiple comparison methods
+                if hasattr(EventType, 'ROOM_CREATE') and event.type == EventType.ROOM_CREATE:
+                    self.log.info(f"✓ Matched EventType.ROOM_CREATE")
+                    room_create_event = event
                     break
+                elif str(event.type) == room_create_string:
+                    self.log.info(f"✓ Matched string comparison 'm.room.create'")
+                    room_create_event = event
+                    break
+                elif event.type == "m.room.create":
+                    self.log.info(f"✓ Matched direct string comparison")
+                    room_create_event = event
+                    break
+                else:
+                    self.log.info(f"✗ No match for event {i}")
+            
+            # Now process the room creation event if found
+            if room_create_event:
+                space_type = room_create_event.content.get("type")
+                self.log.info(f"Found ROOM_CREATE event with type: {space_type}")
+                self.log.info(f"Full ROOM_CREATE content: {room_create_event.content}")
+                is_space = (space_type == "m.space")
+                self.log.info(f"Space detection result: {is_space}")
+            else:
+                self.log.warning("No ROOM_CREATE event found using any method")
+                
             if is_space:
-                self.log.info(f"Room {room_id} is a space - will create new space")
+                self.log.info(f"✓ FINAL RESULT: Room {room_id} IS a space - will create new space")
+            else:
+                self.log.info(f"✗ FINAL RESULT: Room {room_id} is NOT a space - will create regular room")
+                
         except Exception as e:
-            self.log.warning(f"Failed to check if room is a space: {e}")
+            self.log.error(f"❌ ERROR during space detection: {e}")
+            import traceback
+            self.log.error(f"Traceback: {traceback.format_exc()}")
             # Assume it's not a space if we can't determine
             is_space = False
+            
+        self.log.info(f"=== SPACE DETECTION DEBUG END - is_space={is_space} ===")
 
         # Get list of aliases to transfer while removing them from the old room
         aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
@@ -2227,10 +2297,19 @@ class CommunityBot(Plugin):
             return
 
         # Inform user about what type of room is being replaced
+        if not room_name:
+            room_name = f"Room {room_id[:8]}..."  # Fallback name
+            self.log.warning(f"Using fallback room name: {room_name}")
+            
+        self.log.info(f"Final decision - is_space: {is_space}, room_name: '{room_name}'")
+        self.log.info(f"About to send user message - is_space: {is_space}")
+        
         if is_space:
             await evt.respond(f"Replacing space '{room_name}' with a new space...")
+            self.log.info(f"✓ Sent 'Replacing space' message to user")
         else:
             await evt.respond(f"Replacing room '{room_name}' with a new room...")
+            self.log.info(f"✗ Sent 'Replacing room' message to user")
 
         # Validate that the new room alias is available
         is_valid, conflicting_aliases = await self.validate_room_aliases([room_name], evt)
@@ -2244,14 +2323,56 @@ class CommunityBot(Plugin):
         # and space membership
         if is_space:
             # Create a new space instead of a regular room
-            new_room_id, new_room_alias = await self.create_space(room_name, evt)
+            # For spaces, we need to pass power_level_override to ensure proper creation
+            # Get power levels from the old space to use as a template
+            try:
+                power_level_override = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
+                self.log.info(f"Using power levels from old space for new space creation")
+                # remove the bot's explicit power level
+                # since creators have unlimited power in modern rooms
+                if self.is_modern_room_version(self.config["room_version"]):
+                    if power_level_override.users:
+                        power_level_override.users.pop(self.client.mxid, None)
+                        self.log.info(f"Removed bot since they are creator")
+            except Exception as e:
+                self.log.warning(f"Could not get power levels from old space, using defaults: {e}")
+                power_level_override = None
+            
+            self.log.info(f"Calling create_space with room_name='{room_name}', power_level_override={power_level_override is not None}")
+            new_room_id, new_room_alias = await self.create_space(room_name, evt, power_level_override)
+            self.log.info(f"create_space returned: room_id={new_room_id}, alias={new_room_alias}")
         else:
             # Create a regular room
+            self.log.info(f"Calling create_room with room_name='{room_name}'")
             new_room_id, new_room_alias = await self.create_room(room_name, evt)
+            self.log.info(f"create_room returned: room_id={new_room_id}, alias={new_room_alias}")
             
         if not new_room_id:
             await evt.respond("Failed to create new room")
             return
+            
+        # Ensure the new space is NOT added to the old space as a child room
+        if is_space:
+            try:
+                # Check if the old space has any m.space.parent events pointing to it
+                # and ensure the new space doesn't get added as a child
+                old_space_parent_events = []
+                state_events = await self.client.get_state(room_id)
+                for event in state_events:
+                    if event.type == EventType.SPACE_PARENT:
+                        old_space_parent_events.append(event.state_key)
+                
+                if old_space_parent_events:
+                    self.log.info(f"Old space has {len(old_space_parent_events)} parent space references - ensuring new space is not added as child")
+                    await evt.respond(f"Note: Old space has {len(old_space_parent_events)} parent space references - new space will be independent")
+                
+                # Also check if the old space is a child of the community parent space
+                # and ensure the new space doesn't automatically inherit that relationship
+                if room_id == self.config.get("parent_room"):
+                    self.log.info("Old space is the community parent space - new space will be independent")
+                    await evt.respond("Note: Old space is the community parent space - new space will be independent and may need manual configuration")
+            except Exception as e:
+                self.log.warning(f"Could not check old space parent references: {e}")
 
         # Check bot permissions in the new room
         has_perms, error_msg, _ = await self.check_bot_permissions(
@@ -2263,61 +2384,76 @@ class CommunityBot(Plugin):
             )
             return
 
-        # Transfer the aliases to the new room
-        for alias in aliases_to_transfer:
-            localpart = alias.split(":")[0][1:]  # Remove # and get localpart
-            server = alias.split(":")[1]
-            try:
-                await self.client.add_room_alias(new_room_id, localpart)
-                self.log.info(
-                    f"Successfully transferred alias {alias} to new room {new_room_id}"
-                )
-            except Exception as e:
-                # If transfer failed, try to create a modified alias
-                modified_alias = f"{localpart}NEW"
+        # Transfer the aliases to the new room/space
+        if aliases_to_transfer:
+            await evt.respond(f"Transferring {len(aliases_to_transfer)} aliases to new {'space' if is_space else 'room'}...")
+            
+            for alias in aliases_to_transfer:
+                localpart = alias.split(":")[0][1:]  # Remove # and get localpart
+                server = alias.split(":")[1]
                 try:
-                    await self.client.add_room_alias(new_room_id, modified_alias)
+                    await self.client.add_room_alias(new_room_id, localpart)
                     self.log.info(
-                        f"Successfully transferred modified alias {modified_alias} to new room {new_room_id}"
+                        f"Successfully transferred alias {alias} to new {'space' if is_space else 'room'} {new_room_id}"
                     )
-                except Exception as e2:
-                    self.log.error(
-                        f"Failed to transfer modified alias {modified_alias}: {e2}"
-                    )
+                except Exception as e:
+                    # If transfer failed, try to create a modified alias
+                    modified_alias = f"{localpart}NEW"
+                    try:
+                        await self.client.add_room_alias(new_room_id, modified_alias)
+                        self.log.info(
+                            f"Successfully transferred modified alias {modified_alias} to new {'space' if is_space else 'room'} {new_room_id}"
+                        )
+                    except Exception as e2:
+                        self.log.error(
+                            f"Failed to transfer modified alias {modified_alias}: {e2}"
+                        )
+            
+            await evt.respond(f"Successfully transferred {len(aliases_to_transfer)} aliases to new {'space' if is_space else 'room'}")
+        else:
+            await evt.respond("No aliases to transfer")
 
-        # Get the room avatar from the old room
+        # Get the room avatar from the old room/space
         try:
             old_room_avatar = await self.client.get_state_event(
                 room_id, EventType.ROOM_AVATAR
             )
             if old_room_avatar and old_room_avatar.url:
-                # Set the same avatar in the new room
+                # Set the same avatar in the new room/space
                 await self.client.send_state_event(
                     new_room_id, EventType.ROOM_AVATAR, {"url": old_room_avatar.url}
                 )
                 self.log.info(
-                    f"Successfully copied room avatar to new room {new_room_id}"
+                    f"Successfully copied {'space' if is_space else 'room'} avatar to new {'space' if is_space else 'room'} {new_room_id}"
                 )
+                await evt.respond(f"Copied avatar to new {'space' if is_space else 'room'}")
         except Exception as e:
-            self.log.error(f"Failed to copy room avatar to new room: {e}")
-            # await evt.respond(f"Failed to copy room avatar to new room: {e}")
+            self.log.error(f"Failed to copy {'space' if is_space else 'room'} avatar to new {'space' if is_space else 'room'}: {e}")
+            # await evt.respond(f"Failed to copy {'space' if is_space else 'room'} avatar to new {'space' if is_space else 'room'}: {e}")
 
-        # Set the room topic in the new room
-        try:
-            await self.client.send_state_event(
-                new_room_id, EventType.ROOM_TOPIC, {"topic": room_topic}
-            )
-            self.log.info(f"Successfully copied room topic to new room {new_room_id}")
-        except Exception as e:
-            self.log.error(f"Failed to copy room topic to new room: {e}")
-            # await evt.respond(f"Failed to copy room topic to new room: {e}")
+        # Set the room topic in the new room/space
+        if room_topic:
+            try:
+                await self.client.send_state_event(
+                    new_room_id, EventType.ROOM_TOPIC, {"topic": room_topic}
+                )
+                self.log.info(f"Successfully copied {'space' if is_space else 'room'} topic to new {'space' if is_space else 'room'} {new_room_id}")
+                await evt.respond(f"Copied topic to new {'space' if is_space else 'room'}")
+            except Exception as e:
+                self.log.error(f"Failed to copy {'space' if is_space else 'room'} topic to new {'space' if is_space else 'room'}: {e}")
+                # await evt.respond(f"Failed to copy {'space' if is_space else 'room'} topic to new {'space' if is_space else 'room'}: {e}")
+        else:
+            await evt.respond("No topic to copy")
 
-        # Archive the old room with a pointer to the new room
+        # Archive the old room/space with a pointer to the new room/space
+        await evt.respond(f"Archiving old {'space' if is_space else 'room'}...")
         success = await self.do_archive_room(room_id, evt, new_room_id)
         if not success:
             await evt.respond(
-                "Failed to archive old room, but new room has been created"
+                f"Failed to archive old {'space' if is_space else 'room'}, but new {'space' if is_space else 'room'} has been created"
             )
+        else:
+            await evt.respond(f"Successfully archived old {'space' if is_space else 'room'}")
 
         # If we're replacing a space, we need to handle child room relationships
         if is_space:
@@ -2331,6 +2467,8 @@ class CommunityBot(Plugin):
                 
                 if old_child_rooms:
                     self.log.info(f"Found {len(old_child_rooms)} child rooms in old space")
+                    await evt.respond(f"Migrating {len(old_child_rooms)} child rooms from old space to new space...")
+                    
                     # Update child rooms to point to the new space
                     for child_room_id in old_child_rooms:
                         try:
@@ -2366,8 +2504,13 @@ class CommunityBot(Plugin):
                             await asyncio.sleep(self.config["sleep"])
                         except Exception as e:
                             self.log.error(f"Failed to update child room {child_room_id}: {e}")
+                    
+                    await evt.respond(f"Successfully migrated {len(old_child_rooms)} child rooms to new space")
+                else:
+                    await evt.respond("No child rooms found in old space")
             except Exception as e:
                 self.log.error(f"Failed to handle child room relationships: {e}")
+                await evt.respond(f"Warning: Failed to handle child room relationships: {e}")
 
         # update instances of the old room id in any config values that use it
         config_keys = [
@@ -2399,6 +2542,20 @@ class CommunityBot(Plugin):
 
         # Save the updated config
         self.config.save()
+        
+        # Final success message
+        if is_space:
+            await evt.respond(
+                f"✅ Space replacement completed successfully!\n"
+                f"New space: {new_room_alias}\n"
+                f"Old space has been archived with a pointer to the new space."
+            )
+        else:
+            await evt.respond(
+                f"✅ Room replacement completed successfully!\n"
+                f"New room: {new_room_alias}\n"
+                f"Old room has been archived with a pointer to the new room."
+            )
 
     @community.subcommand(
         "guests",
