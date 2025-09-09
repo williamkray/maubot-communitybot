@@ -1946,13 +1946,31 @@ class CommunityBot(Plugin):
 
             # Get power levels from parent room if not provided
             if not power_level_override and parent_room:
-                power_levels = await self.client.get_state_event(
+                # Get parent room power levels to extract user power levels
+                parent_power_levels = await self.client.get_state_event(
                     parent_room, EventType.ROOM_POWER_LEVELS
                 )
-                user_power_levels = power_levels.users
-                # ensure bot has highest power
-                user_power_levels[self.client.mxid] = 1000
-                power_levels.users = user_power_levels
+                
+                # Create new power levels with server defaults, not copying all permissions from space
+                power_levels = PowerLevelStateEventContent()
+                
+                # Copy only user power levels from parent space, not the entire permission set
+                if parent_power_levels.users:
+                    user_power_levels = parent_power_levels.users.copy()
+                    # Ensure bot has highest power
+                    user_power_levels[self.client.mxid] = 1000
+                    power_levels.users = user_power_levels
+                else:
+                    power_levels.users = {
+                        self.client.mxid: 1000,  # Bot gets highest power
+                    }
+                
+                # Set explicit config values
+                power_levels.invite = self.config["invite_power_level"]
+                
+                # For other permissions, let the server use its defaults instead of copying from space
+                # This prevents issues like only admins being able to post messages
+                self.log.info(f"Using user power levels from parent space but server defaults for other permissions")
                 power_level_override = power_levels
             elif not power_level_override:
                 # If no parent room and no override provided, create default power levels
@@ -2326,9 +2344,32 @@ class CommunityBot(Plugin):
             # For spaces, we need to pass power_level_override to ensure proper creation
             # Get power levels from the old space to use as a template
             try:
-                power_level_override = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
-                self.log.info(f"Using power levels from old space for new space creation")
-                # remove the bot's explicit power level
+                old_power_levels = await self.client.get_state_event(room_id, EventType.ROOM_POWER_LEVELS)
+                self.log.info(f"Using user power levels from old space for new space creation")
+                
+                # Create new power levels with server defaults, not copying all permissions from old space
+                power_levels = PowerLevelStateEventContent()
+                
+                # Copy only user power levels from old space, not the entire permission set
+                if old_power_levels.users:
+                    user_power_levels = old_power_levels.users.copy()
+                    # Ensure bot has highest power
+                    user_power_levels[self.client.mxid] = 1000
+                    power_levels.users = user_power_levels
+                else:
+                    power_levels.users = {
+                        self.client.mxid: 1000,  # Bot gets highest power
+                    }
+                
+                # Set explicit config values
+                power_levels.invite = self.config["invite_power_level"]
+                
+                # For other permissions, let the server use its defaults instead of copying from old space
+                # This prevents issues like only admins being able to post messages
+                self.log.info(f"Using user power levels from old space but server defaults for other permissions")
+                power_level_override = power_levels
+                
+                # remove the bot's explicit power level for modern room versions
                 # since creators have unlimited power in modern rooms
                 if self.is_modern_room_version(self.config["room_version"]):
                     if power_level_override.users:
