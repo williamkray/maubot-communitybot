@@ -35,24 +35,18 @@ warn_threshold_days: 30
 # subject to removal by the purge command.
 kick_threshold_days: 60
 
-# track users? if false, will disable all tracking and avoid writing anything to the database.
-track_users: True
+# track users? empty list disables all tracking, otherwise specify what to track:
+# - "messages": track user activity from messages
+# - "reactions": track user activity from reactions
+# examples:
+#   track_users: []                    # disable all tracking
+#   track_users: ["messages"]          # track only messages
+#   track_users: ["reactions"]         # track only reactions  
+#   track_users: ["messages", "reactions"]  # track both
+track_users: ["messages", "reactions"]
 
-# track messages? if false, will not track user activity timestamps. enable if you'd like to track
-# inactive users in your community
-track_messages: True
-
-# track reactions? if false, will only track activity based on normal message events, but if true
-# will update the user's last-active date when they add a reaction to a message
-track_reactions: True
-
-# list of users who can use administrative commands. these users will also be made room admins (PL100)
-# DEPRECATED: set user powerlevels in the parent room instead.
-admins: []
-
-# list of users who should be considered community moderators. these users will be made room mods (PL50)
-# DEPRECATED: set userpowerlevels in the parent room instead.
-moderators: []
+# Note: Admin and moderator permissions are now managed through power levels
+# in the parent room. Set user power levels directly in the parent space.
 
 # list of users who should be invited to new rooms immediately (other bots, moderators, perhaps)
 # use full matrix IDs here

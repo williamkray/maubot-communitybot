@@ -47,18 +47,17 @@ BAN_STATE_EVENT = EventType.find("m.policy.rule.user", EventType.Class.STATE)
 # database table related things
 from .db import upgrade_table
 
+# Helper modules
+from .helpers import message_utils, room_utils, user_utils, database_utils, report_utils, decorators, common_utils, room_creation_utils, config_manager, response_builder, diagnostic_utils, base_command_handler
+
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
         helper.copy("sleep")
         helper.copy("welcome_sleep")
-        helper.copy("admins")
-        helper.copy("moderators")
         helper.copy("parent_room")
         helper.copy("community_slug")
         helper.copy("track_users")
-        helper.copy("track_messages")
-        helper.copy("track_reactions")
         helper.copy("warn_threshold_days")
         helper.copy("kick_threshold_days")
         helper.copy("encrypt")
@@ -91,6 +90,7 @@ class CommunityBot(Plugin):
     async def start(self) -> None:
         await super().start()
         self.config.load_and_update()
+        self.config_manager = config_manager.ConfigManager(self.config)
         self.client.add_dispatcher(MembershipEventDispatcher)
         # Start background redaction task
         self._redaction_tasks = asyncio.create_task(self._redaction_loop())
@@ -113,22 +113,9 @@ class CommunityBot(Plugin):
         Returns:
             bool: True if user has sufficient power level
         """
-        try:
-            target_room = room_id or self.config["parent_room"]
-            
-            # First check if user has unlimited power (creator in modern room versions)
-            if await self.user_has_unlimited_power(user_id, target_room):
-                return True
-            
-            # Then check power level
-            power_levels = await self.client.get_state_event(
-                target_room, EventType.ROOM_POWER_LEVELS
-            )
-            user_level = power_levels.get_user_level(user_id)
-            return user_level >= min_level
-        except Exception as e:
-            self.log.error(f"Failed to check user power level: {e}")
-            return False
+        return await user_utils.user_permitted(
+            self.client, user_id, self.config["parent_room"], min_level, room_id, self.log
+        )
 
     def generate_community_slug(self, community_name: str) -> str:
         """Generate a community slug from the community name.
@@ -139,10 +126,7 @@ class CommunityBot(Plugin):
         Returns:
             str: A slug made from the first letter of each word, lowercase
         """
-        # Split by whitespace and get first letter of each word
-        words = community_name.strip().split()
-        slug = ''.join(word[0].lower() for word in words if word)
-        return slug
+        return message_utils.generate_community_slug(community_name)
 
     async def validate_room_alias(self, alias_localpart: str, server: str) -> bool:
         """Check if a room alias already exists.
@@ -154,18 +138,7 @@ class CommunityBot(Plugin):
         Returns:
             bool: True if alias is available, False if it already exists
         """
-        try:
-            full_alias = f"#{alias_localpart}:{server}"
-            await self.client.resolve_room_alias(full_alias)
-            # If we get here, the alias exists
-            return False
-        except MNotFound:
-            # Alias doesn't exist, so it's available
-            return True
-        except Exception as e:
-            # For other errors, assume alias is available to be safe
-            self.log.warning(f"Error checking alias {full_alias}: {e}")
-            return True
+        return await room_utils.validate_room_alias(self.client, alias_localpart, server)
 
     async def validate_room_aliases(self, room_names: list[str], evt: MessageEvent = None) -> tuple[bool, list[str]]:
         """Validate that all room aliases are available.
@@ -183,19 +156,9 @@ class CommunityBot(Plugin):
             return False, []
             
         server = self.client.parse_user_id(self.client.mxid)[1]
-        conflicting_aliases = []
-        
-        for room_name in room_names:
-            # Clean the room name and create alias
-            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", room_name).lower()
-            alias_localpart = f"{sanitized_name}-{self.config['community_slug']}"
-            
-            # Check if alias is available
-            is_available = await self.validate_room_alias(alias_localpart, server)
-            if not is_available:
-                conflicting_aliases.append(f"#{alias_localpart}:{server}")
-        
-        return len(conflicting_aliases) == 0, conflicting_aliases
+        return await room_utils.validate_room_aliases(
+            self.client, room_names, self.config["community_slug"], server
+        )
 
     async def get_moderators_and_above(self) -> list[str]:
         """Get list of users with moderator or higher permissions from the parent space.
@@ -203,18 +166,7 @@ class CommunityBot(Plugin):
         Returns:
             list: List of user IDs with power level >= 50 (moderator or above)
         """
-        try:
-            power_levels = await self.client.get_state_event(
-                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
-            )
-            moderators = []
-            for user, level in power_levels.users.items():
-                if level >= 50:  # Moderator level or above
-                    moderators.append(user)
-            return moderators
-        except Exception as e:
-            self.log.error(f"Failed to get moderators from parent space: {e}")
-            return []
+        return await room_utils.get_moderators_and_above(self.client, self.config["parent_room"])
 
     async def create_space(self, space_name: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None) -> tuple[str, str]:
         """Create a new space without community slug suffix.
@@ -353,7 +305,7 @@ class CommunityBot(Plugin):
                 await asyncio.sleep(60)  # Wait a minute before retrying on error
 
     async def do_sync(self) -> None:
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             return "user tracking is disabled"
 
         try:
@@ -441,148 +393,32 @@ class CommunityBot(Plugin):
         )
         kick_inactive_results = await self.database.fetch(kick_q, kick_days_ago)
         ignored_results = await self.database.fetch(ignored_q)
-        report = {}
-        report["warn_inactive"] = [row["mxid"] for row in warn_inactive_results] or [
-            "none"
-        ]
-        report["kick_inactive"] = [row["mxid"] for row in kick_inactive_results] or [
-            "none"
-        ]
-        report["ignored"] = [row["mxid"] for row in ignored_results] or ["none"]
-
-        return report
+        
+        database_results = {
+            "warn_inactive": warn_inactive_results,
+            "kick_inactive": kick_inactive_results,
+            "ignored": ignored_results
+        }
+        
+        return report_utils.generate_activity_report(database_results)
 
     def flag_message(self, msg):
-        if msg.content.msgtype in [
-            MessageType.FILE,
-            MessageType.IMAGE,
-            MessageType.VIDEO,
-        ]:
-            return self.config["censor_files"]
-
-        for w in self.config["censor_wordlist"]:
-            try:
-                if bool(re.search(w, msg.content.body, re.IGNORECASE)):
-                    # self.log.debug(f"DEBUG message flagged for censorship")
-                    return True
-                else:
-                    pass
-            except Exception as e:
-                self.log.error(f"Could not parse message for flagging: {e}")
+        return message_utils.flag_message(msg, self.config["censor_wordlist"], self.config["censor_files"])
 
     def flag_instaban(self, msg):
-        for w in self.config["censor_wordlist_instaban"]:
-            try:
-                if bool(re.search(w, msg.content.body, re.IGNORECASE)):
-                    # self.log.debug(f"DEBUG message flagged for instaban")
-                    return True
-                else:
-                    pass
-            except Exception as e:
-                self.log.error(f"Could not parse message for flagging: {e}")
+        return message_utils.flag_instaban(msg, self.config["censor_wordlist_instaban"])
 
     def censor_room(self, msg):
-        if isinstance(self.config["censor"], bool):
-            # self.log.debug(f"DEBUG message will be redacted because censoring is enabled")
-            return self.config["censor"]
-        elif isinstance(self.config["censor"], list):
-            if msg.room_id in self.config["censor"]:
-                # self.log.debug(f"DEBUG message will be redacted because censoring is enabled for THIS room")
-                return True
-        else:
-            return False
+        return message_utils.censor_room(msg, self.config["censor"])
 
     async def check_if_banned(self, userid):
-        # fetch banlist data
-        is_banned = False
-        myrooms = await self.client.get_joined_rooms()
-        banlist_roomids = await self.get_banlist_roomids()
-
-        for list_id in banlist_roomids:
-            if list_id not in myrooms:
-                self.log.error(
-                    f"Bot must be in {list_id} before attempting to use it as a banlist."
-                )
-                pass
-
-            # self.log.debug(f"DEBUG looking up state in {list_id}")
-            list_state = await self.client.get_state(list_id)
-            # self.log.debug(f"DEBUG state found: {list_state}")
-            try:
-                user_policies = list(
-                    filter(lambda p: p.type.t == "m.policy.rule.user", list_state)
-                )
-                # self.log.debug(f"DEBUG user policies found: {user_policies}")
-            except Exception as e:
-                self.log.error(e)
-
-            for rule in user_policies:
-                # self.log.debug(f"Checking match of user {userid} in banlist {l} for {rule['content']}")
-                try:
-                    if bool(
-                        fnmatch.fnmatch(userid, rule["content"]["entity"])
-                    ) and bool(re.search("ban$", rule["content"]["recommendation"])):
-                        # self.log.debug(f"DEBUG user {userid} matches ban rule {rule['content']['entity']}!")
-                        return True
-                    else:
-                        pass
-                except Exception as e:
-                    # commenting this out because it generates a lot of noise
-                    #self.log.debug(
-                    #    f"Found something funny in the banlist {list_id} for {rule['content']}: {e}"
-                    #)
-                    pass
-        # if we haven't exited by now, we must not be banned!
-        return is_banned
+        return await user_utils.check_if_banned(self.client, userid, self.config["banlists"], self.log)
 
     async def get_messages_to_redact(self, room_id, mxid):
-        try:
-            messages = await self.client.get_messages(
-                room_id,
-                limit=100,
-                filter_json={"senders": [mxid], "not_types": ["m.room.redaction"]},
-                direction=PaginationDirection.BACKWARD,
-            )
-            # Filter out events with empty content
-            filtered_events = [
-                event
-                for event in messages.events
-                if event.content and event.content.serialize()
-            ]
-            self.log.debug(
-                f"DEBUG found {len(filtered_events)} messages to redact in {room_id} (after filtering empty content)"
-            )
-            return filtered_events
-        except Exception as e:
-            self.log.error(f"Error getting messages to redact: {e}")
-            return []
+        return await database_utils.get_messages_to_redact(self.client, room_id, mxid, self.log)
 
     async def redact_messages(self, room_id):
-        counters = {"success": 0, "failure": 0}
-        sleep_time = self.config["sleep"]
-        events = await self.database.fetch(
-            "SELECT event_id FROM redaction_tasks WHERE room_id = $1", room_id
-        )
-        for event in events:
-            try:
-                await self.client.redact(
-                    room_id, event["event_id"], reason="content removed"
-                )
-                counters["success"] += 1
-                await self.database.execute(
-                    "DELETE FROM redaction_tasks WHERE event_id = $1", event["event_id"]
-                )
-                await asyncio.sleep(sleep_time)
-            except Exception as e:
-                if "Too Many Requests" in str(e):
-                    self.log.warning(
-                        f"Rate limited while redacting messages in {room_id}, will try again in next loop"
-                    )
-                    return counters
-                self.log.error(f"Failed to redact message: {e}")
-                counters["failure"] += 1
-                await asyncio.sleep(sleep_time)
-        return counters
+        return await database_utils.redact_messages(self.client, self.database, room_id, self.config["sleep"], self.log)
 
     async def check_bot_permissions(
         self,
@@ -804,68 +640,15 @@ class CommunityBot(Plugin):
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
-        ban_event_map = {"ban_list": {}, "error_list": {}}
-
-        ban_event_map["ban_list"][user] = []
-        for room in roomlist:
-            try:
-                roomname = None
-                roomnamestate = await self.client.get_state_event(room, "m.room.name")
-                roomname = roomnamestate["name"]
-
-                # ban user even if they're not in the room!
-                if all_rooms:
-                    pass
-                else:
-                    await self.client.get_state_event(room, EventType.ROOM_MEMBER, user)
-
-                await self.client.ban_user(room, user, reason=reason)
-                if roomname:
-                    ban_event_map["ban_list"][user].append(roomname)
-                else:
-                    ban_event_map["ban_list"][user].append(room)
-                time.sleep(self.config["sleep"])
-            except MNotFound:
-                pass
-            except Exception as e:
-                self.log.warning(e)
-                ban_event_map["error_list"][user] = []
-                ban_event_map["error_list"][user].append(roomname or room)
-
-            if self.config["redact_on_ban"]:
-                messages = await self.get_messages_to_redact(room, user)
-                # Queue messages for redaction
-                for msg in messages:
-                    await self.database.execute(
-                        "INSERT INTO redaction_tasks (event_id, room_id) VALUES ($1, $2)",
-                        msg.event_id,
-                        room,
-                    )
-                self.log.info(
-                    f"Queued {len(messages)} messages for redaction in {roomname or room}"
-                )
-
-        return ban_event_map
+        
+        return await user_utils.ban_user_from_rooms(
+            self.client, user, roomlist, reason, all_rooms,
+            self.config["redact_on_ban"], self.get_messages_to_redact,
+            self.database, self.config["sleep"], self.log
+        )
 
     async def get_banlist_roomids(self):
-        banlist_roomids = []
-        for l in self.config["banlists"]:
-            # self.log.debug(f"DEBUG getting banlist {l}")
-            if l.startswith("#"):
-                try:
-                    l_id = await self.client.resolve_room_alias(l)
-                    list_id = l_id["room_id"]
-                    time.sleep(self.config["sleep"])
-                    # self.log.debug(f"DEBUG banlist id resolves to: {list_id}")
-                    banlist_roomids.append(list_id)
-                except Exception as e:
-                    self.log.error(f"Banlist fetching failed for {l}: {e}")
-                    continue
-            else:
-                list_id = l
-                banlist_roomids.append(list_id)
-
-        return banlist_roomids
+        return await user_utils.get_banlist_roomids(self.client, self.config["banlists"], self.log)
 
     async def get_room_version_and_creators(self, room_id: str) -> tuple[str, list[str]]:
         """Get the room version and creators for a room.
@@ -876,39 +659,7 @@ class CommunityBot(Plugin):
         Returns:
             tuple: (room_version, list_of_creators)
         """
-        try:
-            # Get all state events to find the creation event
-            state_events = await self.client.get_state(room_id)
-            
-            # Find the m.room.create event
-            creation_event = None
-            for event in state_events:
-                if event.type == EventType.ROOM_CREATE:
-                    creation_event = event
-                    break
-            
-            if not creation_event:
-                # Default to version 1 if no creation event found
-                return "1", []
-            
-            room_version = creation_event.content.get("room_version", "1")
-            creators = []
-            
-            # Add the sender of the creation event as a creator
-            if creation_event.sender:
-                creators.append(creation_event.sender)
-            
-            # Add any additional creators from the content
-            additional_creators = creation_event.content.get("additional_creators", [])
-            if isinstance(additional_creators, list):
-                creators.extend(additional_creators)
-            
-            return room_version, creators
-            
-        except Exception as e:
-            self.log.error(f"Failed to get room version and creators for {room_id}: {e}")
-            # Default to version 1 if there's an error
-            return "1", []
+        return await room_utils.get_room_version_and_creators(self.client, room_id)
 
     def is_modern_room_version(self, room_version: str) -> bool:
         """Check if a room version is 12 or newer (modern room versions).
@@ -919,12 +670,7 @@ class CommunityBot(Plugin):
         Returns:
             bool: True if room version is 12 or newer
         """
-        try:
-            version_num = int(room_version)
-            return version_num >= 12
-        except (ValueError, TypeError):
-            # If we can't parse the version, assume it's not modern
-            return False
+        return room_utils.is_modern_room_version(room_version)
 
     async def user_has_unlimited_power(self, user_id: UserID, room_id: str) -> bool:
         """Check if a user has unlimited power in a room (creator in modern room versions).
@@ -936,19 +682,7 @@ class CommunityBot(Plugin):
         Returns:
             bool: True if user has unlimited power
         """
-        try:
-            room_version, creators = await self.get_room_version_and_creators(room_id)
-            
-            # In modern room versions (12+), creators have unlimited power
-            if self.is_modern_room_version(room_version):
-                return user_id in creators
-            
-            # In older room versions, creators don't have special unlimited power
-            return False
-            
-        except Exception as e:
-            self.log.error(f"Failed to check unlimited power for {user_id} in {room_id}: {e}")
-            return False
+        return await room_utils.user_has_unlimited_power(self.client, user_id, room_id)
 
     @event.on(BAN_STATE_EVENT)
     async def check_ban_event(self, evt: StateEvent) -> None:
@@ -1006,12 +740,7 @@ class CommunityBot(Plugin):
                 if room_id == self.config["parent_room"]:
                     continue
 
-                try:
-                    roomname = (
-                        await self.client.get_state_event(room_id, "m.room.name")
-                    )["name"]
-                except:
-                    self.log.warning(f"Unable to get room name for {room_id}")
+                roomname = await common_utils.get_room_name(self.client, room_id, self.log)
 
                 # Get current power levels
                 try:
@@ -1194,11 +923,7 @@ class CommunityBot(Plugin):
 
                     # Get room name for greeting
                     roomname = "this room"
-                    try:
-                        roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
-                        roomname = roomnamestate["name"]
-                    except:
-                        pass
+                    roomname = await common_utils.get_room_name(self.client, evt.room_id, self.log)
 
                     # Check if user already has sufficient power level or unlimited power
                     try:
@@ -1351,22 +1076,7 @@ class CommunityBot(Plugin):
 
     async def upsert_user_timestamp(self, mxid: str, timestamp: int) -> None:
         """Database-agnostic upsert for user timestamp updates."""
-        try:
-            # Try insert first
-            await self.database.execute(
-                "INSERT INTO user_events(mxid, last_message_timestamp) VALUES ($1, $2)",
-                mxid, timestamp
-            )
-        except Exception as e:
-            # If insert fails due to existing record, update instead
-            if "UNIQUE constraint failed" in str(e) or "duplicate key" in str(e).lower():
-                await self.database.execute(
-                    "UPDATE user_events SET last_message_timestamp = $2 WHERE mxid = $1",
-                    mxid, timestamp
-                )
-            else:
-                # Re-raise if it's not a constraint violation
-                raise
+        await database_utils.upsert_user_timestamp(self.database, mxid, timestamp, self.log)
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
@@ -1409,7 +1119,7 @@ class CommunityBot(Plugin):
 
                     await self.ban_this_user(evt.sender, all_rooms=True)
 
-        if not self.config["track_messages"] or not self.config["track_users"]:
+        if not self.config_manager.is_message_tracking_enabled():
             pass
         else:
             rooms_to_manage = await self.get_space_roomlist()
@@ -1422,7 +1132,7 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.REACTION)
     async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
-        if not self.config["track_reactions"] or not self.config["track_users"]:
+        if not self.config_manager.is_reaction_tracking_enabled():
             pass
         else:
             rooms_to_manage = await self.get_space_roomlist()
@@ -1461,57 +1171,12 @@ class CommunityBot(Plugin):
         help="update the activity tracker with the current space members \
             in case they are missing",
     )
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def sync_space_members(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
-        # check config values for admins and moderators. if they have a lower PL in the parent room,
-        # attempt to update the parent room with their appropriate admin/mod status
-        # we can skip all of this logic if those config values are empty
-        # this logic helps migrate explicit configuration to the parent-room inheritance model
-        if not self.config["admins"] and not self.config["moderators"]:
-            self.log.info(
-                "no admins or moderators configured, skipping power level sync"
-            )
-        else:
-            power_levels = await self.client.get_state_event(
-                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
-            )
-            users = power_levels.get("users", {})
-            for user in self.config["admins"]:
-                if user not in users or users.get(user) < 100:
-                    # update the users object in-place
-                    users[user] = 100
-
-            for user in self.config["moderators"]:
-                if user not in users or users.get(user) < 50:
-                    # update the users object in-place
-                    users[user] = 50
-
-            try:
-                # update full powerlevels object with updated user object
-                power_levels["users"] = users
-                await self.client.send_state_event(
-                    self.config["parent_room"],
-                    EventType.ROOM_POWER_LEVELS,
-                    power_levels,
-                )
-                # if updating was successful, let's go ahead and clear out the values in the config
-                self.config["admins"] = []
-                self.config["moderators"] = []
-                # and save the config to the file
-                self.config.save()
-                self.log.debug("successfully migrated admin/mod config to parent room")
-            except Exception as e:
-                self.log.error(
-                    f"Failed to send power levels to {self.config['parent_room']}: {e}"
-                )
-                await evt.respond(
-                    f"Failed to send power levels to {self.config['parent_room']}: {e}"
-                )
+        # Power level sync is now handled through parent room inheritance
+        # Users should set power levels directly in the parent room
 
         if not self.config["track_users"]:
             await evt.respond("user tracking is disabled")
@@ -1529,67 +1194,51 @@ class CommunityBot(Plugin):
         "ignore", help="exclude a specific matrix ID from inactivity tracking"
     )
     @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    @decorators.handle_errors("Failed to ignore user")
     async def ignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
-
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
-        try:
-            Client.parse_user_id(mxid)
-            await self.database.execute(
-                "UPDATE user_events SET ignore_inactivity = 1 WHERE \
-                    mxid = $1",
-                mxid,
-            )
-            self.log.info(f"{mxid} set to ignore inactivity")
-            await evt.react("✅")
-        except Exception as e:
-            await evt.respond(f"{e}")
+        Client.parse_user_id(mxid)
+        await self.database.execute(
+            "UPDATE user_events SET ignore_inactivity = 1 WHERE \
+                mxid = $1",
+            mxid,
+        )
+        self.log.info(f"{mxid} set to ignore inactivity")
+        await evt.react("✅")
 
     @community.subcommand(
         "unignore", help="re-enable activity tracking for a specific matrix ID"
     )
     @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    @decorators.handle_errors("Failed to unignore user")
     async def unignore_inactivity(self, evt: MessageEvent, mxid: UserID) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
-
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
-        try:
-            Client.parse_user_id(mxid)
-            await self.database.execute(
-                "UPDATE user_events SET ignore_inactivity = 0 WHERE \
-                    mxid = $1",
-                mxid,
-            )
-            self.log.info(f"{mxid} set to track inactivity")
-            await evt.react("✅")
-        except Exception as e:
-            await evt.respond(f"{e}")
+        Client.parse_user_id(mxid)
+        await self.database.execute(
+            "UPDATE user_events SET ignore_inactivity = 0 WHERE \
+                mxid = $1",
+            mxid,
+        )
+        self.log.info(f"{mxid} set to track inactivity")
+        await evt.react("✅")
 
     @community.subcommand(
         "report", help="generate a full list of activity tracking status"
     )
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def get_report(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
-
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
@@ -1609,14 +1258,11 @@ class CommunityBot(Plugin):
     @community.subcommand(
         "inactive", help="generate a list of mxids who have been inactive"
     )
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def get_inactive_report(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
@@ -1639,7 +1285,7 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
@@ -1661,7 +1307,7 @@ class CommunityBot(Plugin):
             await evt.reply("You don't have permission to use this command")
             return
 
-        if not self.config["track_users"]:
+        if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
 
@@ -1675,13 +1321,10 @@ class CommunityBot(Plugin):
 
 
     @community.subcommand("purge", help="kick users for excessive inactivity")
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def kick_users(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
         await evt.mark_read()
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
         msg = await evt.respond("starting the purge...")
         report = await self.generate_report()
@@ -1731,13 +1374,10 @@ class CommunityBot(Plugin):
         "kick", help="kick a specific user from the community and all rooms"
     )
     @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def kick_user(self, evt: MessageEvent, mxid: UserID) -> None:
-        if not await self.check_parent_room(evt):
-            return
         await evt.mark_read()
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
         user = mxid
         msg = await evt.respond("starting the purge...")
@@ -1783,13 +1423,10 @@ class CommunityBot(Plugin):
         "ban", help="kick and ban a specific user from the community and all rooms"
     )
     @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission()
     async def ban_user(self, evt: MessageEvent, mxid: UserID) -> None:
-        if not await self.check_parent_room(evt):
-            return
         await evt.mark_read()
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
         user = mxid
         msg = await evt.respond("starting the ban...")
@@ -1909,31 +1546,21 @@ class CommunityBot(Plugin):
             tuple: (room_id, room_alias) if successful, None if failed
         """
         mymsg = None
-        encrypted_flag_regex = re.compile(r"(\s+|^)-+encrypt(ed)?\s?")
-        unencrypted_flag_regex = re.compile(r"(\s+|^)-+unencrypt(ed)?\s?")
-        force_encryption = bool(encrypted_flag_regex.search(roomname))
-        force_unencryption = bool(unencrypted_flag_regex.search(roomname))
         try:
-            if force_encryption:
-                roomname = encrypted_flag_regex.sub("", roomname)
-            if force_unencryption:
-                roomname = unencrypted_flag_regex.sub("", roomname)
-            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
-            # Use provided invitees or fall back to config invitees
-            room_invitees = invitees if invitees is not None else self.config["invitees"]
-            parent_room = self.config["parent_room"]
-            server = self.client.parse_user_id(self.client.mxid)[1]
-
-            # Check if community slug is configured
-            if not self.config["community_slug"]:
-                error_msg = "No community slug configured. Please run initialize command first."
+            # Validate and process room creation parameters
+            sanitized_name, force_encryption, force_unencryption, error_msg = await room_creation_utils.validate_room_creation_params(
+                roomname, self.config, evt
+            )
+            if error_msg:
                 self.log.error(error_msg)
                 if evt:
                     await evt.respond(error_msg)
                 return None
 
-            # Create alias with community slug
-            alias_localpart = f"{sanitized_name}-{self.config['community_slug']}"
+            # Prepare room creation data
+            alias_localpart, server, room_invitees, parent_room = await room_creation_utils.prepare_room_creation_data(
+                sanitized_name, self.config, self.client, invitees
+            )
             
             # Validate that the alias is available
             is_available = await self.validate_room_alias(alias_localpart, server)
@@ -1944,43 +1571,20 @@ class CommunityBot(Plugin):
                     await evt.respond(error_msg)
                 return None
 
-            # Get power levels from parent room if not provided
-            if not power_level_override and parent_room:
-                # Get parent room power levels to extract user power levels
-                parent_power_levels = await self.client.get_state_event(
-                    parent_room, EventType.ROOM_POWER_LEVELS
-                )
-                
-                # Create new power levels with server defaults, not copying all permissions from space
-                power_levels = PowerLevelStateEventContent()
-                
-                # Copy only user power levels from parent space, not the entire permission set
-                if parent_power_levels.users:
-                    user_power_levels = parent_power_levels.users.copy()
-                    # Ensure bot has highest power
-                    user_power_levels[self.client.mxid] = 1000
-                    power_levels.users = user_power_levels
-                else:
-                    power_levels.users = {
-                        self.client.mxid: 1000,  # Bot gets highest power
-                    }
-                
-                # Set explicit config values
-                power_levels.invite = self.config["invite_power_level"]
-                
-                # For other permissions, let the server use its defaults instead of copying from space
-                # This prevents issues like only admins being able to post messages
-                self.log.info(f"Using user power levels from parent space but server defaults for other permissions")
-                power_level_override = power_levels
-            elif not power_level_override:
-                # If no parent room and no override provided, create default power levels
-                power_levels = PowerLevelStateEventContent()
-                power_levels.users = {
-                    self.client.mxid: 1000,  # Bot gets highest power
-                }
-                # Set invite power level from config
-                power_levels.invite = self.config["invite_power_level"]
-                power_level_override = power_levels
+            # Prepare power levels
+            power_levels = await room_creation_utils.prepare_power_levels(
+                self.client, self.config, parent_room, power_level_override
+            )
+            
+            # Adjust power levels for modern rooms
+            power_levels = room_creation_utils.adjust_power_levels_for_modern_rooms(
+                power_levels, self.config["room_version"]
+            )
+            
+            if self.is_modern_room_version(self.config["room_version"]) and power_levels:
+                self.log.info(f"Modern room version {self.config['room_version']} detected - removing bot from power levels")
+                if power_levels.users:
+                    power_levels.users.pop(self.client.mxid, None)
 
             if evt:
                 mymsg = await evt.respond(
@@ -1988,62 +1592,14 @@ class CommunityBot(Plugin):
                 )
 
             # Prepare initial state events
-            initial_state = []
+            initial_state = room_creation_utils.prepare_initial_state(
+                self.config, parent_room, server, force_encryption, force_unencryption, creation_content
+            )
             
-            # Only add space parent state if we have a parent room
-            if parent_room:
-                initial_state.extend([
-                    {
-                        "type": str(EventType.SPACE_PARENT),
-                        "state_key": parent_room,
-                        "content": {
-                            "via": [server],
-                            "canonical": True
-                        }
-                    },
-                    {
-                        "type": str(EventType.ROOM_JOIN_RULES),
-                        "content": {
-                            "join_rule": "restricted",
-                            "allow": [{
-                                "type": "m.room_membership",
-                                "room_id": parent_room
-                            }]
-                        }
-                    }
-                ])
-
-            # Add encryption if needed
-            if ( self.config["encrypt"] and not force_unencryption ) or force_encryption:
-                initial_state.append({
-                    "type": str(EventType.ROOM_ENCRYPTION),
-                    "content": {
-                        "algorithm": "m.megolm.v1.aes-sha2"
-                    }
-                })
-
-            # Add history visibility if specified in creation_content
-            if creation_content and "m.room.history_visibility" in creation_content:
-                initial_state.append({
-                    "type": str(EventType.ROOM_HISTORY_VISIBILITY),
-                    "content": {
-                        "history_visibility": creation_content["m.room.history_visibility"]
-                    }
-                })
-
-            # For modern room versions (12+), remove the bot from power levels
-            # as creators have unlimited power by default and cannot appear in power levels
-            if self.is_modern_room_version(self.config["room_version"]) and power_level_override:
-                self.log.info(f"Modern room version {self.config['room_version']} detected - removing bot from power levels")
-                if power_level_override.users:
-                    # Remove bot from users list but keep other important settings
-                    power_level_override.users.pop(self.client.mxid, None)
-            
-            # Create the room with all initial states
-            # Note: room_version is set via the room_version parameter, not creation_content
+            # Create the room
             self.log.info(f"Creating room with room_version={self.config['room_version']}")
-            if power_level_override:
-                self.log.info(f"Power level override users: {list(power_level_override.users.keys()) if power_level_override.users else 'None'}")
+            if power_levels:
+                self.log.info(f"Power level override users: {list(power_levels.users.keys()) if power_levels.users else 'None'}")
             else:
                 self.log.info("No power level override")
             
@@ -2052,32 +1608,20 @@ class CommunityBot(Plugin):
                 name=roomname,
                 invitees=room_invitees,
                 initial_state=initial_state,
-                power_level_override=power_level_override,
+                power_level_override=power_levels,
                 creation_content=creation_content,
                 room_version=self.config["room_version"]
             )
 
-            # Verify the room version was set correctly
-            try:
-                actual_version, actual_creators = await self.get_room_version_and_creators(room_id)
-                self.log.info(f"Room {room_id} created with version {actual_version} (requested: {self.config['room_version']})")
-                if actual_version != self.config["room_version"]:
-                    self.log.warning(f"Room version mismatch: requested {self.config['room_version']}, got {actual_version}")
-            except Exception as e:
-                self.log.warning(f"Could not verify room version for {room_id}: {e}")
+            # Verify room creation
+            await room_creation_utils.verify_room_creation(
+                self.client, room_id, self.config["room_version"], self.log
+            )
 
-            # The space child relationship needs to be set in the parent room separately
-            if parent_room:
-                await self.client.send_state_event(
-                    parent_room,
-                    EventType.SPACE_CHILD,
-                    {
-                        "via": [server],
-                        "suggested": False
-                    },
-                    state_key=room_id
-                )
-                await asyncio.sleep(self.config["sleep"])
+            # Add room to space
+            await room_creation_utils.add_room_to_space(
+                self.client, parent_room, room_id, server, self.config["sleep"]
+            )
 
             if evt:
                 await evt.respond(
@@ -3292,253 +2836,60 @@ class CommunityBot(Plugin):
             }
 
             # Check parent space permissions
-            try:
-                space_power_levels = await self.client.get_state_event(
-                    self.config["parent_room"], EventType.ROOM_POWER_LEVELS
-                )
-                bot_level = space_power_levels.get_user_level(self.client.mxid)
-                
-                report["space"] = {
-                    "room_id": self.config["parent_room"],
-                    "bot_power_level": bot_level,
-                    "has_admin": bot_level >= 100,
-                    "users_higher_or_equal": [],
-                    "users_equal": [],
-                    "users_higher": []
-                }
-
-                # Check for users with equal or higher power level
-                for user, level in space_power_levels.users.items():
-                    if user != self.client.mxid and level >= bot_level:
-                        if level == bot_level:
-                            report["space"]["users_equal"].append({
-                                "user": user,
-                                "level": level
-                            })
-                        else:
-                            report["space"]["users_higher"].append({
-                                "user": user,
-                                "level": level
-                            })
-                        report["space"]["users_higher_or_equal"].append({
-                            "user": user,
-                            "level": level
-                        })
-
-                if bot_level < 100:
-                    report["issues"].append(f"Bot lacks administrative privileges in parent space (level: {bot_level})")
-                
-                # Remove verbose warnings from summary - these will be shown in detailed room reports
-                # if report["space"]["users_higher"]:
-                #     report["warnings"].append(f"Users with higher power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}")
-                # 
-                # if report["space"]["users_equal"]:
-                #     report["warnings"].append(f"Users with equal power level in parent space: {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}")
-
-            except Exception as e:
-                report["space"] = {
-                    "room_id": self.config["parent_room"],
-                    "error": str(e)
-                }
-                report["issues"].append(f"Failed to check parent space permissions: {e}")
+            report["space"] = await diagnostic_utils.check_space_permissions(
+                self.client, self.config["parent_room"], self.log
+            )
+            if "error" in report["space"]:
+                report["issues"].append(f"Failed to check parent space permissions: {report['space']['error']}")
+            elif report["space"].get("bot_power_level", 0) < 100:
+                report["issues"].append(f"Bot lacks administrative privileges in parent space (level: {report['space']['bot_power_level']})")
 
             # Check all rooms in the space
             space_rooms = await self.get_space_roomlist()
-            
             for room_id in space_rooms:
-                try:
-                    # First check if bot is in the room
-                    try:
-                        await self.client.get_state_event(room_id, EventType.ROOM_MEMBER, self.client.mxid)
-                        bot_in_room = True
-                    except Exception:
-                        bot_in_room = False
+                room_data = await diagnostic_utils.check_room_permissions(
+                    self.client, room_id, self.log
+                )
+                report["rooms"][room_id] = room_data
+                
+                # Add issues for problematic rooms
+                if "error" in room_data:
+                    if room_data["error"] == "Bot not in room":
                         report["issues"].append(f"Bot is not a member of room '{room_id}' that is part of the space")
-                        report["rooms"][room_id] = {
-                            "room_id": room_id,
-                            "error": "Bot not in room"
-                        }
-                        continue
+                    else:
+                        report["issues"].append(f"Failed to check room {room_id}: {room_data['error']}")
+                elif not room_data.get("has_admin", False):
+                    report["issues"].append(f"Bot lacks administrative privileges in room '{room_data.get('room_name', room_id)}' ({room_id}) - level: {room_data.get('bot_power_level', 0)}")
 
-                    room_power_levels = await self.client.get_state_event(
-                        room_id, EventType.ROOM_POWER_LEVELS
-                    )
-                    bot_level = room_power_levels.get_user_level(self.client.mxid)
-                    
-                    # Get room name if available
-                    room_name = room_id
-                    try:
-                        room_name_event = await self.client.get_state_event(room_id, EventType.ROOM_NAME)
-                        room_name = room_name_event.name
-                    except:
-                        pass
-
-                    # Get room version and creators
-                    room_version, creators = await self.get_room_version_and_creators(room_id)
-                    
-                    # Check if bot has unlimited power (creator in modern room versions)
-                    bot_has_unlimited_power = await self.user_has_unlimited_power(self.client.mxid, room_id)
-                    
-                    room_report = {
-                        "room_id": room_id,
-                        "room_name": room_name,
-                        "room_version": room_version,
-                        "creators": creators,
-                        "bot_power_level": bot_level,
-                        "has_admin": bot_level >= 100 or bot_has_unlimited_power,
-                        "bot_has_unlimited_power": bot_has_unlimited_power,
-                        "users_higher_or_equal": [],
-                        "users_equal": [],
-                        "users_higher": []
-                    }
-
-                    # Check for users with equal or higher power level
-                    for user, level in room_power_levels.users.items():
-                        if user != self.client.mxid and level >= bot_level:
-                            if level == bot_level:
-                                room_report["users_equal"].append({
-                                    "user": user,
-                                    "level": level
-                                })
-                            else:
-                                room_report["users_higher"].append({
-                                    "user": user,
-                                    "level": level
-                                })
-                            room_report["users_higher_or_equal"].append({
-                                "user": user,
-                                "level": level
-                            })
-
-                    if bot_level < 100 and not bot_has_unlimited_power:
-                        report["issues"].append(f"Bot lacks administrative privileges in room '{room_name}' ({room_id}) - level: {bot_level}")
-                    elif bot_has_unlimited_power:
-                        self.log.debug(f"Bot has unlimited power in room '{room_name}' ({room_id}) as creator")
-                    
-                    # Remove verbose warnings from summary - these will be shown in detailed room reports
-                    # if room_report["users_higher"]:
-                    #     report["warnings"].append(f"Users with higher power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_higher']])}")
-                    # 
-                    # if room_report["users_equal"]:
-                    #     report["warnings"].append(f"Users with equal power level in room '{room_name}': {', '.join([f'{u['user']} ({u['level']})' for u in room_report['users_equal']])}")
-
-                    report["rooms"][room_id] = room_report
-
-                except Exception as e:
-                    report["rooms"][room_id] = {
-                        "room_id": room_id,
-                        "error": str(e)
-                    }
-                    report["issues"].append(f"Failed to check room {room_id}: {e}")
-
-            # Generate concise summary response
+            # Generate response using helper functions
             response = "<h3>🔍 Bot Permission Diagnostic Summary</h3><br /><br />"
 
             # Space summary - only show if there are issues
-            space_has_issues = False
-            if "error" in report["space"]:
-                space_has_issues = True
-                response += "<h4>📋 Parent Space</h4><br />"
-                response += f"❌ <b>Error:</b> {report['space']['error']}<br /><br />"
-            elif report["space"].get("bot_power_level", 0) < 100 or report["space"].get("users_higher") or report["space"].get("users_equal"):
-                space_has_issues = True
-                response += "<h4>📋 Parent Space</h4><br />"
-                space_status = "✅" if report["space"]["has_admin"] else "❌"
-                response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if report['space']['has_admin'] else 'No'} (level: {report['space']['bot_power_level']})<br />"
-                if report["space"]["users_higher"]:
-                    response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_higher']])}<br />"
-                if report["space"]["users_equal"]:
-                    response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in report['space']['users_equal']])}<br />"
-                response += "<br />"
-
-            # Rooms summary - only show problematic rooms with room IDs
-            problematic_rooms = []
-            admin_rooms = 0
-            non_admin_rooms = 0
-            error_rooms = 0
-            not_in_room_count = 0
-            modern_rooms = 0
-            legacy_rooms = 0
+            space_has_issues = ("error" in report["space"] or 
+                              report["space"].get("bot_power_level", 0) < 100 or 
+                              report["space"].get("users_higher") or 
+                              report["space"].get("users_equal"))
             
-            for room_id, room_data in report["rooms"].items():
-                if "error" in room_data:
-                    error_rooms += 1
-                    if room_data["error"] == "Bot not in room":
-                        not_in_room_count += 1
-                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}</b> ({room_id}): Bot not in room")
-                    else:
-                        problematic_rooms.append(f"❌ <b>{room_data.get('room_name', room_id)}</b> ({room_id}): Error - {room_data['error']}")
-                else:
-                    # Count room versions
-                    if self.is_modern_room_version(room_data.get("room_version", "1")):
-                        modern_rooms += 1
-                    else:
-                        legacy_rooms += 1
-                    
-                    if room_data["has_admin"]:
-                        admin_rooms += 1
-                        # Show unlimited power status for modern rooms
-                        if room_data.get("bot_has_unlimited_power", False):
-                            room_info = f"✅ <b>{room_data['room_name']}</b> ({room_id}): Unlimited Power (Creator) [v{room_data.get('room_version', '1')}]"
-                        else:
-                            room_info = f"✅ <b>{room_data['room_name']}</b> ({room_id}): Admin: Yes (level: {room_data['bot_power_level']}) [v{room_data.get('room_version', '1')}]"
-                        
-                        # Only show if there are power level conflicts
-                        if room_data["users_higher"] or room_data["users_equal"]:
-                            if room_data.get("bot_has_unlimited_power", False):
-                                room_info += f" - Note: Power level conflicts are irrelevant for creators with unlimited power"
-                            else:
-                                if room_data["users_higher"]:
-                                    room_info += f" - Higher power users: {len(room_data['users_higher'])}"
-                                if room_data["users_equal"]:
-                                    room_info += f" - Equal power users: {len(room_data['users_equal'])}"
-                            problematic_rooms.append(room_info)
-                    else:
-                        non_admin_rooms += 1
-                        problematic_rooms.append(f"❌ <b>{room_data['room_name']}</b> ({room_id}): Admin: No (level: {room_data['bot_power_level']}) [v{room_data.get('room_version', '1')}]")
+            if space_has_issues:
+                response += diagnostic_utils.generate_space_summary(report["space"])
 
-            # Only show rooms section if there are problematic rooms
-            if problematic_rooms:
-                response += f"<h4>🏠 Problematic Rooms ({len(problematic_rooms)} of {len(report['rooms'])} total)</h4><br />"
-                response += "<i>Use <code>!community doctor &lt;room_id&gt;</code> for detailed analysis of specific rooms</i><br /><br />"
-                for room_info in problematic_rooms:
-                    response += f"{room_info}<br />"
-                response += "<br />"
+            # Rooms summary
+            room_summary, room_stats = diagnostic_utils.generate_room_summary(
+                report["rooms"], self.is_modern_room_version
+            )
+            response += room_summary
 
-            # Summary - always show
-            response += f"<h4>📊 Summary</h4><br />"
-            response += f"• Parent space: {'✅ Admin' if report['space'].get('has_admin', False) else '❌ No admin'}<br />"
-            response += f"• Rooms with admin: {admin_rooms}<br />"
-            response += f"• Rooms without admin: {non_admin_rooms}<br />"
-            response += f"• Modern room versions (12+): {modern_rooms}<br />"
-            response += f"• Legacy room versions (1-11): {legacy_rooms}<br />"
-            
-            # Add note about unlimited power for modern rooms
-            if modern_rooms > 0:
-                response += f"<br />ℹ️ <b>Note:</b> In modern room versions (12+), creators have unlimited power and cannot be restricted by power levels.<br />"
-            
-            if not_in_room_count > 0:
-                response += f"• Rooms bot not in: {not_in_room_count}<br />"
-            if error_rooms > 0:
-                response += f"• Rooms with errors: {error_rooms}<br />"
-            response += "<br />"
+            # Summary statistics
+            response += diagnostic_utils.generate_summary_stats(report["space"], room_stats)
 
-            # Issues and warnings - only show if they exist
-            if report["issues"]:
-                response += f"<h4>🚨 Critical Issues</h4><br />"
-                for issue in report["issues"]:
-                    response += f"• {issue}<br />"
-                response += "<br />"
+            # Issues and warnings
+            response += diagnostic_utils.generate_issues_and_warnings(
+                report["issues"], report["warnings"]
+            )
 
-            if report["warnings"]:
-                response += f"<h4>⚠️ Warnings</h4><br />"
-                for warning in report["warnings"]:
-                    response += f"• {warning}<br />"
-                response += "<br />"
-
-            if not report["issues"] and not report["warnings"] and not space_has_issues and not problematic_rooms:
-                response += f"<h4>✅ All Clear</h4><br />"
-                response += "No permission issues detected. The bot should be able to manage all rooms and users effectively.<br />"
+            # All clear message if no issues
+            if not report["issues"] and not report["warnings"] and not space_has_issues and not room_summary:
+                response += diagnostic_utils.generate_all_clear_message()
 
             # Try to send the response, and if it's too large, break it up
             try:
@@ -3579,36 +2930,7 @@ class CommunityBot(Plugin):
         Returns:
             list: List of text chunks
         """
-        if len(report_text) <= max_chunk_size:
-            return [report_text]
-        
-        chunks = []
-        lines = report_text.split('\n')
-        current_chunk = ""
-        
-        for line in lines:
-            # If adding this line would exceed the limit, start a new chunk
-            if len(current_chunk) + len(line) + 1 > max_chunk_size and current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-            
-            current_chunk += line + '\n'
-        
-        # Add the last chunk if it has content
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-        
-        # If we still have chunks that are too large, split them more aggressively
-        final_chunks = []
-        for chunk in chunks:
-            if len(chunk) <= max_chunk_size:
-                final_chunks.append(chunk)
-            else:
-                # Split by sections (headers) if possible
-                section_chunks = self._split_by_sections(chunk, max_chunk_size)
-                final_chunks.extend(section_chunks)
-        
-        return final_chunks
+        return report_utils.split_doctor_report(report_text, max_chunk_size)
     
     def _split_by_sections(self, text: str, max_size: int) -> list[str]:
         """Split text by section headers to maintain logical grouping.
@@ -3620,23 +2942,7 @@ class CommunityBot(Plugin):
         Returns:
             list: List of text chunks
         """
-        # Split by headers (h3, h4)
-        import re
-        sections = re.split(r'(<h[34][^>]*>.*?</h[34]>)', text, flags=re.DOTALL)
-        
-        chunks = []
-        current_chunk = ""
-        
-        for section in sections:
-            if len(current_chunk) + len(section) > max_size and current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-            current_chunk += section
-        
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-        
-        return chunks
+        return report_utils._split_by_sections(text, max_size)
 
     async def _doctor_room_detail(self, evt: MessageEvent, room: str) -> None:
         """Generate detailed diagnostic report for a specific room.
