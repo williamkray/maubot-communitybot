@@ -26,10 +26,15 @@ async def check_space_permissions(
         )
         bot_level = space_power_levels.get_user_level(client.mxid)
         
+        # Check if bot has unlimited power (creator in modern room versions)
+        from .room_utils import user_has_unlimited_power
+        bot_has_unlimited_power = await user_has_unlimited_power(client, client.mxid, parent_room)
+        
         space_info = {
             "room_id": parent_room,
             "bot_power_level": bot_level,
-            "has_admin": bot_level >= 100,
+            "has_admin": bot_level >= 100 or bot_has_unlimited_power,
+            "bot_has_unlimited_power": bot_has_unlimited_power,
             "users_higher_or_equal": [],
             "users_equal": [],
             "users_higher": []
@@ -196,7 +201,12 @@ def generate_space_summary(
     
     space_status = "✅" if space_data.get("has_admin", False) else "❌"
     response = f"<h4>📋 Parent Space</h4><br />"
-    response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if space_data['has_admin'] else 'No'} (level: {space_data['bot_power_level']})<br />"
+    
+    # Show admin status with appropriate details
+    if space_data.get("bot_has_unlimited_power", False):
+        response += f"{space_status} <b>Administrative privileges:</b> Yes (unlimited power - creator)<br />"
+    else:
+        response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if space_data['has_admin'] else 'No'} (level: {space_data['bot_power_level']})<br />"
     
     if space_data.get("users_higher"):
         response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in space_data['users_higher']])}<br />"

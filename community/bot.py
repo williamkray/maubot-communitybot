@@ -150,14 +150,14 @@ class CommunityBot(Plugin):
         Returns:
             tuple: (is_valid, list_of_conflicting_aliases)
         """
-        if not self.config["community_slug"]:
+        if not self.config.get("community_slug", ""):
             if evt:
                 await evt.respond("Error: No community slug configured. Please run initialize command first.")
             return False, []
             
         server = self.client.parse_user_id(self.client.mxid)[1]
         return await room_utils.validate_room_aliases(
-            self.client, room_names, self.config["community_slug"], server
+            self.client, room_names, self.config.get("community_slug", ""), server
         )
 
     async def get_moderators_and_above(self) -> list[str]:
@@ -166,7 +166,7 @@ class CommunityBot(Plugin):
         Returns:
             list: List of user IDs with power level >= 50 (moderator or above)
         """
-        return await room_utils.get_moderators_and_above(self.client, self.config["parent_room"])
+        return await room_utils.get_moderators_and_above(self.client, self.config.get("parent_room", ""))
 
     async def create_space(self, space_name: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None) -> tuple[str, str]:
         """Create a new space without community slug suffix.
@@ -182,7 +182,7 @@ class CommunityBot(Plugin):
         mymsg = None
         try:
             sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", space_name).lower()
-            invitees = self.config["invitees"]
+            invitees = self.config.get("invitees", [])
             server = self.client.parse_user_id(self.client.mxid)[1]
 
             # Validate that the space alias is available
@@ -196,25 +196,28 @@ class CommunityBot(Plugin):
 
             if evt:
                 mymsg = await evt.respond(
-                    f"creating space {sanitized_name} with room version {self.config['room_version']}, give me a minute..."
+                    f"creating space {sanitized_name} with room version {self.config.get('room_version', '1')}, give me a minute..."
                 )
 
             # Prepare creation content with space type
+            # Spaces are created by setting the type to "m.space" in creation_content
             creation_content = {
-                "type": "m.space"
+                "type": "m.space",
+                "m.federate": True,
+                "m.room.history_visibility": "joined"
             }
             
             # For modern room versions (12+), remove the bot from power levels
             # as creators have unlimited power by default and cannot appear in power levels
-            if self.is_modern_room_version(self.config["room_version"]) and power_level_override:
-                self.log.info(f"Modern room version {self.config['room_version']} detected - removing bot from power levels")
+            if self.is_modern_room_version(self.config.get("room_version", "1")) and power_level_override:
+                self.log.info(f"Modern room version {self.config.get('room_version', '1')} detected - removing bot from power levels")
                 if power_level_override.users:
                     # Remove bot from users list but keep other important settings
                     power_level_override.users.pop(self.client.mxid, None)
             
             # Create the space with space-specific content
             # Note: room_version is set via the room_version parameter, not creation_content
-            self.log.info(f"Creating space with room_version={self.config['room_version']}")
+            self.log.info(f"Creating space with room_version={self.config.get('room_version', '1')}")
             self.log.info(f"Creation content: {creation_content}")
             self.log.info(f"Calling client.create_room with parameters:")
             self.log.info(f"  - alias_localpart: {sanitized_name}")
@@ -222,7 +225,7 @@ class CommunityBot(Plugin):
             self.log.info(f"  - invitees: {invitees}")
             self.log.info(f"  - power_level_override: {power_level_override}")
             self.log.info(f"  - creation_content: {creation_content}")
-            self.log.info(f"  - room_version: {self.config['room_version']}")
+            self.log.info(f"  - room_version: {self.config.get('room_version', '1')}")
             
             space_id = await self.client.create_room(
                 alias_localpart=sanitized_name,
@@ -230,15 +233,15 @@ class CommunityBot(Plugin):
                 invitees=invitees,
                 power_level_override=power_level_override,
                 creation_content=creation_content,
-                room_version=self.config["room_version"]
+                room_version=self.config.get("room_version", "1")
             )
 
             # Verify the space version and type were set correctly
             try:
                 actual_version, actual_creators = await self.get_room_version_and_creators(space_id)
-                self.log.info(f"Space {space_id} created with version {actual_version} (requested: {self.config['room_version']})")
-                if actual_version != self.config["room_version"]:
-                    self.log.warning(f"Space version mismatch: requested {self.config['room_version']}, got {actual_version}")
+                self.log.info(f"Space {space_id} created with version {actual_version} (requested: {self.config.get('room_version', '1')})")
+                if actual_version != self.config.get("room_version", "1"):
+                    self.log.warning(f"Space version mismatch: requested {self.config.get('room_version', '1')}, got {actual_version}")
                 
                 # Verify the space type was set
                 state_events = await self.client.get_state(space_id)
@@ -277,6 +280,7 @@ class CommunityBot(Plugin):
                     allow_html=True
                 )
 
+            self.log.info(f"Space creation completed successfully: {space_id}")
             return space_id, f"#{sanitized_name}:{server}"
 
         except Exception as e:
@@ -356,9 +360,15 @@ class CommunityBot(Plugin):
 
         return results
 
-    async def get_space_roomlist(self) -> None:
+    async def get_space_roomlist(self) -> list[str]:
         space = self.config["parent_room"]
         rooms = []
+        
+        # Check if parent room is configured
+        if not space:
+            self.log.warning("No parent room configured, cannot get space roomlist")
+            return rooms
+            
         try:
             self.log.debug(f"DEBUG getting roomlist from {space} space")
             state = await self.client.get_state(space)
@@ -1233,11 +1243,12 @@ class CommunityBot(Plugin):
         await evt.react("✅")
 
     @community.subcommand(
-        "report", help="generate a full list of activity tracking status"
+        "report", help="generate reports of user activity and inactivity"
     )
     @decorators.require_parent_room
     @decorators.require_permission()
-    async def get_report(self, evt: MessageEvent) -> None:
+    async def report(self, evt: MessageEvent) -> None:
+        """Main report command - shows full report by default"""
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -1255,13 +1266,37 @@ class CommunityBot(Plugin):
             allow_html=True,
         )
 
-    @community.subcommand(
-        "inactive", help="generate a list of mxids who have been inactive"
+    @report.subcommand(
+        "all", help="generate a full report of all user activity status"
     )
     @decorators.require_parent_room
     @decorators.require_permission()
-    async def get_inactive_report(self, evt: MessageEvent) -> None:
+    async def report_all(self, evt: MessageEvent) -> None:
+        """Report all user activity status - same as main report command"""
+        if not self.config_manager.is_tracking_enabled():
+            await evt.reply("user tracking is disabled")
+            return
 
+        sync_results = await self.do_sync()
+        report = await self.generate_report()
+        await evt.respond(
+            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
+                {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['warn_inactive'])} <br /></p>\
+                <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
+                {'<br />'.join(report['kick_inactive'])} <br /></p> \
+                <p><b>Ignored users:</b><br /> \
+                {'<br />'.join(report['ignored'])}</p>",
+            allow_html=True,
+        )
+
+    @report.subcommand(
+        "inactive", help="generate a list of users who have been inactive"
+    )
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def report_inactive(self, evt: MessageEvent) -> None:
+        """Report users who are inactive but not yet at kick threshold"""
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -1275,16 +1310,13 @@ class CommunityBot(Plugin):
             allow_html=True,
         )
 
-    @community.subcommand(
-        "purgable", help="generate a list of matrix IDs that have been inactive long enough to be purged"
+    @report.subcommand(
+        "purgable", help="generate a list of users that would be kicked with the purge command"
     )
-    async def get_purgable_report(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
-
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def report_purgable(self, evt: MessageEvent) -> None:
+        """Report users who are inactive long enough to be purged"""
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -1297,16 +1329,13 @@ class CommunityBot(Plugin):
             allow_html=True,
         )
 
-    @community.subcommand(
-        "ignored", help="generate a list of matrix IDs that have activity tracking disabled"
+    @report.subcommand(
+        "ignored", help="generate a list of users that have activity tracking disabled"
     )
-    async def get_ignored_report(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
-
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def report_ignored(self, evt: MessageEvent) -> None:
+        """Report users who are ignored for activity tracking"""
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -1532,7 +1561,7 @@ class CommunityBot(Plugin):
             )
         await evt.respond(f"Queued {len(messages)} messages for redaction in {room_id}")
 
-    async def create_room(self, roomname: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None, creation_content: Optional[dict] = None, invitees: Optional[list[str]] = None) -> None:
+    async def create_room(self, roomname: str, evt: MessageEvent = None, power_level_override: Optional[PowerLevelStateEventContent] = None, creation_content: Optional[dict] = None, invitees: Optional[list[str]] = None) -> tuple[str, str] | None:
         """Create a new room and add it to the parent space.
         
         Args:
@@ -1548,7 +1577,7 @@ class CommunityBot(Plugin):
         mymsg = None
         try:
             # Validate and process room creation parameters
-            sanitized_name, force_encryption, force_unencryption, error_msg = await room_creation_utils.validate_room_creation_params(
+            sanitized_name, force_encryption, force_unencryption, error_msg, cleaned_roomname = await room_creation_utils.validate_room_creation_params(
                 roomname, self.config, evt
             )
             if error_msg:
@@ -1572,9 +1601,14 @@ class CommunityBot(Plugin):
                 return None
 
             # Prepare power levels
-            power_levels = await room_creation_utils.prepare_power_levels(
-                self.client, self.config, parent_room, power_level_override
-            )
+            try:
+                power_levels = await room_creation_utils.prepare_power_levels(
+                    self.client, self.config, parent_room, power_level_override
+                )
+                self.log.info(f"Power levels prepared successfully: {power_levels}")
+            except Exception as e:
+                self.log.error(f"Failed to prepare power levels: {e}")
+                raise
             
             # Adjust power levels for modern rooms
             power_levels = room_creation_utils.adjust_power_levels_for_modern_rooms(
@@ -1603,15 +1637,20 @@ class CommunityBot(Plugin):
             else:
                 self.log.info("No power level override")
             
-            room_id = await self.client.create_room(
-                alias_localpart=alias_localpart,
-                name=roomname,
-                invitees=room_invitees,
-                initial_state=initial_state,
-                power_level_override=power_levels,
-                creation_content=creation_content,
-                room_version=self.config["room_version"]
-            )
+            try:
+                room_id = await self.client.create_room(
+                    alias_localpart=alias_localpart,
+                    name=cleaned_roomname,
+                    invitees=room_invitees,
+                    initial_state=initial_state,
+                    power_level_override=power_levels,
+                    creation_content=creation_content,
+                    room_version=self.config["room_version"]
+                )
+                self.log.info(f"Room created successfully: {room_id}")
+            except Exception as e:
+                self.log.error(f"Failed to create room via Matrix API: {e}")
+                raise
 
             # Verify room creation
             await room_creation_utils.verify_room_creation(
@@ -2685,20 +2724,24 @@ class CommunityBot(Plugin):
             # Set up power levels for the space
             power_levels = PowerLevelStateEventContent()
             
-            # For modern room versions (12+), don't set power levels for creators
-            # as they have unlimited power by default
-            if self.is_modern_room_version(self.config["room_version"]):
-                # Don't set any user power levels for modern versions
-                # Creators have unlimited power by default
-                power_levels.users = {}
+            # Set up power levels for users
+            # For modern room versions (12+), the bot (creator) has unlimited power by default
+            # but we still need to set power levels for other users
+            if self.is_modern_room_version(self.config.get("room_version", "1")):
+                # For modern rooms, don't set bot power level (it has unlimited power)
+                # but still set power levels for other users
+                power_levels.users = {
+                    evt.sender: 100  # Initiator gets admin power
+                }
             else:
+                # For legacy rooms, set both bot and initiator power levels
                 power_levels.users = {
                     self.client.mxid: 1000,  # Bot gets highest power
                     evt.sender: 100  # Initiator gets admin power
                 }
             
             # Set invite power level from config
-            power_levels.invite = self.config["invite_power_level"]
+            power_levels.invite = self.config.get("invite_power_level", 50)
 
             # Create the space with appropriate metadata and power levels
             space_id, space_alias = await self.create_space(
@@ -2713,15 +2756,27 @@ class CommunityBot(Plugin):
 
             # Set the space as the parent room in config
             self.config["parent_room"] = space_id
+            self.log.info(f"Set parent_room to: {space_id}")
 
             # Save the updated config
             self.config.save()
+            self.log.info("Config saved successfully")
 
             # Verify the space exists and has correct power levels
             try:
                 space_power_levels = await self.client.get_state_event(space_id, EventType.ROOM_POWER_LEVELS)
-                if space_power_levels.users.get(self.client.mxid) != 1000:
-                    raise Exception("Space power levels not set correctly")
+                
+                # For modern room versions, creators have unlimited power and don't appear in power levels
+                if self.is_modern_room_version(self.config.get("room_version", "1")):
+                    # Just verify the space exists and has power levels
+                    if not space_power_levels:
+                        raise Exception("Space power levels not set correctly")
+                    self.log.info("Space power levels verified for modern room version")
+                else:
+                    # For legacy room versions, check that bot has admin power
+                    if space_power_levels.users.get(self.client.mxid) != 1000:
+                        raise Exception("Space power levels not set correctly")
+                    self.log.info("Space power levels verified for legacy room version")
             except Exception as e:
                 error_msg = f"Failed to verify space setup: {e}"
                 self.log.error(error_msg)
@@ -2729,21 +2784,35 @@ class CommunityBot(Plugin):
                 return
 
             # Create moderators room
-            # Get moderators and above from the space instead of using config invitees
-            moderators = await self.get_moderators_and_above()
-            if not moderators:
-                self.log.warning("No moderators found in space, moderators room will be created without initial members")
-            else:
-                # Filter out the bot's own user ID to prevent self-invitation
-                moderators = [user for user in moderators if user != self.client.mxid]
-                if not moderators:
-                    self.log.info("Only bot found in moderators list, moderators room will be created without initial members")
+            # Include the initiator as a moderator, plus any other moderators from the space
+            moderators = [evt.sender]  # Always include the initiator
             
-            mod_room_id, mod_room_alias = await self.create_room(
+            # Also get any other moderators from the space
+            try:
+                space_moderators = await self.get_moderators_and_above()
+                if space_moderators:
+                    # Add other moderators, excluding the bot and the initiator (already added)
+                    for user in space_moderators:
+                        if user != self.client.mxid and user != evt.sender:
+                            moderators.append(user)
+            except Exception as e:
+                self.log.warning(f"Could not get additional moderators from space: {e}")
+            
+            self.log.info(f"Moderators room will be created with initial members: {moderators}")
+            
+            room_result = await self.create_room(
                 f"{community_name} Moderators",
                 evt,
                 invitees=moderators  # Use moderators list instead of config invitees
             )
+            
+            if not room_result:
+                error_msg = "Failed to create moderators room"
+                self.log.error(error_msg)
+                await evt.respond(error_msg, edits=msg)
+                return
+            
+            mod_room_id, mod_room_alias = room_result
 
             # Set moderators room to invite-only
             await self.client.send_state_event(
@@ -2752,8 +2821,8 @@ class CommunityBot(Plugin):
                 JoinRulesStateEventContent(join_rule=JoinRule.INVITE)
             )
 
-            # Create waiting room
-            waiting_room_id, waiting_room_alias = await self.create_room(
+            # Create waiting room (force unencrypted for public access)
+            waiting_room_result = await self.create_room(
                 f"{community_name} Waiting Room --unencrypted",
                 evt,
                 creation_content={
@@ -2762,9 +2831,13 @@ class CommunityBot(Plugin):
                 }
             )
 
-            if not waiting_room_id:
-                await evt.respond("Failed to create waiting room", edits=msg)
+            if not waiting_room_result:
+                error_msg = "Failed to create waiting room"
+                self.log.error(error_msg)
+                await evt.respond(error_msg, edits=msg)
                 return
+            
+            waiting_room_id, waiting_room_alias = waiting_room_result
 
             # Set waiting room to be joinable by anyone
             await self.client.send_state_event(

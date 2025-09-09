@@ -22,26 +22,29 @@ async def validate_room_creation_params(
     Returns:
         Tuple of (sanitized_name, force_encryption, force_unencryption, error_msg)
     """
-    # Check for encryption flags
-    encrypted_flag_regex = re.compile(r"(\s+|^)-+encrypt(ed)?\s?")
-    unencrypted_flag_regex = re.compile(r"(\s+|^)-+unencrypt(ed)?\s?")
+    # Check for encryption flags (at beginning, middle, or end of string)
+    encrypted_flag_regex = re.compile(r"(\s+|^)-+encrypt(ed)?(\s+|$)")
+    unencrypted_flag_regex = re.compile(r"(\s+|^)-+unencrypt(ed)?(\s+|$)")
     force_encryption = bool(encrypted_flag_regex.search(roomname))
     force_unencryption = bool(unencrypted_flag_regex.search(roomname))
     
     # Clean up room name
     if force_encryption:
-        roomname = encrypted_flag_regex.sub("", roomname)
+        roomname = encrypted_flag_regex.sub("", roomname)  # Remove encryption flag
     if force_unencryption:
-        roomname = unencrypted_flag_regex.sub("", roomname)
+        roomname = unencrypted_flag_regex.sub("", roomname)  # Remove unencryption flag
+    
+    # Clean up any extra whitespace
+    roomname = re.sub(r"\s+", " ", roomname).strip()
     
     sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
     
     # Check if community slug is configured
-    if not config.get("community_slug"):
+    if not config.get("community_slug", ""):
         error_msg = "No community slug configured. Please run initialize command first."
-        return sanitized_name, force_encryption, force_unencryption, error_msg
+        return sanitized_name, force_encryption, force_unencryption, error_msg, roomname
     
-    return sanitized_name, force_encryption, force_unencryption, ""
+    return sanitized_name, force_encryption, force_unencryption, "", roomname
 
 
 async def prepare_room_creation_data(
@@ -62,12 +65,12 @@ async def prepare_room_creation_data(
         Tuple of (alias_localpart, server, room_invitees, parent_room)
     """
     # Create alias with community slug
-    alias_localpart = f"{sanitized_name}-{config['community_slug']}"
+    alias_localpart = f"{sanitized_name}-{config.get('community_slug', '')}"
     
     # Get server and invitees
     server = client.parse_user_id(client.mxid)[1]
-    room_invitees = invitees if invitees is not None else config["invitees"]
-    parent_room = config["parent_room"]
+    room_invitees = invitees if invitees is not None else config.get("invitees", [])
+    parent_room = config.get("parent_room", "")
     
     return alias_localpart, server, room_invitees, parent_room
 
@@ -93,36 +96,51 @@ async def prepare_power_levels(
         return power_level_override
     
     if parent_room:
-        # Get parent room power levels to extract user power levels
-        parent_power_levels = await client.get_state_event(
-            parent_room, EventType.ROOM_POWER_LEVELS
-        )
-        
-        # Create new power levels with server defaults, not copying all permissions from space
-        power_levels = PowerLevelStateEventContent()
-        
-        # Copy only user power levels from parent space, not the entire permission set
-        if parent_power_levels.users:
-            user_power_levels = parent_power_levels.users.copy()
-            # Ensure bot has highest power
-            user_power_levels[client.mxid] = 1000
-            power_levels.users = user_power_levels
-        else:
+        try:
+            # Get parent room power levels to extract user power levels
+            parent_power_levels = await client.get_state_event(
+                parent_room, EventType.ROOM_POWER_LEVELS
+            )
+            
+            # Create new power levels with server defaults, not copying all permissions from space
+            power_levels = PowerLevelStateEventContent()
+            
+            # Copy only user power levels from parent space, not the entire permission set
+            if parent_power_levels and hasattr(parent_power_levels, 'users') and parent_power_levels.users:
+                try:
+                    user_power_levels = parent_power_levels.users.copy()
+                    # Ensure bot has highest power
+                    user_power_levels[client.mxid] = 1000
+                    power_levels.users = user_power_levels
+                except Exception as e:
+                    # If copying users fails, create default power levels
+                    power_levels.users = {
+                        client.mxid: 1000,  # Bot gets highest power
+                    }
+            else:
+                power_levels.users = {
+                    client.mxid: 1000,  # Bot gets highest power
+                }
+            
+            # Set explicit config values
+            power_levels.invite = config.get("invite_power_level", 50)
+            
+            return power_levels
+        except Exception as e:
+            # If we can't get parent power levels, create default ones
+            power_levels = PowerLevelStateEventContent()
             power_levels.users = {
                 client.mxid: 1000,  # Bot gets highest power
             }
-        
-        # Set explicit config values
-        power_levels.invite = config["invite_power_level"]
-        
-        return power_levels
+            power_levels.invite = config.get("invite_power_level", 50)
+            return power_levels
     else:
         # If no parent room, create default power levels
         power_levels = PowerLevelStateEventContent()
         power_levels.users = {
             client.mxid: 1000,  # Bot gets highest power
         }
-        power_levels.invite = config["invite_power_level"]
+        power_levels.invite = config.get("invite_power_level", 50)
         return power_levels
 
 
@@ -186,7 +204,7 @@ def prepare_initial_state(
         initial_state.append({
             "type": str(EventType.ROOM_HISTORY_VISIBILITY),
             "content": {
-                "history_visibility": creation_content["m.room.history_visibility"]
+                "history_visibility": creation_content.get("m.room.history_visibility", "joined")
             }
         })
     

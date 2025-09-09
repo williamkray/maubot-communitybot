@@ -61,7 +61,7 @@ async def validate_room_aliases(client, room_names: list[str], community_slug: s
     return len(conflicting_aliases) == 0, conflicting_aliases
 
 
-async def get_room_version_and_creators(client, room_id: str) -> Tuple[str, List[str]]:
+async def get_room_version_and_creators(client, room_id: str, logger=None) -> Tuple[str, List[str]]:
     """Get the room version and creators for a room.
     
     Args:
@@ -134,7 +134,7 @@ async def user_has_unlimited_power(client, user_id: str, room_id: str) -> bool:
         bool: True if user has unlimited power
     """
     try:
-        room_version, creators = await get_room_version_and_creators(client, room_id)
+        room_version, creators = await get_room_version_and_creators(client, room_id, None)
         
         # In modern room versions (12+), creators have unlimited power
         if is_modern_room_version(room_version):

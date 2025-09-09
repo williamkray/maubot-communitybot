@@ -8,20 +8,20 @@ def generate_activity_report(database_results: Dict[str, List[Dict]]) -> Dict[st
     """Generate an activity report from database results.
     
     Args:
-        database_results: Dictionary containing 'active', 'inactive', 'ignored' results
+        database_results: Dictionary containing 'warn_inactive', 'kick_inactive', 'ignored' results
         
     Returns:
         dict: Formatted activity report
     """
     report = {}
     
-    # Process active users
-    active_results = database_results.get("active", [])
-    report["active"] = [row["mxid"] for row in active_results] or ["none"]
+    # Process warn inactive users (between warn and kick thresholds)
+    warn_inactive_results = database_results.get("warn_inactive", [])
+    report["warn_inactive"] = [row["mxid"] for row in warn_inactive_results] or ["none"]
     
-    # Process inactive users  
-    inactive_results = database_results.get("inactive", [])
-    report["inactive"] = [row["mxid"] for row in inactive_results] or ["none"]
+    # Process kick inactive users (beyond kick threshold)
+    kick_inactive_results = database_results.get("kick_inactive", [])
+    report["kick_inactive"] = [row["mxid"] for row in kick_inactive_results] or ["none"]
     
     # Process ignored users
     ignored_results = database_results.get("ignored", [])
