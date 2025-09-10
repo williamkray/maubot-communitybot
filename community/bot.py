@@ -1828,7 +1828,7 @@ class CommunityBot(Plugin):
     async def room(self, evt: MessageEvent) -> None:
         """Main room command - shows usage by default"""
         await evt.reply(
-            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, guests, id, version, setpower"
+            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, guests, id, version, setpower, enable-verification"
         )
 
     @room.subcommand(
@@ -2764,17 +2764,15 @@ class CommunityBot(Plugin):
             self.log.error(error_msg)
             await evt.respond(error_msg, edits=msg)
 
-    @community.subcommand(
-        "verify-migrate",
+    @room.subcommand(
+        "enable-verification",
         help="migrate a room to a verification-based permission model, ensuring current members can still send messages while new joiners require verification",
     )
-    async def verify_migrate(self, evt: MessageEvent) -> None:
-        if not await self.check_parent_room(evt):
-            return
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def room_enable_verification(self, evt: MessageEvent) -> None:
+        """Enable verification-based permissions for the current room"""
         await evt.mark_read()
-        if not await self.user_permitted(evt.sender):
-            await evt.reply("You don't have permission to use this command")
-            return
 
         msg = await evt.respond("Starting room migration...")
 
