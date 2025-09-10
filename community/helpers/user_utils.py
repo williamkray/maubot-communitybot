@@ -10,13 +10,13 @@ from mautrix.errors import MNotFound
 
 async def check_if_banned(client, userid: str, banlists: List[str], logger) -> bool:
     """Check if a user is banned according to banlists.
-    
+
     Args:
         client: Matrix client instance
         userid: The user ID to check
         banlists: List of banlist room IDs or aliases
         logger: Logger instance for error reporting
-        
+
     Returns:
         bool: True if user is banned
     """
@@ -42,25 +42,25 @@ async def check_if_banned(client, userid: str, banlists: List[str], logger) -> b
 
         for rule in user_policies:
             try:
-                if bool(
-                    fnmatch.fnmatch(userid, rule["content"]["entity"])
-                ) and bool(re.search("ban$", rule["content"]["recommendation"])):
+                if bool(fnmatch.fnmatch(userid, rule["content"]["entity"])) and bool(
+                    re.search("ban$", rule["content"]["recommendation"])
+                ):
                     return True
             except Exception:
                 # Skip invalid rules
                 pass
-    
+
     return is_banned
 
 
 async def get_banlist_roomids(client, banlists: List[str], logger) -> List[str]:
     """Get room IDs for all configured banlists.
-    
+
     Args:
         client: Matrix client instance
         banlists: List of banlist room IDs or aliases
         logger: Logger instance for error reporting
-        
+
     Returns:
         list: List of room IDs for banlists
     """
@@ -81,12 +81,20 @@ async def get_banlist_roomids(client, banlists: List[str], logger) -> List[str]:
     return banlist_roomids
 
 
-async def ban_user_from_rooms(client, user: str, roomlist: List[str], reason: str = "banned", 
-                            all_rooms: bool = False, redact_on_ban: bool = False, 
-                            get_messages_to_redact_func=None, database=None, 
-                            sleep_time: float = 0.1, logger=None) -> Dict:
+async def ban_user_from_rooms(
+    client,
+    user: str,
+    roomlist: List[str],
+    reason: str = "banned",
+    all_rooms: bool = False,
+    redact_on_ban: bool = False,
+    get_messages_to_redact_func=None,
+    database=None,
+    sleep_time: float = 0.1,
+    logger=None,
+) -> Dict:
     """Ban a user from a list of rooms.
-    
+
     Args:
         client: Matrix client instance
         user: User ID to ban
@@ -98,13 +106,13 @@ async def ban_user_from_rooms(client, user: str, roomlist: List[str], reason: st
         database: Database instance for redaction tasks
         sleep_time: Sleep time between operations
         logger: Logger instance
-        
+
     Returns:
         dict: Ban results with success/error lists
     """
     ban_event_map = {"ban_list": {}, "error_list": {}}
     ban_event_map["ban_list"][user] = []
-    
+
     for room in roomlist:
         try:
             roomname = None
@@ -149,10 +157,16 @@ async def ban_user_from_rooms(client, user: str, roomlist: List[str], reason: st
     return ban_event_map
 
 
-async def user_permitted(client, user_id: UserID, parent_room: str, min_level: int = 50, 
-                        room_id: str = None, logger=None) -> bool:
+async def user_permitted(
+    client,
+    user_id: UserID,
+    parent_room: str,
+    min_level: int = 50,
+    room_id: str = None,
+    logger=None,
+) -> bool:
     """Check if a user has sufficient power level in a room.
-    
+
     Args:
         client: Matrix client instance
         user_id: The Matrix ID of the user to check
@@ -160,18 +174,19 @@ async def user_permitted(client, user_id: UserID, parent_room: str, min_level: i
         min_level: Minimum required power level (default 50 for moderator)
         room_id: The room ID to check permissions in. If None, uses parent room.
         logger: Logger instance for error reporting
-        
+
     Returns:
         bool: True if user has sufficient power level
     """
     try:
         target_room = room_id or parent_room
-        
+
         # First check if user has unlimited power (creator in modern room versions)
         from .room_utils import user_has_unlimited_power
+
         if await user_has_unlimited_power(client, user_id, target_room):
             return True
-        
+
         # Then check power level
         power_levels = await client.get_state_event(
             target_room, EventType.ROOM_POWER_LEVELS
@@ -186,14 +201,15 @@ async def user_permitted(client, user_id: UserID, parent_room: str, min_level: i
 
 async def user_has_unlimited_power(client, user_id: str, room_id: str) -> bool:
     """Check if a user has unlimited power in a room (creator in modern room versions).
-    
+
     Args:
         client: Matrix client instance
         user_id: The user ID to check
         room_id: The room ID to check in
-        
+
     Returns:
         bool: True if user has unlimited power
     """
     from .room_utils import user_has_unlimited_power as room_user_has_unlimited_power
+
     return await room_user_has_unlimited_power(client, user_id, room_id)
