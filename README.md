@@ -5,7 +5,19 @@ a maubot plugin that helps administrators of communities on matrix, based on the
 to leverage [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not
 supposed to be.
 
-# important upgrade note
+# important upgrade notes
+
+## v0.3
+        
+New functionality to support room v12 and newer has been added, as well as some significant restructuring of the code
+and commands! v0.3.0 is potentially a breaking change, please make a backup of your old bot configuration and database
+as necessary before updating in case anything goes horribly wrong. i take no responsibility.
+
+commands are now broken up into more logical groupings, so instead of `!community createroom` it's `!community room
+create`, etc. helpful usage messages are usually passed if you do things wrong so this shouldn't be too complicated but
+i'm too lazy to update the below readme to reflect the new command structures. use your brain.
+
+## v0.2
 
 if you are upgrading from an earlier version to v0.2.0, please note that the user permission model has changed to be easier to manage, but will require some intervention.
 
