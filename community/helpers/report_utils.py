@@ -1,7 +1,6 @@
 """Report generation and formatting utility functions."""
 
 from typing import Dict, List, Any
-import time
 
 
 def generate_activity_report(database_results: Dict[str, List[Dict]]) -> Dict[str, Any]:

@@ -8,7 +8,7 @@ supposed to be.
 # important upgrade notes
 
 ## v0.3
-        
+
 New functionality to support room v12 and newer has been added, as well as some significant restructuring of the code
 and commands! v0.3.0 is potentially a breaking change, please make a backup of your old bot configuration and database
 as necessary before updating in case anything goes horribly wrong. i take no responsibility.
@@ -75,7 +75,7 @@ this will perform several actions on your behalf:
 once these actions have been taken, you can manage moderators, change room avatars, etc as you like, and add more rooms with
 other commands. happy community-managing!
 
-attempts to run this command once a parent room has been set will fail. 
+attempts to run this command once a parent room has been set will fail.
 
 ## greet new users on joining a room
 
@@ -94,7 +94,7 @@ tracks the last message timestamp of a user across any room that the bot is in, 
 to be used to boot people from a matrix space and all space rooms after a period of inactivity (prune inactive users)
 with the `purge` subcommand.
 
-supports simple threshold configuration and the option to also track "reaction" activity. 
+supports simple threshold configuration and the option to also track "reaction" activity.
 
 you can also exempt users from showing as "inactive" in the report by setting their ignore status with the `ignore` and
 `unignore` subcommands, e.g. `!community ignore @takinabreak:fromthis.group`. this is helpful to avoid accidentally
@@ -225,6 +225,6 @@ options.
 # installation
 
 install this like any other maubot plugin: zip the contents of this repo into a file and upload via the web interface,
-or use the `mbc` utility to package and upload to your maubot server. 
+or use the `mbc` utility to package and upload to your maubot server.
 
 be sure to give your bot permission to kick people from all rooms, otherwise management features will not work!

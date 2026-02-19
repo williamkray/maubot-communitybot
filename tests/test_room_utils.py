@@ -19,7 +19,7 @@ class TestRoomUtils:
         """Test alias validation when alias exists."""
         client = Mock()
         client.resolve_room_alias = AsyncMock()
-        
+
         # Alias exists - should return False
         result = await validate_room_alias(client, "test", "example.com")
         assert result == False
@@ -30,7 +30,7 @@ class TestRoomUtils:
         """Test alias validation when alias doesn't exist."""
         client = Mock()
         client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
-        
+
         # Alias doesn't exist - should return True
         result = await validate_room_alias(client, "test", "example.com")
         assert result == True
@@ -40,7 +40,7 @@ class TestRoomUtils:
         """Test alias validation with error."""
         client = Mock()
         client.resolve_room_alias = AsyncMock(side_effect=Exception("Network error"))
-        
+
         # Error should return True (assume available)
         result = await validate_room_alias(client, "test", "example.com")
         assert result == True
@@ -49,7 +49,7 @@ class TestRoomUtils:
     async def test_validate_room_aliases_no_slug(self):
         """Test alias validation without community slug."""
         client = Mock()
-        
+
         result = await validate_room_aliases(client, ["room1", "room2"], "", "example.com")
         assert result == (False, [])
 
@@ -58,7 +58,7 @@ class TestRoomUtils:
         """Test successful alias validation."""
         client = Mock()
         client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
-        
+
         result = await validate_room_aliases(client, ["room1", "room2"], "test", "example.com")
         assert result == (True, [])
 
@@ -66,15 +66,15 @@ class TestRoomUtils:
     async def test_validate_room_aliases_conflicts(self):
         """Test alias validation with conflicts."""
         client = Mock()
-        
+
         def resolve_side_effect(alias):
             if "room1" in alias:
                 return {"room_id": "!room1:example.com"}  # Exists
             else:
                 raise MNotFound()  # Doesn't exist
-        
+
         client.resolve_room_alias = AsyncMock(side_effect=resolve_side_effect)
-        
+
         result = await validate_room_aliases(client, ["room1", "room2"], "test", "example.com")
         assert result == (False, ["#room1-test:example.com"])
 
@@ -82,7 +82,7 @@ class TestRoomUtils:
     async def test_get_room_version_and_creators_success(self):
         """Test getting room version and creators successfully."""
         client = Mock()
-        
+
         # Mock state events
         create_event = Mock()
         create_event.type = EventType.ROOM_CREATE
@@ -91,14 +91,14 @@ class TestRoomUtils:
             "room_version": "12",
             "additional_creators": ["@creator2:example.com"]
         }
-        
+
         other_event = Mock()
         other_event.type = EventType.ROOM_POWER_LEVELS
-        
+
         client.get_state = AsyncMock(return_value=[create_event, other_event])
-        
+
         version, creators = await get_room_version_and_creators(client, "!room:example.com")
-        
+
         assert version == "12"
         assert "@creator:example.com" in creators
         assert "@creator2:example.com" in creators
@@ -108,9 +108,9 @@ class TestRoomUtils:
         """Test getting room version when no create event exists."""
         client = Mock()
         client.get_state = AsyncMock(return_value=[])
-        
+
         version, creators = await get_room_version_and_creators(client, "!room:example.com")
-        
+
         assert version == "1"
         assert creators == []
 
@@ -119,9 +119,9 @@ class TestRoomUtils:
         """Test getting room version with error."""
         client = Mock()
         client.get_state = AsyncMock(side_effect=Exception("Network error"))
-        
+
         version, creators = await get_room_version_and_creators(client, "!room:example.com")
-        
+
         assert version == "1"
         assert creators == []
 
@@ -138,13 +138,13 @@ class TestRoomUtils:
     async def test_user_has_unlimited_power_modern_room(self):
         """Test unlimited power check in modern room."""
         client = Mock()
-        
+
         with patch('community.helpers.room_utils.get_room_version_and_creators') as mock_get_version:
             mock_get_version.return_value = ("12", ["@user:example.com"])
-            
+
             result = await user_has_unlimited_power(client, "@user:example.com", "!room:example.com")
             assert result == True
-            
+
             result = await user_has_unlimited_power(client, "@other:example.com", "!room:example.com")
             assert result == False
 
@@ -152,10 +152,10 @@ class TestRoomUtils:
     async def test_user_has_unlimited_power_old_room(self):
         """Test unlimited power check in old room."""
         client = Mock()
-        
+
         with patch('community.helpers.room_utils.get_room_version_and_creators') as mock_get_version:
             mock_get_version.return_value = ("11", ["@user:example.com"])
-            
+
             result = await user_has_unlimited_power(client, "@user:example.com", "!room:example.com")
             assert result == False
 
@@ -163,10 +163,10 @@ class TestRoomUtils:
     async def test_user_has_unlimited_power_error(self):
         """Test unlimited power check with error."""
         client = Mock()
-        
+
         with patch('community.helpers.room_utils.get_room_version_and_creators') as mock_get_version:
             mock_get_version.side_effect = Exception("Network error")
-            
+
             result = await user_has_unlimited_power(client, "@user:example.com", "!room:example.com")
             assert result == False
 
@@ -174,7 +174,7 @@ class TestRoomUtils:
     async def test_get_moderators_and_above_success(self):
         """Test getting moderators successfully."""
         client = Mock()
-        
+
         power_levels = Mock()
         power_levels.users = {
             "@user1:example.com": 50,  # Moderator
@@ -182,11 +182,11 @@ class TestRoomUtils:
             "@user3:example.com": 25,  # Regular user
             "@user4:example.com": 75,  # Above moderator
         }
-        
+
         client.get_state_event = AsyncMock(return_value=power_levels)
-        
+
         moderators = await get_moderators_and_above(client, "!room:example.com")
-        
+
         assert "@user1:example.com" in moderators
         assert "@user2:example.com" in moderators
         assert "@user4:example.com" in moderators
@@ -197,7 +197,7 @@ class TestRoomUtils:
         """Test getting moderators with error."""
         client = Mock()
         client.get_state_event = AsyncMock(side_effect=Exception("Network error"))
-        
+
         moderators = await get_moderators_and_above(client, "!room:example.com")
-        
+
         assert moderators == []

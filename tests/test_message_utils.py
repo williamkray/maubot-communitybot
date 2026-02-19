@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from mautrix.types import MessageType, MediaMessageEventContent
 
 from community.helpers.message_utils import (
-    flag_message, flag_instaban, censor_room, 
+    flag_message, flag_instaban, censor_room,
     sanitize_room_name, generate_community_slug
 )
 
@@ -18,7 +18,7 @@ class TestMessageUtils:
         msg = Mock()
         msg.content.msgtype = MessageType.FILE
         msg.content.body = "test file"
-        
+
         assert flag_message(msg, [], True) == True
         assert flag_message(msg, [], False) == False
 
@@ -27,11 +27,11 @@ class TestMessageUtils:
         msg = Mock()
         msg.content.msgtype = MessageType.TEXT
         msg.content.body = "This is a test message with badword"
-        
+
         wordlist = [r"badword", r"another.*pattern"]
-        
+
         assert flag_message(msg, wordlist, False) == True
-        
+
         msg.content.body = "This is a clean message"
         assert flag_message(msg, wordlist, False) == False
 
@@ -40,9 +40,9 @@ class TestMessageUtils:
         msg = Mock()
         msg.content.msgtype = MessageType.TEXT
         msg.content.body = "test message"
-        
+
         wordlist = [r"valid.*pattern", r"[invalid", r"another.*pattern"]
-        
+
         # Should not raise exception and should work with valid patterns
         result = flag_message(msg, wordlist, False)
         assert isinstance(result, bool)
@@ -52,11 +52,11 @@ class TestMessageUtils:
         msg = Mock()
         msg.content.msgtype = MessageType.TEXT
         msg.content.body = "This contains instaban_word"
-        
+
         instaban_list = [r"instaban_word", r"another.*instaban"]
-        
+
         assert flag_instaban(msg, instaban_list) == True
-        
+
         msg.content.body = "This is clean"
         assert flag_instaban(msg, instaban_list) == False
 
@@ -64,7 +64,7 @@ class TestMessageUtils:
         """Test room censoring with boolean configuration."""
         msg = Mock()
         msg.room_id = "!room123:example.com"
-        
+
         assert censor_room(msg, True) == True
         assert censor_room(msg, False) == False
 
@@ -72,11 +72,11 @@ class TestMessageUtils:
         """Test room censoring with list configuration."""
         msg = Mock()
         msg.room_id = "!room123:example.com"
-        
+
         censor_list = ["!room123:example.com", "!room456:example.com"]
-        
+
         assert censor_room(msg, censor_list) == True
-        
+
         msg.room_id = "!room789:example.com"
         assert censor_room(msg, censor_list) == False
 
@@ -84,7 +84,7 @@ class TestMessageUtils:
         """Test room censoring with invalid configuration."""
         msg = Mock()
         msg.room_id = "!room123:example.com"
-        
+
         assert censor_room(msg, "invalid") == False
         assert censor_room(msg, None) == False
 

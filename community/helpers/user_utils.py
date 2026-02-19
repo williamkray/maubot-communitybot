@@ -3,9 +3,9 @@
 import fnmatch
 import re
 import time
-from typing import List, Dict, Tuple
+from typing import List, Dict
+from mautrix.errors import MatrixError, MNotFound
 from mautrix.types import EventType, UserID
-from mautrix.errors import MNotFound
 
 
 async def check_if_banned(client, userid: str, banlists: List[str], logger) -> bool:
@@ -119,7 +119,7 @@ async def ban_user_from_rooms(
             try:
                 roomnamestate = await client.get_state_event(room, "m.room.name")
                 roomname = roomnamestate["name"]
-            except:
+            except KeyError, MatrixError:
                 pass
 
             # ban user even if they're not in the room!

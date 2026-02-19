@@ -2,7 +2,7 @@
 
 import functools
 from typing import Callable, Any, Optional
-from mautrix.types import UserID, MessageEvent
+from mautrix.types import MessageEvent
 
 
 def require_permission(min_level: int = 50, room_id: Optional[str] = None):

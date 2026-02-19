@@ -1,1 +1,1 @@
-from .bot import CommunityBot
+from .bot import CommunityBot as CommunityBot

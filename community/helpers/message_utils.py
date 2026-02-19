@@ -1,8 +1,7 @@
 """Message and content utility functions."""
 
 import re
-from typing import Optional
-from mautrix.types import MessageType, MediaMessageEventContent
+from mautrix.types import MessageType
 
 
 def flag_message(msg, censor_wordlist: list, censor_files: bool) -> bool:

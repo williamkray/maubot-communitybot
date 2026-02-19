@@ -125,8 +125,8 @@ async def get_inactive_users(
         # Get users to warn
         warn_results = await database.fetch(
             """
-            SELECT mxid FROM user_events 
-            WHERE last_message_timestamp < $1 
+            SELECT mxid FROM user_events
+            WHERE last_message_timestamp < $1
             AND last_message_timestamp > $2
             AND ignore_inactivity = 0
             """,
@@ -137,7 +137,7 @@ async def get_inactive_users(
         # Get users to kick
         kick_results = await database.fetch(
             """
-            SELECT mxid FROM user_events 
+            SELECT mxid FROM user_events
             WHERE last_message_timestamp < $2
             AND ignore_inactivity = 0
             """,
@@ -163,7 +163,7 @@ async def cleanup_stale_verification_states(database, logger) -> None:
     try:
         await database.execute(
             """
-            DELETE FROM verification_states 
+            DELETE FROM verification_states
             WHERE created_at < NOW() - INTERVAL '24 hours'
             """
         )
@@ -186,7 +186,7 @@ async def get_verification_state(database, dm_room_id: str) -> Dict[str, Any]:
             "SELECT * FROM verification_states WHERE dm_room_id = $1", dm_room_id
         )
         return dict(result) if result else None
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -213,7 +213,7 @@ async def create_verification_state(
     try:
         await database.execute(
             """
-            INSERT INTO verification_states 
+            INSERT INTO verification_states
             (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, required_power_level)
             VALUES ($1, $2, $3, $4, $5, $6)
             """,
@@ -224,7 +224,7 @@ async def create_verification_state(
             attempts_remaining,
             required_power_level,
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state creation is not critical
 
 
@@ -244,7 +244,7 @@ async def update_verification_attempts(
             attempts_remaining,
             dm_room_id,
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state update is not critical
 
 
@@ -259,5 +259,5 @@ async def delete_verification_state(database, dm_room_id: str) -> None:
         await database.execute(
             "DELETE FROM verification_states WHERE dm_room_id = $1", dm_room_id
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state deletion is not critical

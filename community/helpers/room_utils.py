@@ -1,8 +1,7 @@
 """Room and space utility functions."""
 
-import re
-from typing import Optional, Tuple, List
-from mautrix.types import EventType, PowerLevelStateEventContent
+from typing import Tuple, List
+from mautrix.types import EventType
 from mautrix.errors import MNotFound
 
 
@@ -20,13 +19,10 @@ async def validate_room_alias(client, alias_localpart: str, server: str) -> bool
     try:
         full_alias = f"#{alias_localpart}:{server}"
         await client.resolve_room_alias(full_alias)
-        # If we get here, the alias exists
-        return False
-    except MNotFound:
-        # Alias doesn't exist, so it's available
+        return False  # If we get here, the alias exists
+    except MNotFound:  # Alias doesn't exist, so it's available
         return True
-    except Exception as e:
-        # For other errors, assume alias is available to be safe
+    except Exception:  # For other errors, assume alias is available to be safe
         return True
 
 
