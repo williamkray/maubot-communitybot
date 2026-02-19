@@ -245,7 +245,7 @@ class CommunityBot(Plugin):
                 f"Creating space with room_version={self.config.get('room_version', '1')}"
             )
             self.log.info(f"Creation content: {creation_content}")
-            self.log.info(f"Calling client.create_room with parameters:")
+            self.log.info("Calling client.create_room with parameters:")
             self.log.info(f"  - alias_localpart: {sanitized_name}")
             self.log.info(f"  - name: {space_name}")
             self.log.info(f"  - invitees: {invitees}")
@@ -767,7 +767,7 @@ class CommunityBot(Plugin):
                 )
                 if bool(re.search(r"[*?]", entity)):
                     self.log.debug(
-                        f"DEBUG ban rule appears to be glob pattern, skipping proactive measures."
+                        "DEBUG ban rule appears to be glob pattern, skipping proactive measures."
                     )
                     return
                 if bool(re.search("ban$", recommendation)):
@@ -1893,7 +1893,7 @@ class CommunityBot(Plugin):
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
     async def room_replace(self, evt: MessageEvent, room: str) -> None:
-        self.log.info(f"=== REPLACEROOM COMMAND STARTED ===")
+        self.log.info("=== REPLACEROOM COMMAND STARTED ===")
         self.log.info(f"Command arguments: room='{room}', evt.room_id='{evt.room_id}'")
 
         await evt.mark_read()
@@ -1911,7 +1911,7 @@ class CommunityBot(Plugin):
             self.log.info(f"Using direct room ID: {room_id}")
 
         # Check bot permissions in the old room
-        self.log.info(f"=== CHECKING BOT PERMISSIONS ===")
+        self.log.info("=== CHECKING BOT PERMISSIONS ===")
         has_perms, error_msg, _ = await self.check_bot_permissions(
             room_id, evt, ["state", "tombstone", "power_levels"]
         )
@@ -1948,8 +1948,8 @@ class CommunityBot(Plugin):
 
         # Check if the room being replaced is a space
         is_space = False
-        self.log.info(f"=== ABOUT TO START SPACE DETECTION ===")
-        self.log.info(f"=== SPACE DETECTION DEBUG START ===")
+        self.log.info("=== ABOUT TO START SPACE DETECTION ===")
+        self.log.info("=== SPACE DETECTION DEBUG START ===")
         self.log.info(f"Room ID being checked: {room_id}")
         self.log.info(f"EventType module: {EventType}")
         self.log.info(
@@ -1994,15 +1994,15 @@ class CommunityBot(Plugin):
                     hasattr(EventType, "ROOM_CREATE")
                     and event.type == EventType.ROOM_CREATE
                 ):
-                    self.log.info(f"✓ Matched EventType.ROOM_CREATE")
+                    self.log.info("✓ Matched EventType.ROOM_CREATE")
                     room_create_event = event
                     break
                 elif str(event.type) == room_create_string:
-                    self.log.info(f"✓ Matched string comparison 'm.room.create'")
+                    self.log.info("✓ Matched string comparison 'm.room.create'")
                     room_create_event = event
                     break
                 elif event.type == "m.room.create":
-                    self.log.info(f"✓ Matched direct string comparison")
+                    self.log.info("✓ Matched direct string comparison")
                     room_create_event = event
                     break
                 else:
@@ -2059,10 +2059,10 @@ class CommunityBot(Plugin):
 
         if is_space:
             await evt.respond(f"Replacing space '{room_name}' with a new space...")
-            self.log.info(f"✓ Sent 'Replacing space' message to user")
+            self.log.info("✓ Sent 'Replacing space' message to user")
         else:
             await evt.respond(f"Replacing room '{room_name}' with a new room...")
-            self.log.info(f"✗ Sent 'Replacing room' message to user")
+            self.log.info("✗ Sent 'Replacing room' message to user")
 
         # Validate that the new room alias is available
         is_valid, conflicting_aliases = await self.validate_room_aliases(
@@ -2087,7 +2087,7 @@ class CommunityBot(Plugin):
                     room_id, EventType.ROOM_POWER_LEVELS
                 )
                 self.log.info(
-                    f"Using user power levels from old space for new space creation"
+                    "Using user power levels from old space for new space creation"
                 )
 
                 # Create new power levels with server defaults, not copying all permissions from old space
@@ -2110,7 +2110,7 @@ class CommunityBot(Plugin):
                 # For other permissions, let the server use its defaults instead of copying from old space
                 # This prevents issues like only admins being able to post messages
                 self.log.info(
-                    f"Using user power levels from old space but server defaults for other permissions"
+                    "Using user power levels from old space but server defaults for other permissions"
                 )
                 power_level_override = power_levels
 
@@ -2119,7 +2119,7 @@ class CommunityBot(Plugin):
                 if self.is_modern_room_version(self.config["room_version"]):
                     if power_level_override.users:
                         power_level_override.users.pop(self.client.mxid, None)
-                        self.log.info(f"Removed bot since they are creator")
+                        self.log.info("Removed bot since they are creator")
             except Exception as e:
                 self.log.warning(
                     f"Could not get power levels from old space, using defaults: {e}"
@@ -2679,13 +2679,13 @@ class CommunityBot(Plugin):
                             # Set bot to highest power level since creators don't have unlimited power in legacy rooms
                             mapped_power_levels[self.client.mxid] = 1000
                             self.log.info(
-                                f"Bot is creator in parent but target is legacy room - setting power level to 1000"
+                                "Bot is creator in parent but target is legacy room - setting power level to 1000"
                             )
                         else:
                             # Bot is not a creator in parent, set to highest power level
                             mapped_power_levels[self.client.mxid] = 1000
                             self.log.info(
-                                f"Bot is not creator in parent, setting power level to 1000 in legacy target room"
+                                "Bot is not creator in parent, setting power level to 1000 in legacy target room"
                             )
 
                         room_power_levels.users = mapped_power_levels
@@ -2693,7 +2693,7 @@ class CommunityBot(Plugin):
                     else:
                         # Both rooms are legacy - direct power level transfer
                         self.log.info(
-                            f"Both rooms are legacy - direct power level transfer"
+                            "Both rooms are legacy - direct power level transfer"
                         )
                         room_power_levels.users = user_power_levels
 
@@ -2797,7 +2797,7 @@ class CommunityBot(Plugin):
             )
 
             await evt.respond(
-                f"Room migration complete. Current members can send messages, new joiners will require verification.",
+                "Room migration complete. Current members can send messages, new joiners will require verification.",
                 edits=msg,
             )
 
@@ -2965,7 +2965,7 @@ class CommunityBot(Plugin):
             )
             if not is_valid:
                 error_msg = (
-                    f"Cannot initialize community: The following room aliases already exist:\n"
+                    "Cannot initialize community: The following room aliases already exist:\n"
                     + "\n".join(conflicting_aliases)
                 )
                 await evt.respond(error_msg, edits=msg)
@@ -3334,7 +3334,7 @@ class CommunityBot(Plugin):
                 room_id = room
             else:
                 await evt.respond(
-                    f"Invalid room format. Use room ID (!roomid:server) or alias (#alias:server)",
+                    "Invalid room format. Use room ID (!roomid:server) or alias (#alias:server)",
                     edits=msg,
                 )
                 return
@@ -3392,10 +3392,10 @@ class CommunityBot(Plugin):
                     self.client.mxid, room_id
                 )
 
-                response += f"<h4>📊 Power Level Analysis</h4><br />"
+                response += "<h4>📊 Power Level Analysis</h4><br />"
                 response += f"• <b>Bot power level:</b> {bot_level}<br />"
                 if bot_has_unlimited_power:
-                    response += f"• <b>Administrative privileges:</b> ✅ Unlimited Power (Creator)<br />"
+                    response += "• <b>Administrative privileges:</b> ✅ Unlimited Power (Creator)<br />"
                 else:
                     response += f"• <b>Administrative privileges:</b> {'✅ Yes' if bot_level >= 100 else '❌ No'}<br />"
                 response += (
@@ -3418,17 +3418,17 @@ class CommunityBot(Plugin):
                             users_higher.append({"user": user, "level": level})
 
                 if bot_has_unlimited_power:
-                    response += f"<h4>ℹ️ Creator Status</h4><br />"
+                    response += "<h4>ℹ️ Creator Status</h4><br />"
                     response += f"✅ <b>No power level conflicts relevant:</b> Bot has unlimited power as creator in room version {room_version}<br /><br />"
                 else:
                     if users_higher:
-                        response += f"<h4>⚠️ Users with Higher Power Level</h4><br />"
+                        response += "<h4>⚠️ Users with Higher Power Level</h4><br />"
                         for user_info in users_higher:
                             response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
                         response += "<br />"
 
                     if users_equal:
-                        response += f"<h4>⚠️ Users with Equal Power Level</h4><br />"
+                        response += "<h4>⚠️ Users with Equal Power Level</h4><br />"
                         for user_info in users_equal:
                             response += f"• <b>{user_info['user']}</b> (level: {user_info['level']})<br />"
                         response += "<br />"
@@ -3440,11 +3440,11 @@ class CommunityBot(Plugin):
 
                 # Add note about creators in modern room versions
                 if self.is_modern_room_version(room_version):
-                    response += f"<h4>ℹ️ Modern Room Version Note</h4><br />"
+                    response += "<h4>ℹ️ Modern Room Version Note</h4><br />"
                     response += f"This room uses version {room_version}, which means creators have unlimited power and cannot be restricted by power levels.<br /><br />"
 
                 # Check specific permissions
-                response += f"<h4>🔐 Permission Analysis</h4><br />"
+                response += "<h4>🔐 Permission Analysis</h4><br />"
 
                 # Get required levels for various actions
                 events_default = power_levels.events_default
@@ -3477,7 +3477,7 @@ class CommunityBot(Plugin):
 
             # Check room state
             try:
-                response += f"<h4>🏠 Room State</h4><br />"
+                response += "<h4>🏠 Room State</h4><br />"
 
                 # Check join rules
                 try:

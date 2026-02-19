@@ -180,7 +180,7 @@ def generate_space_summary(space_data: Dict[str, Any]) -> str:
         return f"<h4>📋 Parent Space</h4><br />❌ <b>Error:</b> {space_data['error']}<br /><br />"
 
     space_status = "✅" if space_data.get("has_admin", False) else "❌"
-    response = f"<h4>📋 Parent Space</h4><br />"
+    response = "<h4>📋 Parent Space</h4><br />"
 
     # Show admin status with appropriate details
     if space_data.get("bot_has_unlimited_power", False):
@@ -263,7 +263,7 @@ def generate_room_summary(
                 # Add power level conflict info
                 if room_data.get("users_higher") or room_data.get("users_equal"):
                     if room_data.get("bot_has_unlimited_power", False):
-                        room_info += f" - Note: Power level conflicts are irrelevant for creators with unlimited power"
+                        room_info += " - Note: Power level conflicts are irrelevant for creators with unlimited power"
                     else:
                         if room_data.get("users_higher"):
                             room_info += f" - Higher power users: {len(room_data['users_higher'])}"
@@ -301,7 +301,7 @@ def generate_summary_stats(
     Returns:
         str: HTML formatted summary statistics
     """
-    response = f"<h4>📊 Summary</h4><br />"
+    response = "<h4>📊 Summary</h4><br />"
     response += f"• Parent space: {'✅ Admin' if space_data.get('has_admin', False) else '❌ No admin'}<br />"
     response += f"• Rooms with admin: {room_stats['admin_rooms']}<br />"
     response += f"• Rooms without admin: {room_stats['non_admin_rooms']}<br />"
@@ -310,7 +310,7 @@ def generate_summary_stats(
 
     # Add note about unlimited power for modern rooms
     if room_stats["modern_rooms"] > 0:
-        response += f"<br />ℹ️ <b>Note:</b> In modern room versions (12+), creators have unlimited power and cannot be restricted by power levels.<br />"
+        response += "<br />ℹ️ <b>Note:</b> In modern room versions (12+), creators have unlimited power and cannot be restricted by power levels.<br />"
 
     if room_stats["not_in_room_count"] > 0:
         response += f"• Rooms bot not in: {room_stats['not_in_room_count']}<br />"
@@ -334,13 +334,13 @@ def generate_issues_and_warnings(issues: List[str], warnings: List[str]) -> str:
     response = ""
 
     if issues:
-        response += f"<h4>🚨 Critical Issues</h4><br />"
+        response += "<h4>🚨 Critical Issues</h4><br />"
         for issue in issues:
             response += f"• {issue}<br />"
         response += "<br />"
 
     if warnings:
-        response += f"<h4>⚠️ Warnings</h4><br />"
+        response += "<h4>⚠️ Warnings</h4><br />"
         for warning in warnings:
             response += f"• {warning}<br />"
         response += "<br />"
