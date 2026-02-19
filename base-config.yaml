@@ -41,7 +41,7 @@ kick_threshold_days: 60
 # examples:
 #   track_users: []                    # disable all tracking
 #   track_users: ["messages"]          # track only messages
-#   track_users: ["reactions"]         # track only reactions  
+#   track_users: ["reactions"]         # track only reactions
 #   track_users: ["messages", "reactions"]  # track both
 track_users: ["messages", "reactions"]
 
@@ -80,7 +80,7 @@ welcome_sleep: 0
 
 # add a room ID here to send a message to when someone joins the above rooms
 # (optional)
-notification_room: 
+notification_room:
 
 # message to send to the notification room when someone joins one of the above rooms:
 join_notification_message: |
@@ -115,7 +115,7 @@ censor_wordlist_instaban: []
 # when users join any room managed by this bot, they are compared against these existing banlists
 # if found, they will immediately be banned.
 # your bot MUST be in the banlist room already!
-banlists: 
+banlists:
   - '#community-moderation-effort-bl:neko.dev'
 
 # should we ban proactively? this will ban users in your rooms if a new ban event is added to
@@ -140,7 +140,7 @@ check_if_human: false
 # if check_if_human is true but this list is empty, verification will be skipped
 # make these your favorite movie quotes, core values of your community, or
 # whatever you want. the more unique and obscure, the better.
-verification_phrases: 
+verification_phrases:
 - Yes, I am a human!
 - I am a robot, but I'm nice.
 - My name is Inigo Montoya.

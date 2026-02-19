@@ -158,7 +158,7 @@ pytest tests/ --cov=community --cov-report=html
    ```python
    # Old
    result = self.flag_message(msg)
-   
+
    # New
    result = message_utils.flag_message(msg, self.config["censor_wordlist"], self.config["censor_files"])
    ```

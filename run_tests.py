@@ -8,17 +8,17 @@ import os
 def run_tests():
     """Run all tests for the community bot project."""
     print("Running community bot tests...")
-    
+
     # Change to the project directory
     project_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(project_dir)
-    
+
     # Run pytest
     try:
         result = subprocess.run([
-            sys.executable, "-m", "pytest", 
-            "tests/", 
-            "-v", 
+            sys.executable, "-m", "pytest",
+            "tests/",
+            "-v",
             "--tb=short",
             "--color=yes"
         ], check=True)

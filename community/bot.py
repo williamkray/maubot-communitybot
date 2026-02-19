@@ -423,7 +423,7 @@ class CommunityBot(Plugin):
         warn_days_ago = now - (1000 * 60 * 60 * 24 * self.config["warn_threshold_days"])
         kick_days_ago = now - (1000 * 60 * 60 * 24 * self.config["kick_threshold_days"])
         warn_q = """
-            SELECT mxid FROM user_events WHERE last_message_timestamp <= $1 AND 
+            SELECT mxid FROM user_events WHERE last_message_timestamp <= $1 AND
             last_message_timestamp >= $2
             AND (ignore_inactivity < 1 OR ignore_inactivity IS NULL)
             """

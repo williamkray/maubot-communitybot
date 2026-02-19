@@ -18,9 +18,9 @@ class TestReportUtils:
             "inactive": [{"mxid": "@user3:example.com"}],
             "ignored": [{"mxid": "@user4:example.com"}]
         }
-        
+
         result = generate_activity_report(database_results)
-        
+
         assert result["active"] == ["@user1:example.com", "@user2:example.com"]
         assert result["inactive"] == ["@user3:example.com"]
         assert result["ignored"] == ["@user4:example.com"]
@@ -32,9 +32,9 @@ class TestReportUtils:
             "inactive": [],
             "ignored": []
         }
-        
+
         result = generate_activity_report(database_results)
-        
+
         assert result["active"] == ["none"]
         assert result["inactive"] == ["none"]
         assert result["ignored"] == ["none"]
@@ -42,9 +42,9 @@ class TestReportUtils:
     def test_generate_activity_report_missing_keys(self):
         """Test generating activity report with missing keys."""
         database_results = {}
-        
+
         result = generate_activity_report(database_results)
-        
+
         assert result["active"] == ["none"]
         assert result["inactive"] == ["none"]
         assert result["ignored"] == ["none"]
@@ -52,9 +52,9 @@ class TestReportUtils:
     def test_split_doctor_report_small(self):
         """Test splitting small report that doesn't need splitting."""
         report_text = "This is a small report that fits in one chunk."
-        
+
         result = split_doctor_report(report_text, 1000)
-        
+
         assert len(result) == 1
         assert result[0] == report_text
 
@@ -63,12 +63,12 @@ class TestReportUtils:
         # Create a large report
         lines = [f"Line {i}: This is a test line for splitting" for i in range(100)]
         report_text = "\n".join(lines)
-        
+
         result = split_doctor_report(report_text, 100)  # Small chunk size
-        
+
         assert len(result) > 1
         assert all(len(chunk) <= 100 for chunk in result)
-        
+
         # Verify all content is preserved (account for newlines)
         combined = "\n".join(result)
         assert combined == report_text
@@ -81,9 +81,9 @@ This is section 1 content.
 This is section 2 content.
 <h3>Section 3</h3>
 This is section 3 content."""
-        
+
         result = split_doctor_report(report_text, 50)  # Small chunk size
-        
+
         assert len(result) > 1
         assert all(len(chunk) <= 50 for chunk in result)
 
@@ -96,9 +96,9 @@ This is section 3 content."""
             },
             "error_list": {}
         }
-        
+
         result = format_ban_results(ban_event_map)
-        
+
         assert "Banned @user1:example.com from: Room 1, Room 2" in result
         assert "Banned @user2:example.com from: Room 3" in result
 
@@ -112,9 +112,9 @@ This is section 3 content."""
                 "@user2:example.com": ["Room 2", "Room 3"]
             }
         }
-        
+
         result = format_ban_results(ban_event_map)
-        
+
         assert "Banned @user1:example.com from: Room 1" in result
         assert "Failed to ban @user2:example.com from: Room 2, Room 3" in result
 
@@ -124,9 +124,9 @@ This is section 3 content."""
             "ban_list": {},
             "error_list": {}
         }
-        
+
         result = format_ban_results(ban_event_map)
-        
+
         assert result == "No ban operations performed"
 
     def test_format_sync_results_success(self):
@@ -135,9 +135,9 @@ This is section 3 content."""
             "added": ["@user1:example.com", "@user2:example.com"],
             "dropped": ["@user3:example.com"]
         }
-        
+
         result = format_sync_results(sync_results)
-        
+
         assert "Added: @user1:example.com<br />@user2:example.com" in result
         assert "Dropped: @user3:example.com" in result
 
@@ -147,17 +147,17 @@ This is section 3 content."""
             "added": [],
             "dropped": []
         }
-        
+
         result = format_sync_results(sync_results)
-        
+
         assert "Added: none" in result
         assert "Dropped: none" in result
 
     def test_format_sync_results_missing_keys(self):
         """Test formatting sync results with missing keys."""
         sync_results = {}
-        
+
         result = format_sync_results(sync_results)
-        
+
         assert "Added: none" in result
         assert "Dropped: none" in result

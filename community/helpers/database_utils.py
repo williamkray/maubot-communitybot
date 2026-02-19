@@ -125,8 +125,8 @@ async def get_inactive_users(
         # Get users to warn
         warn_results = await database.fetch(
             """
-            SELECT mxid FROM user_events 
-            WHERE last_message_timestamp < $1 
+            SELECT mxid FROM user_events
+            WHERE last_message_timestamp < $1
             AND last_message_timestamp > $2
             AND ignore_inactivity = 0
             """,
@@ -137,7 +137,7 @@ async def get_inactive_users(
         # Get users to kick
         kick_results = await database.fetch(
             """
-            SELECT mxid FROM user_events 
+            SELECT mxid FROM user_events
             WHERE last_message_timestamp < $2
             AND ignore_inactivity = 0
             """,
@@ -163,7 +163,7 @@ async def cleanup_stale_verification_states(database, logger) -> None:
     try:
         await database.execute(
             """
-            DELETE FROM verification_states 
+            DELETE FROM verification_states
             WHERE created_at < NOW() - INTERVAL '24 hours'
             """
         )
@@ -213,7 +213,7 @@ async def create_verification_state(
     try:
         await database.execute(
             """
-            INSERT INTO verification_states 
+            INSERT INTO verification_states
             (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, required_power_level)
             VALUES ($1, $2, $3, $4, $5, $6)
             """,

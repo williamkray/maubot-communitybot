@@ -54,8 +54,8 @@ database_opts:
     max_size: 10
 
 # Config for the plugin. Refer to the plugin's base-config.yaml to find what (if anything) to put here.
-plugin_config: 
-    
+plugin_config:
+
     # the room-id of the matrix room or space to use as your "full user list"
     # changes to user power levelsin this room will affect all rooms in the space
     # some features may not work if this is a regular room. use a space.
@@ -99,7 +99,7 @@ plugin_config:
     # examples:
     #   track_users: []                    # disable all tracking
     #   track_users: ["messages"]          # track only messages
-    #   track_users: ["reactions"]         # track only reactions  
+    #   track_users: ["reactions"]         # track only reactions
     #   track_users: ["messages", "reactions"]  # track both
     track_users: ["messages", "reactions"]
 
@@ -138,7 +138,7 @@ plugin_config:
 
     # add a room ID here to send a message to when someone joins the above rooms
     # (optional)
-    notification_room: 
+    notification_room:
 
     # message to send to the notification room when someone joins one of the above rooms:
     join_notification_message: |
@@ -173,7 +173,7 @@ plugin_config:
     # when users join any room managed by this bot, they are compared against these existing banlists
     # if found, they will immediately be banned.
     # your bot MUST be in the banlist room already!
-    banlists: 
+    banlists:
       - '#community-moderation-effort-bl:neko.dev'
 
     # should we ban proactively? this will ban users in your rooms if a new ban event is added to
@@ -198,7 +198,7 @@ plugin_config:
     # if check_if_human is true but this list is empty, verification will be skipped
     # make these your favorite movie quotes, core values of your community, or
     # whatever you want. the more unique and obscure, the better.
-    verification_phrases: 
+    verification_phrases:
     - Yes, I am a human!
     - I am a robot, but I'm nice.
     - My name is Inigo Montoya.
