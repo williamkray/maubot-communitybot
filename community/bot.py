@@ -1060,7 +1060,6 @@ class CommunityBot(Plugin):
                     # Create DM room with name
                     max_retries = 3
                     retry_delay = 1  # seconds
-                    last_error = None
 
                     for attempt in range(max_retries):
                         try:
@@ -1080,10 +1079,7 @@ class CommunityBot(Plugin):
                             self.log.info(f"Created DM room {dm_room} for {evt.sender}")
                             break
                         except Exception as e:
-                            last_error = e
-                            if (
-                                attempt < max_retries - 1
-                            ):  # Don't sleep on the last attempt
+                            if attempt < max_retries - 1:  # Don't sleep on the last attempt
                                 self.log.warning(
                                     f"Failed to create DM room (attempt {attempt + 1}/{max_retries}): {e}"
                                 )
@@ -1204,10 +1200,10 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
-        power_levels = await self.client.get_state_event(
-            evt.room_id, EventType.ROOM_POWER_LEVELS
-        )
-        user_level = power_levels.get_user_level(evt.sender)
+        # power_levels = await self.client.get_state_event(
+        #     evt.room_id, EventType.ROOM_POWER_LEVELS
+        # )
+        # user_level = power_levels.get_user_level(evt.sender)
         # self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
         if self.flag_message(evt):
             # do we need to redact?
@@ -1471,7 +1467,7 @@ class CommunityBot(Plugin):
             await evt.reply("user tracking is disabled")
             return
 
-        sync_results = await self.do_sync()
+        await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
             f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
@@ -1493,7 +1489,7 @@ class CommunityBot(Plugin):
             await evt.reply("user tracking is disabled")
             return
 
-        sync_results = await self.do_sync()
+        await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
             f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
@@ -1517,7 +1513,7 @@ class CommunityBot(Plugin):
             await evt.reply("user tracking is disabled")
             return
 
-        sync_results = await self.do_sync()
+        await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
             f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
@@ -1538,7 +1534,7 @@ class CommunityBot(Plugin):
             await evt.reply("user tracking is disabled")
             return
 
-        sync_results = await self.do_sync()
+        await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
             f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
@@ -1557,7 +1553,7 @@ class CommunityBot(Plugin):
             await evt.reply("user tracking is disabled")
             return
 
-        sync_results = await self.do_sync()
+        await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
             f"<p><b>Ignored users:</b><br /> \
@@ -2202,7 +2198,7 @@ class CommunityBot(Plugin):
                     self.log.info(
                         f"Successfully transferred alias {alias} to new {'space' if is_space else 'room'} {new_room_id}"
                     )
-                except Exception as e:
+                except Exception:
                     # If transfer failed, try to create a modified alias
                     modified_alias = f"{localpart}NEW"
                     try:
@@ -2976,10 +2972,6 @@ class CommunityBot(Plugin):
                 self.config["invitees"].append(evt.sender)
             # Save the updated config
             self.config.save()
-
-            # Create the space
-            server = self.client.parse_user_id(self.client.mxid)[1]
-            sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", community_name).lower()
 
             # Set up power levels for the space
             power_levels = PowerLevelStateEventContent()

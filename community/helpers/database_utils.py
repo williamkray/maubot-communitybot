@@ -186,7 +186,7 @@ async def get_verification_state(database, dm_room_id: str) -> Dict[str, Any]:
             "SELECT * FROM verification_states WHERE dm_room_id = $1", dm_room_id
         )
         return dict(result) if result else None
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -224,7 +224,7 @@ async def create_verification_state(
             attempts_remaining,
             required_power_level,
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state creation is not critical
 
 
@@ -244,7 +244,7 @@ async def update_verification_attempts(
             attempts_remaining,
             dm_room_id,
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state update is not critical
 
 
@@ -259,5 +259,5 @@ async def delete_verification_state(database, dm_room_id: str) -> None:
         await database.execute(
             "DELETE FROM verification_states WHERE dm_room_id = $1", dm_room_id
         )
-    except Exception as e:
+    except Exception:
         pass  # Verification state deletion is not critical

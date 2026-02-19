@@ -114,34 +114,26 @@ async def prepare_power_levels(
                     # Ensure bot has highest power
                     user_power_levels[client.mxid] = 1000
                     power_levels.users = user_power_levels
-                except Exception as e:
+                except Exception:
                     # If copying users fails, create default power levels
-                    power_levels.users = {
-                        client.mxid: 1000,  # Bot gets highest power
-                    }
+                    power_levels.users = {client.mxid: 1000}  # Bot gets highest power
             else:
-                power_levels.users = {
-                    client.mxid: 1000,  # Bot gets highest power
-                }
+                power_levels.users = {client.mxid: 1000}  # Bot gets highest power
 
             # Set explicit config values
             power_levels.invite = config.get("invite_power_level", 50)
 
             return power_levels
-        except Exception as e:
+        except Exception:
             # If we can't get parent power levels, create default ones
             power_levels = PowerLevelStateEventContent()
-            power_levels.users = {
-                client.mxid: 1000,  # Bot gets highest power
-            }
+            power_levels.users = {client.mxid: 1000}  # Bot gets highest power
             power_levels.invite = config.get("invite_power_level", 50)
             return power_levels
     else:
         # If no parent room, create default power levels
         power_levels = PowerLevelStateEventContent()
-        power_levels.users = {
-            client.mxid: 1000,  # Bot gets highest power
-        }
+        power_levels.users = {client.mxid: 1000}  # Bot gets highest power
         power_levels.invite = config.get("invite_power_level", 50)
         return power_levels
 
