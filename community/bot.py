@@ -82,7 +82,6 @@ class Config(BaseProxyConfig):
 
 
 class CommunityBot(Plugin):
-
     _redaction_tasks: asyncio.Task = None
     _verification_states: Dict[str, Dict] = {}
 
@@ -264,9 +263,10 @@ class CommunityBot(Plugin):
 
             # Verify the space version and type were set correctly
             try:
-                actual_version, actual_creators = (
-                    await self.get_room_version_and_creators(space_id)
-                )
+                (
+                    actual_version,
+                    actual_creators,
+                ) = await self.get_room_version_and_creators(space_id)
                 self.log.info(
                     f"Space {space_id} created with version {actual_version} (requested: {self.config.get('room_version', '1')})"
                 )
@@ -1079,7 +1079,9 @@ class CommunityBot(Plugin):
                             self.log.info(f"Created DM room {dm_room} for {evt.sender}")
                             break
                         except Exception as e:
-                            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                            if (
+                                attempt < max_retries - 1
+                            ):  # Don't sleep on the last attempt
                                 self.log.warning(
                                     f"Failed to create DM room (attempt {attempt + 1}/{max_retries}): {e}"
                                 )
@@ -1306,9 +1308,11 @@ class CommunityBot(Plugin):
         msg = await evt.respond("starting the ban...")
         results_map = await self.ban_this_user(user, all_rooms=True)
 
-        results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
+        results = (
+            "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
                 recorded:<p><code>{error_list}</code></p>".format(
-            ban_list=results_map["ban_list"], error_list=results_map["error_list"]
+                ban_list=results_map["ban_list"], error_list=results_map["error_list"]
+            )
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
@@ -1347,9 +1351,11 @@ class CommunityBot(Plugin):
             except Exception as e:
                 error_list[room] = str(e)
 
-        results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
+        results = (
+            "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
                 recorded:<p><code>{error_list}</code></p>".format(
-            unban_list=unban_list, error_list=error_list
+                unban_list=unban_list, error_list=error_list
+            )
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
@@ -1600,9 +1606,11 @@ class CommunityBot(Plugin):
                     error_list[user] = []
                     error_list[user].append(roomname or room)
 
-        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
+        results = (
+            "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
                 recorded:<p><code>{error_list}</code></p>".format(
-            purge_list=purge_list, error_list=error_list
+                purge_list=purge_list, error_list=error_list
+            )
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
@@ -1647,9 +1655,11 @@ class CommunityBot(Plugin):
                 error_list[user] = []
                 error_list[user].append(roomname or room)
 
-        results = "the following users were kicked:<p><code>{kick_list}</code></p>the following errors were \
+        results = (
+            "the following users were kicked:<p><code>{kick_list}</code></p>the following errors were \
                 recorded:<p><code>{error_list}</code></p>".format(
-            kick_list=kick_list, error_list=error_list
+                kick_list=kick_list, error_list=error_list
+            )
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
@@ -1695,10 +1705,13 @@ class CommunityBot(Plugin):
                 return None
 
             # Prepare room creation data
-            alias_localpart, server, room_invitees, parent_room = (
-                await room_creation_utils.prepare_room_creation_data(
-                    sanitized_name, self.config, self.client, invitees
-                )
+            (
+                alias_localpart,
+                server,
+                room_invitees,
+                parent_room,
+            ) = await room_creation_utils.prepare_room_creation_data(
+                sanitized_name, self.config, self.client, invitees
             )
 
             # Validate that the alias is available
@@ -2592,9 +2605,10 @@ class CommunityBot(Plugin):
                     room_power_levels = await self.client.get_state_event(
                         room, EventType.ROOM_POWER_LEVELS
                     )
-                    room_version, room_creators = (
-                        await self.get_room_version_and_creators(room)
-                    )
+                    (
+                        room_version,
+                        room_creators,
+                    ) = await self.get_room_version_and_creators(room)
 
                     self.log.info(
                         f"Processing room {roomname or room} (v{room_version}) - Parent is v{parent_version}"
