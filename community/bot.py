@@ -29,8 +29,6 @@ from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
 
-BAN_STATE_EVENT = EventType.find("m.policy.rule.user", EventType.Class.STATE)
-
 # database table related things
 from .db import upgrade_table
 
@@ -47,6 +45,9 @@ from .helpers import (
     config_manager,
     diagnostic_utils,
 )
+
+
+BAN_STATE_EVENT = EventType.find("m.policy.rule.user", EventType.Class.STATE)
 
 
 class Config(BaseProxyConfig):
