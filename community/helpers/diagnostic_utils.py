@@ -1,6 +1,6 @@
 """Diagnostic utility functions for the community bot."""
 
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Tuple
 from mautrix.types import EventType
 from mautrix.client import Client
 

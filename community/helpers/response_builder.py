@@ -1,7 +1,6 @@
 """Response building utilities for the community bot."""
 
-from typing import List, Dict, Any, Optional
-from mautrix.types import MessageEvent
+from typing import List, Dict, Any
 
 
 class ResponseBuilder:

@@ -1,7 +1,7 @@
 """Common utility functions for bot operations."""
 
 from typing import Optional, Dict, Any
-from mautrix.types import EventType, MessageEvent
+from mautrix.types import EventType
 
 
 async def get_room_name(client, room_id: str, logger) -> Optional[str]:

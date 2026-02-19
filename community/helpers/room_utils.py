@@ -1,8 +1,7 @@
 """Room and space utility functions."""
 
-import re
-from typing import Optional, Tuple, List
-from mautrix.types import EventType, PowerLevelStateEventContent
+from typing import Tuple, List
+from mautrix.types import EventType
 from mautrix.errors import MNotFound
 
 

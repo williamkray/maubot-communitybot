@@ -2,8 +2,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, Optional
-from mautrix.types import MessageEvent, UserID
-from .decorators import require_permission, require_parent_room, handle_errors
+from mautrix.types import MessageEvent
 
 
 class BaseCommandHandler(ABC):

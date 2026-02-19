@@ -3,7 +3,7 @@
 import fnmatch
 import re
 import time
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from mautrix.types import EventType, UserID
 from mautrix.errors import MNotFound
 
