@@ -99,6 +99,14 @@ class ConfigManager:
         """
         return self.config.get("community_slug")
 
+    def get_use_community_slug(self) -> Optional[str]:
+        """Get the community slug suffix setting.
+
+        Returns:
+            bool: Whether to use the community slug as a room suffix
+        """
+        return self.config.get("use_community_slug")
+
     def get_parent_room(self) -> Optional[str]:
         """Get the parent room ID.
 
@@ -201,7 +209,12 @@ class ConfigManager:
         Returns:
             List[str]: List of missing required configuration keys
         """
-        required_configs = ["parent_room", "room_version", "community_slug"]
+        required_configs = [
+            "parent_room",
+            "room_version",
+            "community_slug",
+            "use_community_slug",
+        ]
 
         missing = []
         for config_key in required_configs:
@@ -231,6 +244,7 @@ class ConfigManager:
         return {
             "room_version": self.get_room_version(),
             "community_slug": self.get_community_slug(),
+            "use_community_slug": self.get_use_community_slug(),
             "invitees": self.get_invitees(),
             "invite_power_level": self.get_invite_power_level(),
             "encrypt": self.is_encryption_enabled(),

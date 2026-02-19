@@ -46,36 +46,69 @@ class TestRoomUtils:
         assert result == True
 
     @pytest.mark.asyncio
-    async def test_validate_room_aliases_no_slug(self):
+    async def test_validate_room_aliases_slug_not_required_with_no_slug(self):
         """Test alias validation without community slug."""
         client = Mock()
-        
-        result = await validate_room_aliases(client, ["room1", "room2"], "", "example.com")
-        assert result == (False, [])
 
-    @pytest.mark.asyncio
-    async def test_validate_room_aliases_success(self):
-        """Test successful alias validation."""
-        client = Mock()
-        client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
-        
-        result = await validate_room_aliases(client, ["room1", "room2"], "test", "example.com")
+        result = await validate_room_aliases(client, ["room1", "room2"], "", False, "example.com")
         assert result == (True, [])
 
     @pytest.mark.asyncio
-    async def test_validate_room_aliases_conflicts(self):
+    async def test_validate_room_aliases_slug_not_required_with_slug(self):
+        """Test successful alias validation."""
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
+
+        result = await validate_room_aliases(client, ["room1", "room2"], "test", False, "example.com")
+        assert result == (True, [])
+
+    @pytest.mark.asyncio
+    async def test_validate_room_aliases_slug_required_with_no_slug(self):
+        """Test alias validation without community slug."""
+        client = Mock()
+
+        result = await validate_room_aliases(client, ["room1", "room2"], "", True, "example.com")
+        assert result == (False, [])
+
+    @pytest.mark.asyncio
+    async def test_validate_room_aliases_slug_required_with_slug(self):
+        """Test successful alias validation."""
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
+
+        result = await validate_room_aliases(client, ["room1", "room2"], "test", True, "example.com")
+        assert result == (True, [])
+
+    @pytest.mark.asyncio
+    async def test_validate_room_aliases_conflicts_slug_not_required(self):
         """Test alias validation with conflicts."""
         client = Mock()
-        
+
         def resolve_side_effect(alias):
             if "room1" in alias:
                 return {"room_id": "!room1:example.com"}  # Exists
             else:
                 raise MNotFound()  # Doesn't exist
-        
+
         client.resolve_room_alias = AsyncMock(side_effect=resolve_side_effect)
-        
-        result = await validate_room_aliases(client, ["room1", "room2"], "test", "example.com")
+
+        result = await validate_room_aliases(client, ["room1", "room2"], "", False, "example.com")
+        assert result == (False, ["#room1:example.com"])
+
+    @pytest.mark.asyncio
+    async def test_validate_room_aliases_conflicts_slug_required(self):
+        """Test alias validation with conflicts."""
+        client = Mock()
+
+        def resolve_side_effect(alias):
+            if "room1" in alias:
+                return {"room_id": "!room1:example.com"}  # Exists
+            else:
+                raise MNotFound()  # Doesn't exist
+
+        client.resolve_room_alias = AsyncMock(side_effect=resolve_side_effect)
+
+        result = await validate_room_aliases(client, ["room1", "room2"], "test", True, "example.com")
         assert result == (False, ["#room1-test:example.com"])
 
     @pytest.mark.asyncio

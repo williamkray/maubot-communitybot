@@ -31,7 +31,11 @@ async def validate_room_alias(client, alias_localpart: str, server: str) -> bool
 
 
 async def validate_room_aliases(
-    client, room_names: list[str], community_slug: str, server: str
+    client,
+    room_names: list[str],
+    community_slug: str,
+    use_community_slug: bool,
+    server: str,
 ) -> Tuple[bool, List[str]]:
     """Validate that all room aliases are available.
 
@@ -39,12 +43,13 @@ async def validate_room_aliases(
         client: Matrix client instance
         room_names: List of room names to validate
         community_slug: The community slug to append
+        use_community_slug: Whether to append a community slug
         server: The server domain
 
     Returns:
         tuple: (is_valid, list_of_conflicting_aliases)
     """
-    if not community_slug:
+    if use_community_slug and not community_slug:
         return False, []
 
     conflicting_aliases = []
@@ -54,7 +59,10 @@ async def validate_room_aliases(
         from .message_utils import sanitize_room_name
 
         sanitized_name = sanitize_room_name(room_name)
-        alias_localpart = f"{sanitized_name}-{community_slug}"
+        if use_community_slug:
+            alias_localpart = f"{sanitized_name}-{community_slug}"
+        else:
+            alias_localpart = sanitized_name
 
         # Check if alias is available
         is_available = await validate_room_alias(client, alias_localpart, server)
