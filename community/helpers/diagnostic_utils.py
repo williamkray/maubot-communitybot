@@ -1,8 +1,9 @@
 """Diagnostic utility functions for the community bot."""
 
 from typing import Dict, List, Any, Tuple
-from mautrix.types import EventType
 from mautrix.client import Client
+from mautrix.errors import MatrixError
+from mautrix.types import EventType
 
 
 async def check_space_permissions(
@@ -75,7 +76,7 @@ async def check_room_permissions(
         # Check if bot is in the room
         try:
             await client.get_state_event(room_id, EventType.ROOM_MEMBER, client.mxid)
-        except:
+        except MatrixError:
             return {"room_id": room_id, "error": "Bot not in room"}
 
         # Get power levels
@@ -90,7 +91,7 @@ async def check_room_permissions(
             from .common_utils import get_room_name
 
             room_name = await get_room_name(client, room_id, logger) or room_id
-        except:
+        except MatrixError:
             pass
 
         # Get room version and creators

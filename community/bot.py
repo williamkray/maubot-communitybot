@@ -24,7 +24,7 @@ from mautrix.types import (
     JoinRule,
     RoomCreatePreset,
 )
-from mautrix.errors import MNotFound
+from mautrix.errors import MatrixError, MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
@@ -1414,7 +1414,7 @@ class CommunityBot(Plugin):
                 try:
                     room_id = await self.client.resolve_room_alias(room)
                     room_id = room_id["room_id"]
-                except:
+                except KeyError, MatrixError:
                     evt.reply("i couldn't resolve that alias, sorry")
                     return
             else:
@@ -2399,7 +2399,7 @@ class CommunityBot(Plugin):
                 try:
                     thatroom_id = await self.client.resolve_room_alias(room)
                     room_id = thatroom_id["room_id"]
-                except:
+                except KeyError, MatrixError:
                     evt.reply("i don't recognize that room, sorry")
                     return
             else:
@@ -2433,7 +2433,7 @@ class CommunityBot(Plugin):
                 try:
                     thatroom_id = await self.client.resolve_room_alias(room)
                     room_id = thatroom_id["room_id"]
-                except:
+                except KeyError, MatrixError:
                     evt.reply("i don't recognize that room, sorry")
                     return
             else:
@@ -2458,7 +2458,7 @@ class CommunityBot(Plugin):
                 try:
                     thatroom_id = await self.client.resolve_room_alias(room)
                     room_id = thatroom_id["room_id"]
-                except:
+                except KeyError, MatrixError:
                     evt.reply("i don't recognize that room, sorry")
                     return
             else:
@@ -2476,7 +2476,7 @@ class CommunityBot(Plugin):
                     room_id, EventType.ROOM_NAME
                 )
                 room_name = room_name_event.name
-            except:
+            except AttributeError, MatrixError:
                 pass
 
             response = f"<b>Room:</b> {room_name}<br />"
@@ -3346,7 +3346,7 @@ class CommunityBot(Plugin):
                     room_id, EventType.ROOM_NAME
                 )
                 room_name = room_name_event.name
-            except:
+            except AttributeError, MatrixError:
                 pass
 
             response = f"<h3>🔍 Detailed Analysis: {room_name}</h3><br />"
@@ -3477,7 +3477,7 @@ class CommunityBot(Plugin):
                         room_id, EventType.ROOM_JOIN_RULES
                     )
                     response += f"• <b>Join rule:</b> {join_rules.join_rule}<br />"
-                except:
+                except AttributeError, MatrixError:
                     response += "• <b>Join rule:</b> Could not determine<br />"
 
                 # Check encryption
@@ -3486,7 +3486,7 @@ class CommunityBot(Plugin):
                         room_id, EventType.ROOM_ENCRYPTION
                     )
                     response += f"• <b>Encryption:</b> ✅ Enabled ({encryption.algorithm})<br />"
-                except:
+                except AttributeError, MatrixError:
                     response += "• <b>Encryption:</b> ❌ Not enabled<br />"
 
                 # Check space parent
@@ -3497,7 +3497,7 @@ class CommunityBot(Plugin):
                     response += (
                         f"• <b>Space parent:</b> ✅ {space_parent.state_key}<br />"
                     )
-                except:
+                except AttributeError, MatrixError:
                     response += "• <b>Space parent:</b> ❌ Not set<br />"
 
             except Exception as e:
