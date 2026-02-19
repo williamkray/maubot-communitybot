@@ -1,10 +1,8 @@
 # kickbot - a maubot plugin to track user activity and remove inactive users from rooms/spaces.
 
-from typing import Awaitable, Type, Optional, Tuple, Dict
-import json
+from typing import Type, Optional, Dict
 import time
 import re
-import fnmatch
 import asyncio
 import random
 import asyncpg.exceptions
@@ -17,22 +15,11 @@ from mautrix.client import (
     SyncStream,
 )
 from mautrix.types import (
-    Event,
     StateEvent,
-    EventID,
     UserID,
-    FileInfo,
     EventType,
-    MediaMessageEventContent,
-    ReactionEvent,
-    RedactionEvent,
-    RoomID,
-    RoomAlias,
     PowerLevelStateEventContent,
     MessageType,
-    PaginationDirection,
-    SpaceChildStateEventContent,
-    SpaceParentStateEventContent,
     JoinRulesStateEventContent,
     JoinRule,
     RoomCreatePreset,
@@ -58,9 +45,7 @@ from .helpers import (
     common_utils,
     room_creation_utils,
     config_manager,
-    response_builder,
     diagnostic_utils,
-    base_command_handler,
 )
 
 
