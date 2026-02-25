@@ -437,8 +437,8 @@ class CommunityBot(Plugin):
         warn_days_ago = now - (1000 * 60 * 60 * 24 * self.config["warn_threshold_days"])
         kick_days_ago = now - (1000 * 60 * 60 * 24 * self.config["kick_threshold_days"])
         warn_q = """
-            SELECT mxid FROM user_events WHERE last_message_timestamp <= $1 AND 
-            last_message_timestamp >= $2
+            SELECT mxid FROM user_events WHERE last_message_timestamp < $1 AND 
+            last_message_timestamp > $2
             AND (ignore_inactivity < 1 OR ignore_inactivity IS NULL)
             """
         kick_q = """
@@ -1226,7 +1226,11 @@ class CommunityBot(Plugin):
         if self.flag_message(evt):
             # do we need to redact?
             if (
-                not await self.user_permitted(evt.sender)
+                not await self.user_permitted(
+                    evt.sender,
+                    self.config["uncensor_pl"],
+                    evt.room_id,
+                )
                 and evt.sender != self.client.mxid
                 and self.censor_room(evt)
             ):
@@ -1244,7 +1248,11 @@ class CommunityBot(Plugin):
             if self.flag_instaban(evt):
                 # do we need to redact?
                 if (
-                    not await self.user_permitted(evt.sender)
+                    not await self.user_permitted(
+                        evt.sender,
+                        self.config["uncensor_pl"],
+                        evt.room_id,
+                    )
                     and evt.sender != self.client.mxid
                     and self.censor_room(evt)
                 ):
