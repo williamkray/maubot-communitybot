@@ -36,3 +36,46 @@ async def upgrade_v3(conn: Connection) -> None:
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
     )
+
+
+@upgrade_table.register(description="Add community_events table for event tracking")
+async def upgrade_v4(conn: Connection) -> None:
+    await conn.execute(
+            """CREATE TABLE community_events (
+                room_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                event_start_ts BIGINT NOT NULL,
+                event_end_ts BIGINT,
+                location TEXT,
+                host_id TEXT NOT NULL,
+                organizers TEXT NOT NULL DEFAULT '[]',
+                extra_links TEXT NOT NULL DEFAULT '[]',
+                created_ts BIGINT NOT NULL,
+                description_event_id TEXT,
+                description_room_id TEXT
+            )"""
+    )
+    await conn.execute(
+            """CREATE TABLE event_rsvps (
+                event_room_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                rsvp_status TEXT NOT NULL,
+                plus_one INT NOT NULL DEFAULT 0,
+                updated_ts BIGINT NOT NULL,
+                PRIMARY KEY (event_room_id, user_id)
+            )"""
+    )
+    await conn.execute(
+            "CREATE INDEX idx_community_events_description_event_id ON community_events(description_event_id)"
+    )
+    await conn.execute(
+            "CREATE INDEX idx_community_events_start_ts ON community_events(event_start_ts)"
+    )
+
+
+@upgrade_table.register(description="Add timezone column to community_events")
+async def upgrade_v5(conn: Connection) -> None:
+    await conn.execute(
+            "ALTER TABLE community_events ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"
+    )

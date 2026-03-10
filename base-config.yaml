@@ -156,6 +156,10 @@ verification_attempts: 3
 # for room versions 12+, creators have unlimited power and should not be given explicit power levels
 room_version: "10"
 
+# whether to encrypt event rooms when creating them. default false so late-comers can read
+# previous event discussion; set true to match the bot's default encrypt setting for event rooms.
+events_encrypt_rooms: false
+
 # message to send to users when they need to verify they are human
 # use {room} for the room name and {phrase} for the verification phrase
 verification_message: |

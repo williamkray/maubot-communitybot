@@ -61,6 +61,7 @@ from .helpers import (
     response_builder,
     diagnostic_utils,
     base_command_handler,
+    event_utils,
 )
 
 
@@ -93,6 +94,7 @@ class Config(BaseProxyConfig):
         helper.copy("verification_message")
         helper.copy("invite_power_level")
         helper.copy("room_version")
+        helper.copy("events_encrypt_rooms")
 
 
 class CommunityBot(Plugin):
@@ -195,6 +197,22 @@ class CommunityBot(Plugin):
         return await room_utils.get_moderators_and_above(
             self.client, self.config.get("parent_room", "")
         )
+
+    async def is_user_in_parent_space(self, user_id: UserID) -> bool:
+        """Check if a user is a member of the parent space (community).
+
+        Returns:
+            bool: True if user is in the parent room
+        """
+        parent = self.config.get("parent_room", "")
+        if not parent:
+            return False
+        try:
+            members = await self.client.get_joined_members(parent)
+            return user_id in members
+        except Exception as e:
+            self.log.warning(f"Failed to check space membership for {user_id}: {e}")
+            return False
 
     async def create_space(
         self,
@@ -1278,6 +1296,56 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.REACTION)
     async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
+        # Event RSVP: reactions on event description messages (any room)
+        relates_to = getattr(getattr(evt, "content", None), "relates_to", None)
+        if relates_to and getattr(relates_to, "event_id", None):
+            target_event_id = relates_to.event_id
+            key = getattr(relates_to, "key", None) or ""
+            if self.config.get("parent_room", ""):
+                row = await self.database.fetchrow(
+                    "SELECT room_id FROM community_events WHERE description_event_id = $1",
+                    target_event_id,
+                )
+                if row and await self.is_user_in_parent_space(evt.sender):
+                    event_room_id = row["room_id"]
+                    now_ms = int(time.time() * 1000)
+                    # Special case: ➖ reaction removes plus-one without changing status
+                    if event_utils.is_minus_one_reaction(key):
+                        await self.database.execute(
+                            """UPDATE event_rsvps
+                               SET plus_one = 0, updated_ts = $3
+                               WHERE event_room_id = $1 AND user_id = $2""",
+                            event_room_id,
+                            str(evt.sender),
+                            now_ms,
+                        )
+                        return  # handled
+                    # Normal RSVP updates (yes/maybe/no and ➕)
+                    rsvp = event_utils.rsvp_status_from_reaction_key(key)
+                    if rsvp:
+                        rsvp_status, plus_one = rsvp
+                        await self.database.execute(
+                            """INSERT INTO event_rsvps (event_room_id, user_id, rsvp_status, plus_one, updated_ts)
+                              VALUES ($1, $2, $3, $4, $5)
+                              ON CONFLICT (event_room_id, user_id)
+                              DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
+                                plus_one = event_rsvps.plus_one OR EXCLUDED.plus_one,
+                                updated_ts = EXCLUDED.updated_ts""",
+                            event_room_id,
+                            str(evt.sender),
+                            rsvp_status,
+                            1 if plus_one else 0,
+                            now_ms,
+                        )
+                        if rsvp_status in ("yes", "maybe"):
+                            try:
+                                members = await self.client.get_joined_members(event_room_id)
+                                if evt.sender not in members:
+                                    await self.client.invite_user(event_room_id, evt.sender)
+                            except Exception as e:
+                                self.log.warning(f"Failed to invite {evt.sender} to event room: {e}")
+                        return  # handled; skip activity tracking for this reaction
+
         if not self.config_manager.is_reaction_tracking_enabled():
             pass
         else:
@@ -1587,6 +1655,719 @@ class CommunityBot(Plugin):
             allow_html=True,
         )
 
+    @community.subcommand(
+        "event",
+        help="create and manage community events (in-person gatherings, meetings, etc.)",
+    )
+    @decorators.require_parent_room
+    async def event(self, evt: MessageEvent) -> None:
+        """Main event command - show usage."""
+        await evt.reply(
+            "Use !community event <subcommand>. Subcommands: create, list, describe, update, add-organizer, add-link, ics"
+        )
+
+    @event.subcommand("create", help="create a new event (you become the host)")
+    @command.argument("name", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_create(self, evt: MessageEvent, name: str) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community (space) members can create events.")
+            return
+        name = (name or "").strip()
+        if not name:
+            await evt.reply("Please provide an event name.")
+            return
+        if not self.config.get("community_slug", ""):
+            await evt.reply(
+                "No community slug configured. Please run the initialize command first."
+            )
+            return
+        sanitized = event_utils.sanitize_event_name(name)
+        if not sanitized:
+            await evt.reply("Event name must contain at least one letter or number.")
+            return
+        roomname = f"{name} (event)"
+        is_valid, conflicting = await self.validate_room_aliases([roomname], evt)
+        if not is_valid:
+            await evt.reply(f"Cannot create event: {conflicting[0]} already exists.")
+            return
+        result = await self.create_room(roomname, evt, event_room=True)
+        if not result:
+            return
+        room_id, room_alias = result
+        now_ms = int(time.time() * 1000)
+        topic = event_utils.format_event_topic(
+            name=name,
+            start_ts=0,
+            end_ts=None,
+            location=None,
+            host_id=str(evt.sender),
+            organizers=[],
+            description=None,
+            extra_links=[],
+            room_link=room_alias,
+            timezone_str=event_utils.DEFAULT_TIMEZONE,
+        )
+        try:
+            await self.client.send_state_event(
+                room_id, EventType.ROOM_TOPIC, {"topic": topic}
+            )
+        except Exception as e:
+            self.log.warning(f"Failed to set event room topic: {e}")
+        await self.database.execute(
+            """INSERT INTO community_events (
+                room_id, name, description, event_start_ts, event_end_ts,
+                location, host_id, organizers, extra_links, created_ts, timezone
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+            room_id,
+            name,
+            None,
+            0,
+            None,
+            None,
+            str(evt.sender),
+            "[]",
+            "[]",
+            now_ms,
+            event_utils.DEFAULT_TIMEZONE,
+        )
+        await evt.respond(
+            "Event created (time is in UTC until you set it). Use !community event update <room> --date YYYY-MM-DD --time HH:MM TZ to set date, time and timezone (e.g. --time 15:00 PST). "
+            "Use !community event describe <room> to post an event description with RSVP reactions."
+        )
+
+    @event.subcommand("list", help="list current and upcoming events (and recent past)")
+    @decorators.require_parent_room
+    async def event_list(self, evt: MessageEvent) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community members can see the event list.")
+            return
+        now_ms = int(time.time() * 1000)
+        cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        rows = await self.database.fetch(
+            """SELECT room_id, name, event_start_ts, location, host_id, timezone
+             FROM community_events
+             WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
+             ORDER BY event_start_ts ASC""",
+            cutoff_old_ms,
+        )
+        if not rows:
+            await evt.reply("No current or upcoming events (events older than 30 days are hidden).")
+            return
+        lines = []
+        for idx, r in enumerate(rows, 1):
+            rid = r["room_id"]
+            n = r["name"]
+            start_ts = r["event_start_ts"]
+            loc = r["location"]
+            host = r["host_id"]
+            tz = event_utils.get_event_timezone(r)
+            if start_ts:
+                when = event_utils._format_datetime(start_ts, None, tz)
+                if event_utils.is_utc_default(tz):
+                    when += " (UTC default — set with --time HH:MM TZ)"
+            else:
+                when = "TBD"
+            # Prefix with a 1-based index so users can reference events easily (e.g. describe 1)
+            line = f"[{idx}] <a href=\"https://matrix.to/#/{rid}\">{n}</a> — {when}"
+            if loc:
+                line += f" — {loc}"
+            line += f" (host: {host})"
+            lines.append(line)
+        await evt.respond(
+            "<b>Events</b> (current/upcoming and past 30 days):<br/>"
+            "Use <code>!community event describe &lt;index&gt;</code> or click the link to view details."
+            "<br/>Use <code>!community event attendees &lt;index&gt;</code> to see RSVPs and headcount."
+            "<br/><br/>"
+            + "<br/>".join(lines),
+            allow_html=True,
+        )
+
+    async def _get_event_row(self, room_id: str):
+        """Fetch event row by room_id. Returns None if not found."""
+        rows = await self.database.fetch(
+            "SELECT * FROM community_events WHERE room_id = $1", room_id
+        )
+        return rows[0] if rows else None
+
+    async def _can_manage_event(self, user_id: UserID, event_row: dict) -> bool:
+        """True if user is host, organizer, or community moderator."""
+        if not event_row:
+            return False
+        if event_row["host_id"] == str(user_id):
+            return True
+        organizers = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
+        if str(user_id) in organizers:
+            return True
+        return await self.user_permitted(user_id, 50)
+
+    @event.subcommand(
+        "describe",
+        help="post event description with RSVP reactions (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest)",
+    )
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_describe(self, evt: MessageEvent, room: str) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community members can describe events.")
+            return
+        raw_room = (room or "").strip()
+        room_id: Optional[str] = None
+        err: Optional[str] = None
+        # Support numeric or event-index arguments from the list, e.g. "1" or "event1"
+        if raw_room and not raw_room.startswith(("#", "!")):
+            m = re.match(r"^(?:event)?(\d+)$", raw_room, re.IGNORECASE)
+            if m:
+                idx = int(m.group(1))
+                now_ms = int(time.time() * 1000)
+                cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+                rows = await self.database.fetch(
+                    """SELECT room_id
+                       FROM community_events
+                       WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
+                       ORDER BY event_start_ts ASC""",
+                    cutoff_old_ms,
+                )
+                if not rows or idx < 1 or idx > len(rows):
+                    await evt.reply("That event index does not exist. Use !community event list to see valid indexes.")
+                    return
+                room_id = rows[idx - 1]["room_id"]
+            else:
+                room_id, err = await event_utils.resolve_room_id(
+                    self.client, raw_room or None, evt.room_id
+                )
+        else:
+            room_id, err = await event_utils.resolve_room_id(
+                self.client, raw_room or None, evt.room_id
+            )
+        if err or not room_id:
+            await evt.reply(err or "Please specify an event room (alias or ID).")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        event_tz = event_utils.get_event_timezone(event_row)
+        html = event_utils.format_event_description_html(
+            name=event_row["name"],
+            start_ts=event_row["event_start_ts"],
+            end_ts=event_row["event_end_ts"],
+            location=event_row["location"],
+            host_id=event_row["host_id"],
+            organizers=orgs,
+            description=event_row["description"],
+            extra_links=links,
+            room_link="",
+            room_id=room_id,
+            timezone_str=event_tz,
+        )
+        msg_event_id = await evt.respond(html, allow_html=True)
+        if msg_event_id:
+            # Older maubot/matrix clients may not have send_reaction helper,
+            # so send m.reaction events manually.
+            for key in ("👍", "👎", "🤔", "➕"):
+                await self.client.send_message_event(
+                    evt.room_id,
+                    EventType.REACTION,
+                    {
+                        "m.relates_to": {
+                            "rel_type": "m.annotation",
+                            "event_id": msg_event_id,
+                            "key": key,
+                        }
+                    },
+                )
+            await self.database.execute(
+                """UPDATE community_events SET description_event_id = $1, description_room_id = $2
+                 WHERE room_id = $3""",
+                msg_event_id,
+                evt.room_id,
+                room_id,
+            )
+
+    @event.subcommand(
+        "update",
+        help="update event details. Use: update <room> [--date YYYY-MM-DD] [--time HH:MM or 'HH:MM - HH:MM'] [--location ...] [--description ...]",
+    )
+    @command.argument("args", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_update(self, evt: MessageEvent, args: str) -> None:
+        parts = (args or "").strip().split()
+        if not parts:
+            await evt.reply("Usage: !community event update <room> [--date YYYY-MM-DD] [--time HH:MM or '10:00 - 18:00'] [--location ...] [--description ...]")
+            return
+        # If first token is a flag (e.g. --time), use current room
+        if parts[0].startswith("--"):
+            room_arg = None
+            rest = (args or "").strip()
+        else:
+            room_arg = parts[0]
+            rest = " ".join(parts[1:])
+        room_id, err = await event_utils.resolve_room_id(
+            self.client, room_arg, evt.room_id
+        )
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply("Only the event host, organizers, or community moderators can update the event.")
+            return
+        date_val = time_val = location_val = description_val = None
+        # Split on " --" so time spans like "10:00 AM - 6:00 PM PST" stay in one chunk
+        raw_chunks = (rest or "").split(" --")
+        for raw in raw_chunks:
+            s = raw.strip().lstrip("-").strip()
+            if not s:
+                continue
+            parts_in = s.split(None, 1)
+            key = (parts_in[0] or "").lower()
+            val = parts_in[1].strip() if len(parts_in) > 1 else ""
+            if key == "date" and val:
+                date_val = val.split()[0]
+            elif key == "time" and val:
+                time_val = val
+            elif key == "location":
+                location_val = val
+            elif key == "description":
+                description_val = val
+        try:
+            event_start_ts = int(event_row["event_start_ts"])
+            event_end_ts = event_row["event_end_ts"]
+            # Current stored timezone (e.g. UTC, PST, America/Los_Angeles)
+            current_timezone = event_utils.get_event_timezone(event_row)
+            new_timezone = current_timezone
+            if date_val or time_val:
+                from datetime import datetime as dt, timezone as tz
+
+                # Determine the existing local date/time in the event's timezone
+                base_zone = event_utils._resolve_timezone(current_timezone) or tz.utc
+                if event_start_ts > 0:
+                    base_local_start = dt.fromtimestamp(
+                        event_start_ts / 1000.0, tz=base_zone
+                    )
+                    existing_date = base_local_start.date()
+                else:
+                    base_local_start = None
+                    existing_date = dt.now(tz.utc).date()
+
+                # Target date: explicit --date if provided, otherwise the existing event date
+                if date_val:
+                    target_date = dt.strptime(date_val, "%Y-%m-%d").date()
+                else:
+                    target_date = existing_date
+
+                # If the user passed a US timezone abbreviation (PST/PDT/etc),
+                # make a best-guess adjustment for daylight vs standard time
+                # based on the event date, and warn them to prefer IANA names.
+                adjust_note = None
+                if time_val:
+                    import re as _re
+                    # Normalize span separator so time ranges like "9:00am-3:00pm PST"
+                    # become "9:00am - 3:00pm PST" for the span parser.
+                    time_val = _re.sub(r"\s*-\s*", " - ", time_val.strip(), count=1)
+
+                    m_tz = _re.search(r"\b([A-Za-z]{2,5})\b$", time_val.strip())
+                    if m_tz:
+                        orig_tz = m_tz.group(1).upper()
+                        # Approximate US DST months (Mar–Oct) as daylight time
+                        month = target_date.month
+                        is_dst_month = 3 <= month <= 10
+                        desired_tz = orig_tz
+                        if orig_tz in ("PST", "PDT"):
+                            desired_tz = "PDT" if is_dst_month else "PST"
+                        elif orig_tz in ("MST", "MDT"):
+                            desired_tz = "MDT" if is_dst_month else "MST"
+                        elif orig_tz in ("CST", "CDT"):
+                            desired_tz = "CDT" if is_dst_month else "CST"
+                        elif orig_tz in ("EST", "EDT"):
+                            desired_tz = "EDT" if is_dst_month else "EST"
+                        elif orig_tz in ("AKST", "AKDT"):
+                            desired_tz = "AKDT" if is_dst_month else "AKST"
+                        # Only rewrite if our guess differs from what was typed
+                        if desired_tz != orig_tz:
+                            start, end = m_tz.span(1)
+                            time_val = time_val[:start] + desired_tz + time_val[end:]
+                            adjust_note = (
+                                f"Interpreting {orig_tz} as {desired_tz} on {target_date.isoformat()} "
+                                "based on daylight saving time. For precise control, use an IANA timezone "
+                                "like America/Los_Angeles instead of an abbreviation."
+                            )
+
+                if time_val and not date_val:
+                    # Only --time provided: change time (and possibly timezone), keep the existing date
+                    event_start_ts, event_end_ts, new_timezone = (
+                        event_utils.parse_time_span_with_timezone(
+                            time_val, target_date, default_tz=new_timezone
+                        )
+                    )
+                elif time_val and date_val:
+                    # Both --date and --time: set both explicitly
+                    event_start_ts, event_end_ts, new_timezone = (
+                        event_utils.parse_time_span_with_timezone(
+                            time_val, target_date, default_tz=new_timezone
+                        )
+                    )
+                elif date_val and not time_val:
+                    # Only --date provided: move to a new date, keep the existing local time span
+                    if base_local_start is not None:
+                        start_str = base_local_start.strftime("%H:%M")
+                        if (
+                            event_end_ts is not None
+                            and int(event_end_ts) > event_start_ts
+                        ):
+                            base_local_end = dt.fromtimestamp(
+                                int(event_end_ts) / 1000.0, tz=base_zone
+                            )
+                            end_str = base_local_end.strftime("%H:%M")
+                            span_str = f"{start_str} - {end_str}"
+                        else:
+                            span_str = start_str
+                    else:
+                        # No existing time: default to 12:00 on the new date
+                        span_str = "12:00"
+                    event_start_ts, event_end_ts, new_timezone = (
+                        event_utils.parse_time_span_with_timezone(
+                            span_str, target_date, default_tz=new_timezone
+                        )
+                    )
+            # Build UPDATE from ordered (column, value) so params match $1, $2, ...
+            set_pairs = []
+            if location_val is not None:
+                set_pairs.append(("location", location_val))
+            if description_val is not None:
+                set_pairs.append(("description", description_val))
+            if date_val or time_val:
+                set_pairs.append(("event_start_ts", event_start_ts))
+                set_pairs.append(("event_end_ts", event_end_ts))
+                set_pairs.append(("timezone", new_timezone))
+            event_room_id = str(event_row["room_id"])
+            if set_pairs:
+                placeholders = ", ".join(
+                    f"{col} = ${i}" for i, (col, _) in enumerate(set_pairs, 1)
+                )
+                params = [v for _, v in set_pairs]
+                # Use room_id from the row we read so UPDATE always targets the same row
+                params.append(event_room_id)
+                where_idx = len(params)
+                query = f"UPDATE community_events SET {placeholders} WHERE room_id = ${where_idx}"
+                update_result = await self.database.execute(query, *params)
+                self.log.debug(
+                    "event update: query result=%s room_id=%s set_pairs=%s",
+                    update_result, event_room_id, [c for c, _ in set_pairs],
+                )
+            # Re-fetch so topic and describe reflect DB; also verify UPDATE took effect
+            rows_after = await self.database.fetch(
+                "SELECT * FROM community_events WHERE room_id = $1", event_room_id
+            )
+            row_after = rows_after[0] if rows_after else None
+            if not row_after:
+                await evt.reply("Event room no longer in database; cannot update.")
+                return
+            if date_val or time_val:
+                # Verify the write persisted (avoids false checkmark when UPDATE affects 0 rows)
+                got_start = int(row_after["event_start_ts"])
+                got_end = row_after["event_end_ts"] and int(row_after["event_end_ts"])
+                got_tz = (row_after["timezone"] or "").strip() or "UTC"
+                if got_start != event_start_ts or got_end != event_end_ts or got_tz != new_timezone:
+                    self.log.warning(
+                        "event update: DB not updated (got start=%s end=%s tz=%s; expected start=%s end=%s tz=%s)",
+                        got_start, got_end, got_tz, event_start_ts, event_end_ts, new_timezone,
+                    )
+                    await evt.reply(
+                        "Event time was not saved (database update did not persist). "
+                        "Try again or contact an admin. Check server logs for details."
+                    )
+                    return
+            # Build topic from current DB row so it always matches what describe shows
+            orgs = event_utils.parse_organizers_json(row_after["organizers"] or "[]")
+            links = event_utils.parse_extra_links_json(row_after["extra_links"] or "[]")
+            topic_tz = event_utils.get_event_timezone(row_after)
+            topic = event_utils.format_event_topic(
+                name=row_after["name"],
+                start_ts=int(row_after["event_start_ts"]),
+                end_ts=int(row_after["event_end_ts"]) if row_after["event_end_ts"] else None,
+                location=row_after["location"],
+                host_id=row_after["host_id"],
+                organizers=orgs,
+                description=row_after["description"],
+                extra_links=links,
+                room_link=f"https://matrix.to/#/{event_room_id}",
+                timezone_str=topic_tz,
+            )
+            await self.client.send_state_event(
+                event_room_id, EventType.ROOM_TOPIC, {"topic": topic}
+            )
+            if date_val or time_val:
+                # If we made a DST-related abbreviation guess, surface that to the user
+                if locals().get("adjust_note"):
+                    await evt.reply(adjust_note)
+            await evt.react("✅")
+        except (ValueError, TypeError) as e:
+            hint = getattr(event_utils, "TIME_FORMAT_HINT", "Use --date YYYY-MM-DD and --time HH:MM or HH:MM TZ (e.g. 15:00 PST).")
+            await evt.reply(f"Invalid date/time: {e}. {hint}")
+
+    @event.subcommand(
+        "add-link",
+        help="add an extra link (e.g. signup sheet) to the event. Usage: add-link <room> --url URL [--label TEXT] (or omit <room> in the event room)",
+    )
+    @command.argument("args", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_add_link(self, evt: MessageEvent, args: str) -> None:
+        parts = (args or "").strip().split()
+        if not parts:
+            await evt.reply(
+                "Usage: !community event add-link <room> --url URL [--label TEXT]\n"
+                "You can omit <room> when running this in the event room."
+            )
+            return
+        # If first token is a flag (e.g. --url), use current room
+        if parts[0].startswith("--"):
+            room_arg = None
+            rest = (args or "").strip()
+        else:
+            room_arg = parts[0]
+            rest = " ".join(parts[1:])
+        room_id, err = await event_utils.resolve_room_id(
+            self.client, room_arg, evt.room_id
+        )
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply(
+                "Only the event host, organizers, or community moderators can add links."
+            )
+            return
+        # Parse flags from the remaining args: --url, --label
+        label_val = None
+        url_val = None
+        raw_chunks = (rest or "").split(" --")
+        for raw in raw_chunks:
+            s = raw.strip().lstrip("-").strip()
+            if not s:
+                continue
+            parts_in = s.split(None, 1)
+            key = (parts_in[0] or "").lower()
+            val = parts_in[1].strip() if len(parts_in) > 1 else ""
+            if key == "url" and val:
+                url_val = val
+            elif key == "label" and val:
+                label_val = val
+        # Backwards-compat: if no --url flag was found, treat rest as "<label> <url>"
+        if not url_val and rest:
+            tokens = rest.split()
+            if tokens:
+                url_val = tokens[-1]
+                if len(tokens) > 1:
+                    label_val = " ".join(tokens[:-1])
+        if not url_val or not url_val.strip():
+            await evt.reply("Please provide a URL.")
+            return
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        label_val = (label_val or "Link").strip()
+        links.append({"label": label_val, "url": url_val.strip()})
+        await self.database.execute(
+            "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
+            json.dumps(links),
+            room_id,
+        )
+        event_tz = event_utils.get_event_timezone(event_row)
+        topic = event_utils.format_event_topic(
+            name=event_row["name"],
+            start_ts=event_row["event_start_ts"],
+            end_ts=event_row["event_end_ts"],
+            location=event_row["location"],
+            host_id=event_row["host_id"],
+            organizers=event_utils.parse_organizers_json(
+                event_row["organizers"] or "[]"
+            ),
+            description=event_row["description"],
+            extra_links=links,
+            room_link=f"https://matrix.to/#/{room_id}",
+            timezone_str=event_tz,
+        )
+        try:
+            await self.client.send_state_event(
+                room_id, EventType.ROOM_TOPIC, {"topic": topic}
+            )
+        except Exception as e:
+            self.log.warning(f"Failed to update event room topic: {e}")
+        await evt.react("✅")
+
+    @event.subcommand("attendees", help="show current RSVPs and headcount for an event")
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_attendees(self, evt: MessageEvent, room: str) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community members can see event attendees.")
+            return
+        raw_room = (room or "").strip()
+        room_id: Optional[str] = None
+        err: Optional[str] = None
+        # Support numeric or event-index arguments from the list, e.g. "1" or "event1"
+        if raw_room and not raw_room.startswith(("#", "!")):
+            m = re.match(r"^(?:event)?(\d+)$", raw_room, re.IGNORECASE)
+            if m:
+                idx = int(m.group(1))
+                now_ms = int(time.time() * 1000)
+                cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+                rows = await self.database.fetch(
+                    """SELECT room_id
+                       FROM community_events
+                       WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
+                       ORDER BY event_start_ts ASC""",
+                    cutoff_old_ms,
+                )
+                if not rows or idx < 1 or idx > len(rows):
+                    await evt.reply("That event index does not exist. Use !community event list to see valid indexes.")
+                    return
+                room_id = rows[idx - 1]["room_id"]
+            else:
+                room_id, err = await event_utils.resolve_room_id(
+                    self.client, raw_room or None, evt.room_id
+                )
+        else:
+            room_id, err = await event_utils.resolve_room_id(
+                self.client, raw_room or None, evt.room_id
+            )
+        if err or not room_id:
+            await evt.reply(err or "Please specify an event room (alias, ID, or index).")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        rows = await self.database.fetch(
+            "SELECT user_id, rsvp_status, plus_one FROM event_rsvps WHERE event_room_id = $1",
+            room_id,
+        )
+        if not rows:
+            await evt.reply("No one has RSVPed to this event yet.")
+            return
+        yes_list = []
+        maybe_list = []
+        no_list = []
+        headcount = 0
+        bot_mxid = self.client.mxid
+        for r in rows:
+            user = r["user_id"]
+            # Do not count the bot itself in any list or headcount
+            if user == bot_mxid:
+                continue
+            status = (r["rsvp_status"] or "").lower()
+            plus_one = 1 if r["plus_one"] else 0
+            display = user
+            if plus_one:
+                display += " (+1)"
+            if status == "yes":
+                yes_list.append(display)
+                headcount += 1 + plus_one
+            elif status == "maybe":
+                maybe_list.append(display)
+                headcount += 1 + plus_one
+            elif status == "no":
+                no_list.append(display)
+        parts = [
+            f"<b>Attendees for {event_row['name']}</b>",
+            f"Total headcount (including +1s): <b>{headcount}</b>",
+        ]
+        if yes_list:
+            parts.append("<br/><b>Yes:</b><br/>" + "<br/>".join(yes_list))
+        if maybe_list:
+            parts.append("<br/><b>Maybe:</b><br/>" + "<br/>".join(maybe_list))
+        if no_list:
+            parts.append("<br/><b>No:</b><br/>" + "<br/>".join(no_list))
+        await evt.respond("<br/>".join(parts), allow_html=True)
+
+    @event.subcommand("add-organizer", help="add an organizer who can manage the event")
+    @command.argument("room", required=True)
+    @command.argument("mxid", "Matrix ID", required=True)
+    @decorators.require_parent_room
+    async def event_add_organizer(self, evt: MessageEvent, room: str, mxid: UserID) -> None:
+        room_id, err = await event_utils.resolve_room_id(
+            self.client, room.strip(), None
+        )
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply("Only the event host, organizers, or community moderators can add organizers.")
+            return
+        orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
+        mxid_str = str(mxid)
+        if mxid_str in orgs:
+            await evt.reply(f"{mxid} is already an organizer.")
+            return
+        orgs.append(mxid_str)
+        await self.database.execute(
+            "UPDATE community_events SET organizers = $1 WHERE room_id = $2",
+            json.dumps(orgs),
+            room_id,
+        )
+        await evt.react("✅")
+
+    @event.subcommand("ics", help="generate and upload an .ics calendar file for the event")
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_ics(self, evt: MessageEvent, room: str) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community members can download event .ics.")
+            return
+        room_id, err = await event_utils.resolve_room_id(
+            self.client, (room or "").strip() or None, evt.room_id
+        )
+        if err or not room_id:
+            await evt.reply(err or "Please specify an event room (alias or ID).")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        ics_content = event_utils.generate_ics(
+            name=event_row["name"],
+            start_ts=event_row["event_start_ts"],
+            end_ts=event_row["event_end_ts"],
+            location=event_row["location"],
+            description=event_row["description"],
+            room_id=room_id,
+            uid_suffix=event_row["room_id"].replace("!", "").replace(":", "-")[:32],
+        )
+        try:
+            import io
+            data = io.BytesIO(ics_content.encode("utf-8"))
+            mxc = await self.client.upload_media(
+                data,
+                "text/calendar",
+                "event.ics",
+            )
+            await self.client.send_message(
+                evt.room_id,
+                MediaMessageEventContent(
+                    msgtype=MessageType.FILE,
+                    body="event.ics",
+                    url=mxc,
+                    filename="event.ics",
+                ),
+            )
+            await evt.reply("Calendar file attached. Add it to your calendar to get the event.")
+        except Exception as e:
+            self.log.exception("Failed to upload .ics")
+            await evt.reply(f"Failed to generate or upload .ics: {e}")
+
     @community.subcommand("purge", help="kick users for excessive inactivity")
     @decorators.require_parent_room
     @decorators.require_permission()
@@ -1689,6 +2470,7 @@ class CommunityBot(Plugin):
         power_level_override: Optional[PowerLevelStateEventContent] = None,
         creation_content: Optional[dict] = None,
         invitees: Optional[list[str]] = None,
+        event_room: bool = False,
     ) -> tuple[str, str] | None:
         """Create a new room and add it to the parent space.
 
@@ -1719,6 +2501,11 @@ class CommunityBot(Plugin):
                 if evt:
                     await evt.respond(error_msg)
                 return None
+
+            # Event rooms: default unencrypted unless config override
+            if event_room:
+                force_encryption = self.config.get("events_encrypt_rooms", False)
+                force_unencryption = not force_encryption
 
             # Prepare room creation data
             alias_localpart, server, room_invitees, parent_room = (
@@ -2190,7 +2977,7 @@ class CommunityBot(Plugin):
 
                 # Also check if the old space is a child of the community parent space
                 # and ensure the new space doesn't automatically inherit that relationship
-                if room_id == self.config.get("parent_room"):
+                if room_id == self.config.get("parent_room", ""):
                     self.log.info(
                         "Old space is the community parent space - new space will be independent"
                     )
