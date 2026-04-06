@@ -809,8 +809,8 @@ class CommunityBot(Plugin):
             if not changed_users:
                 return
 
-            # Get all rooms in the space
-            space_rooms = await self.client.get_joined_rooms()
+            # Get all rooms in the space (excludes non-child rooms like banlist policy rooms)
+            space_rooms = await self.get_space_roomlist()
             success_rooms = []
             failed_rooms = []
 
