@@ -128,6 +128,17 @@ proactive_banning: true
 # redactions are processed every minute, they are not immediate.
 redact_on_ban: true
 
+# Crowd Moderation and Report Emojis
+# If Users react with the following emojis to a (spam?) message, a message will be send to the notification channel containing a link to that message. Administrators have to decide manually how to deal with the message reported.
+
+# Emojis that trigger a message report
+report_emojis:
+  - "🚩"
+  - "⚠️"
+
+# Automatically delete the message if more than 50% of the room members reported it. Redact notification will be sent to notification room.
+auto_redact_majority: true
+
 # should we verify that users are human before allowing them to send messages?
 # can be boolean (true/false) for all-or-nothing behavior,
 # or pass a list of room IDs to only verify users in certain rooms
