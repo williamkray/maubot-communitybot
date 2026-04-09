@@ -7,7 +7,7 @@ supposed to be.
 
 # important upgrade notes
 
-## v0.4
+## v0.4.1
 
 📢 Reaction-Based Reporting: Community members can now flag suspicious messages or spam by simply reacting with specific emojis (default: 🚩 or ⚠️). The bot immediately alerts moderators in their private channel with a direct link to the incident.
 
@@ -16,6 +16,8 @@ supposed to be.
 🛡️ Sync-Retry Safeguards: We've implemented advanced event tracking to prevent "ghost notifications" caused by Matrix sync retries. This ensures that each report is processed exactly once.
 
 🧹 Code Refinement: Under the hood, we’ve cleaned up the codebase, fixed indentation issues, and optimized member synchronization performance for larger spaces.
+
+🔗 You can now use the new {room_link} variable in your configuration to display a clickable room link, while the existing {room} variable remains fully backward compatible for plain text names.
 
 ## v0.3
         
