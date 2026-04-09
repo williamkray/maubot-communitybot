@@ -7,6 +7,16 @@ supposed to be.
 
 # important upgrade notes
 
+## v0.4
+
+📢 Reaction-Based Reporting: Community members can now flag suspicious messages or spam by simply reacting with specific emojis (default: 🚩 or ⚠️). The bot immediately alerts moderators in their private channel with a direct link to the incident.
+
+⚖️ Majority-Based Auto-Redaction: For the first time, the bot can act on community consensus. If more than 50% of the human members in a room flag a message, the bot will automatically redact it. This is a game-changer for handling overnight spam attacks when moderators are asleep.
+
+🛡️ Sync-Retry Safeguards: We've implemented advanced event tracking to prevent "ghost notifications" caused by Matrix sync retries. This ensures that each report is processed exactly once.
+
+🧹 Code Refinement: Under the hood, we’ve cleaned up the codebase, fixed indentation issues, and optimized member synchronization performance for larger spaces.
+
 ## v0.3
         
 New functionality to support room v12 and newer has been added, as well as some significant restructuring of the code
