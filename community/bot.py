@@ -1020,17 +1020,19 @@ class CommunityBot(Plugin):
                         roomnamestate = await self.client.get_state_event(
                             evt.room_id, "m.room.name"
                         )
-                        room_name_text = getattr(roomnamestate, "name", str(evt.room_id))
+                        
+                        room_text = getattr(roomnamestate, "name", str(evt.room_id))
                     except Exception:
-                        room_name_text = str(evt.room_id)
+                        room_text = str(evt.room_id)
                     
-                    room_link = f"<a href='https://look.ztfr.eu/#/{evt.room_id}'>{room_name_text}</a>"
+                    room_link = f"<a href='https://matrix.to/#/{evt.room_id}'>{room_text}</a>"
                     
                     notification_message = self.config[
                         "join_notification_message"
                     ].format(
                         user=evt.sender, 
-                        room=room_link,
+                        room=room_text,  
+                        room_link=room_link,
                         room_id=evt.room_id
                     )
                     await self.client.send_notice(
@@ -1341,13 +1343,15 @@ class CommunityBot(Plugin):
 
             try:
                 roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
+                # Wir nennen es intern erst einmal room_text
                 room_text = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
             except:
                 room_text = str(evt.room_id)
                 
             # Klickable Links
-            room_link = f"<a href='https://look.ztfr.eu/#/{evt.room_id}'>{room_text}</a>"
-            message_link = f"https://look.ztfr.eu/#/{evt.room_id}/{target_event_id}"
+            room = room_text
+            room_link = f"<a href='https://matrix.to/#/{evt.room_id}'>{room_text}</a>"
+            message_link = f"https://matrix.to/#/{evt.room_id}/{target_event_id}"
 
             # --- AUTO-REDACT LOGIC ---
             if self.config.get("auto_redact_majority", False):
