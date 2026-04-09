@@ -145,11 +145,11 @@ banlists in read-only mode, just have your bot join one of these banlist rooms, 
 members against these lists and immediately ban offenders. there is no intention to add new policy creation features
 to this bot, as those concepts are probably best left to more featureful tools.
 
-## Crowd Moderation
+## crowd moderation
 
 The bot includes a community-driven reporting system that allows users to flag problematic content without needing direct moderator intervention for every incident.
 
-### How it works
+### how it works
 1. **Reporting**: When a user reacts to a message with a configured emoji (e.g., 🚩 or ⚠️), the bot sends a notification to the `notification_room` containing a link to the message and the room name.
 2. **Auto-Redaction**: If `auto_redact_majority` is enabled, the bot tracks unique reporters per message. If the number of reports exceeds 50% of the human members in that room, the bot automatically redacts the message to prevent further harm.
 3. **Transparency**: An automated notice is sent to the notification room whenever a message is auto-redacted, citing the community vote as the reason.
