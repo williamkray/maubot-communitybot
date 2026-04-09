@@ -1629,7 +1629,7 @@ class CommunityBot(Plugin):
                         purge_list[user].append(roomname)
                     else:
                         purge_list[user].append(room)
-                    time.sleep("sleep")
+                    await asyncio.sleep(self.config["sleep"])
                 except MNotFound:
                     pass
                 except Exception as e:
