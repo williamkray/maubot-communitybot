@@ -136,7 +136,7 @@ report_emojis:
   - "🚩"
   - "⚠️"
 
-# Automatically delete the message if more than 50% of the room members reported it. Redact notification will be sent to notification room.
+# Automatically redact messages if > 50% of human members report them. Redact notification will be sent to notification room.
 auto_redact_majority: true
 
 # should we verify that users are human before allowing them to send messages?
