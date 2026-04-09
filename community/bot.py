@@ -1020,16 +1020,17 @@ class CommunityBot(Plugin):
                         roomnamestate = await self.client.get_state_event(
                             evt.room_id, "m.room.name"
                         )
-
-                        roomname = getattr(roomnamestate, "name", str(evt.room_id))
+                        room_name_text = getattr(roomnamestate, "name", str(evt.room_id))
                     except Exception:
-                        roomname = str(evt.room_id)
+                        room_name_text = str(evt.room_id)
+                    
+                    room_link = f"<a href='https://look.ztfr.eu/#/{evt.room_id}'>{room_name_text}</a>"
                     
                     notification_message = self.config[
                         "join_notification_message"
                     ].format(
                         user=evt.sender, 
-                        room=roomname, 
+                        room=room_link,
                         room_id=evt.room_id
                     )
                     await self.client.send_notice(
@@ -1303,6 +1304,7 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.REACTION)
     async def handle_reactions(self, evt: MessageEvent) -> None:
+    
         if evt.sender == self.client.mxid:
             return
 
@@ -1339,13 +1341,15 @@ class CommunityBot(Plugin):
 
             try:
                 roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
-                roomname = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
+                room_text = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
             except:
-                roomname = str(evt.room_id)
+                room_text = str(evt.room_id)
+                
+            # Klickable Links
+            room_link = f"<a href='https://look.ztfr.eu/#/{evt.room_id}'>{room_text}</a>"
+            message_link = f"https://look.ztfr.eu/#/{evt.room_id}/{target_event_id}"
 
-            message_link = f"https://matrix.to/#/{evt.room_id}/{target_event_id}"
-
-            # --- AUTO-REDACT LOGIK ---
+            # --- AUTO-REDACT LOGIC ---
             if self.config.get("auto_redact_majority", False):
                 try:
                     members = await self.client.get_joined_members(evt.room_id)
@@ -1361,7 +1365,7 @@ class CommunityBot(Plugin):
                         
                         notification = (
                             f"<b>Message Auto-Redacted</b> 🗑️<br>"
-                            f"<b>Room:</b> {roomname}<br>"
+                            f"<b>Room:</b> {room_link}<br>"
                             f"<b>Reason:</b> Community majority vote reached ({current_reports} out of {human_count} members).<br>"
                             f"<b>Context:</b> <a href='{message_link}'>Original Event Link</a>"
                         )
@@ -1376,7 +1380,7 @@ class CommunityBot(Plugin):
                 notification = (
                     f"<b>Message Reported</b> 🚨<br>"
                     f"<b>First Reporter:</b> {evt.sender}<br>"
-                    f"<b>Room:</b> {roomname}<br>"
+                    f"<b>Room:</b> {room_link}<br>"
                     f"<b>Action:</b> <a href='{message_link}'>Click here to inspect and moderate</a>"
                 )
                 try:
