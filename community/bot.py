@@ -2579,10 +2579,14 @@ class CommunityBot(Plugin):
                         f"Parent room is modern (v{parent_version}), bot is not creator, power level set to 1000"
                     )
             else:
-                # In legacy parent rooms, ensure bot has highest power level
-                user_power_levels[self.client.mxid] = 1000
+                # In legacy parent rooms, keep the bot at its actual current PL (cannot self-promote)
+                bot_pl = parent_power_levels.users.get(
+                    self.client.mxid,
+                    getattr(parent_power_levels, "users_default", 0),
+                )
+                user_power_levels[self.client.mxid] = bot_pl
                 self.log.info(
-                    f"Parent room is legacy (v{parent_version}), bot power level set to 1000"
+                    f"Parent room is legacy (v{parent_version}), bot power level retained at {bot_pl}"
                 )
 
             for room in roomlist:
@@ -2695,20 +2699,15 @@ class CommunityBot(Plugin):
                             else:
                                 mapped_power_levels[user] = level
 
-                        # Handle bot power level based on whether it's a creator in the parent
-                        if self.client.mxid in parent_creators:
-                            # Bot is a creator in parent, but this is a legacy room
-                            # Set bot to highest power level since creators don't have unlimited power in legacy rooms
-                            mapped_power_levels[self.client.mxid] = 1000
-                            self.log.info(
-                                f"Bot is creator in parent but target is legacy room - setting power level to 1000"
-                            )
-                        else:
-                            # Bot is not a creator in parent, set to highest power level
-                            mapped_power_levels[self.client.mxid] = 1000
-                            self.log.info(
-                                f"Bot is not creator in parent, setting power level to 1000 in legacy target room"
-                            )
+                        # In a legacy target room, keep the bot at its actual current PL (cannot self-promote)
+                        bot_pl = room_power_levels.users.get(
+                            self.client.mxid,
+                            getattr(room_power_levels, "users_default", 0),
+                        )
+                        mapped_power_levels[self.client.mxid] = bot_pl
+                        self.log.info(
+                            f"Target room is legacy, bot power level retained at {bot_pl} in {roomname or room}"
+                        )
 
                         room_power_levels.users = mapped_power_levels
 
@@ -2717,7 +2716,18 @@ class CommunityBot(Plugin):
                         self.log.info(
                             f"Both rooms are legacy - direct power level transfer"
                         )
-                        room_power_levels.users = user_power_levels
+                        # Capture the bot's current PL in this child room before overwriting.
+                        # This is always the value we use — the bot cannot self-promote above
+                        # its current PL, and we must not demote it if it's higher than the parent.
+                        child_bot_pl = room_power_levels.users.get(
+                            self.client.mxid,
+                            getattr(room_power_levels, "users_default", 0),
+                        )
+                        room_power_levels.users = user_power_levels.copy()
+                        room_power_levels.users[self.client.mxid] = child_bot_pl
+                        self.log.info(
+                            f"Both rooms legacy: bot PL retained at {child_bot_pl} in {roomname or room}"
+                        )
 
                     # Send the updated power levels to this room
                     await self.client.send_state_event(
@@ -2751,7 +2761,7 @@ class CommunityBot(Plugin):
             else:
                 results += f"<b>Mapping Strategy:</b> Parent room is legacy (v{parent_version}), using traditional power level system.<br />"
                 results += (
-                    "• Bot power level set to 1000 for administrative control<br />"
+                    "• Bot power level retained at its current level in legacy rooms<br />"
                 )
                 results += "• Direct power level transfer to legacy child rooms<br />"
                 results += "• Modern child rooms preserve their creator power levels<br /><br />"
