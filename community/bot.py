@@ -36,6 +36,7 @@ from mautrix.types import (
     JoinRulesStateEventContent,
     JoinRule,
     RoomCreatePreset,
+    RelationType,
 )
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
@@ -93,12 +94,15 @@ class Config(BaseProxyConfig):
         helper.copy("verification_message")
         helper.copy("invite_power_level")
         helper.copy("room_version")
+        helper.copy("report_emojis")
+        helper.copy("auto_redact_majority")
 
 
 class CommunityBot(Plugin):
 
     _redaction_tasks: asyncio.Task = None
     _verification_states: Dict[str, Dict] = {}
+    _report_counts: Dict[str, set] = {}
 
     async def start(self) -> None:
         await super().start()
@@ -1012,18 +1016,21 @@ class CommunityBot(Plugin):
                     pass
                     
                 if self.config["notification_room"]:
-                    roomnamestate = await self.client.get_state_event(
-                         evt.room_id, "m.room.name"
-                    )
-                    
-                    roomname = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
+                    try:
+                        roomnamestate = await self.client.get_state_event(
+                            evt.room_id, "m.room.name"
+                        )
+
+                        roomname = getattr(roomnamestate, "name", str(evt.room_id))
+                    except Exception:
+                        roomname = str(evt.room_id)
                     
                     notification_message = self.config[
                         "join_notification_message"
                     ].format(
                         user=evt.sender, 
                         room=roomname, 
-                        room_id=evt.room_id  # <--- Das ist neu!
+                        room_id=evt.room_id
                     )
                     await self.client.send_notice(
                         self.config["notification_room"], html=notification_message
@@ -1295,17 +1302,87 @@ class CommunityBot(Plugin):
                 await self.upsert_user_timestamp(evt.sender, evt.timestamp)
 
     @event.on(EventType.REACTION)
-    async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
-        if not self.config_manager.is_reaction_tracking_enabled():
-            pass
-        else:
+    async def handle_reactions(self, evt: MessageEvent) -> None:
+        if evt.sender == self.client.mxid:
+            return
+
+        if self.config_manager.is_reaction_tracking_enabled():
             rooms_to_manage = await self.get_space_roomlist()
-            # only attempt to track rooms in the space, ignore any other rooms
-            # the bot may happen to be in line banlist policy rooms etc.
+            if evt.room_id in rooms_to_manage:
+                await self.upsert_user_timestamp(evt.sender, evt.timestamp)
+
+        if not self.config.get("notification_room", ""):
+            return
+
+        relates_to = evt.content.relates_to
+        if not relates_to or relates_to.rel_type != RelationType.ANNOTATION:
+            return
+
+        emoji = relates_to.key
+        report_emojis = self.config.get("report_emojis", ["🚩", "⚠️"])
+
+        if emoji in report_emojis:
+            rooms_to_manage = await self.get_space_roomlist()
             if evt.room_id not in rooms_to_manage:
                 return
-            else:
-                await self.upsert_user_timestamp(evt.sender, evt.timestamp)
+
+            target_event_id = relates_to.event_id
+            
+            if target_event_id not in self._report_counts:
+                self._report_counts[target_event_id] = set()
+                
+            if evt.sender in self._report_counts[target_event_id]:
+                return
+            
+            self._report_counts[target_event_id].add(evt.sender)
+            current_reports = len(self._report_counts[target_event_id])
+
+            try:
+                roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
+                roomname = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
+            except:
+                roomname = str(evt.room_id)
+
+            message_link = f"https://matrix.to/#/{evt.room_id}/{target_event_id}"
+
+            # --- AUTO-REDACT LOGIK ---
+            if self.config.get("auto_redact_majority", False):
+                try:
+                    members = await self.client.get_joined_members(evt.room_id)
+                    human_count = len([m for m in members.keys() if m != self.client.mxid])
+                    threshold = human_count / 2
+
+                    if current_reports > threshold:
+                        await self.client.redact(
+                            evt.room_id, 
+                            target_event_id, 
+                            reason=f"Auto-redacted: Reached majority vote ({current_reports}/{human_count} users)"
+                        )
+                        
+                        notification = (
+                            f"<b>Message Auto-Redacted</b> 🗑️<br>"
+                            f"<b>Room:</b> {roomname}<br>"
+                            f"<b>Reason:</b> Community majority vote reached ({current_reports} out of {human_count} members).<br>"
+                            f"<b>Context:</b> <a href='{message_link}'>Original Event Link</a>"
+                        )
+                        await self.client.send_notice(self.config["notification_room"], html=notification)
+                        
+                        del self._report_counts[target_event_id]
+                        return
+                except Exception as e:
+                    self.log.error(f"Failed to auto-redact reported message: {e}")
+
+            if current_reports == 1:
+                notification = (
+                    f"<b>Message Reported</b> 🚨<br>"
+                    f"<b>First Reporter:</b> {evt.sender}<br>"
+                    f"<b>Room:</b> {roomname}<br>"
+                    f"<b>Action:</b> <a href='{message_link}'>Click here to inspect and moderate</a>"
+                )
+                try:
+                    await self.client.send_notice(self.config["notification_room"], html=notification)
+                except Exception as e:
+                    self.log.error(f"Failed to send report notification: {e}")
 
     @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
@@ -1350,8 +1427,10 @@ class CommunityBot(Plugin):
         msg = await evt.respond("starting the ban...")
         results_map = await self.ban_this_user(user, all_rooms=True)
 
-        results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
+        results = (
+            "the following users were kicked and banned:<p><code>{ban_list}</code></p>"
+            "the following errors were recorded:<p><code>{error_list}</code></p>"
+        ).format(
             ban_list=results_map["ban_list"], error_list=results_map["error_list"]
         )
         await evt.respond(results, allow_html=True, edits=msg)
@@ -1391,8 +1470,10 @@ class CommunityBot(Plugin):
             except Exception as e:
                 error_list[room] = str(e)
 
-        results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
+        results = (
+            "the following users were unbanned:<p><code>{unban_list}</code></p>"
+            "the following errors were recorded:<p><code>{error_list}</code></p>"
+        ).format(
             unban_list=unban_list, error_list=error_list
         )
         await evt.respond(results, allow_html=True, edits=msg)
@@ -1414,8 +1495,7 @@ class CommunityBot(Plugin):
 
         Client.parse_user_id(mxid)
         await self.database.execute(
-            "UPDATE user_events SET ignore_inactivity = 1 WHERE \
-                mxid = $1",
+            "UPDATE user_events SET ignore_inactivity = 1 WHERE mxid = $1",
             mxid,
         )
         self.log.info(f"{mxid} set to ignore inactivity")
@@ -1435,8 +1515,7 @@ class CommunityBot(Plugin):
 
         Client.parse_user_id(mxid)
         await self.database.execute(
-            "UPDATE user_events SET ignore_inactivity = 0 WHERE \
-                mxid = $1",
+            "UPDATE user_events SET ignore_inactivity = 0 WHERE mxid = $1",
             mxid,
         )
         self.log.info(f"{mxid} set to track inactivity")
@@ -1478,8 +1557,10 @@ class CommunityBot(Plugin):
 
     @community.subcommand(
         "sync",
-        help="update the activity tracker with the current space members \
-            in case they are missing",
+        help=(
+            "update the activity tracker with the current space members "
+            "in case they are missing"
+        ),
     )
     @decorators.require_parent_room
     @decorators.require_permission()
@@ -1514,13 +1595,15 @@ class CommunityBot(Plugin):
         sync_results = await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
-            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
-                {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['warn_inactive'])} <br /></p>\
-                <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['kick_inactive'])} <br /></p> \
-                <p><b>Ignored users:</b><br /> \
-                {'<br />'.join(report['ignored'])}</p>",
+            (
+                f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and "
+                f"{self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['warn_inactive'])} <br /></p>"
+                f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['kick_inactive'])} <br /></p> "
+                f"<p><b>Ignored users:</b><br /> "
+                f"{'<br />'.join(report['ignored'])}</p>"
+            ),
             allow_html=True,
         )
 
@@ -1536,13 +1619,15 @@ class CommunityBot(Plugin):
         sync_results = await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
-            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
-                {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['warn_inactive'])} <br /></p>\
-                <p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['kick_inactive'])} <br /></p> \
-                <p><b>Ignored users:</b><br /> \
-                {'<br />'.join(report['ignored'])}</p>",
+            (
+                f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and "
+                f"{self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['warn_inactive'])} <br /></p>"
+                f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['kick_inactive'])} <br /></p> "
+                f"<p><b>Ignored users:</b><br /> "
+                f"{'<br />'.join(report['ignored'])}</p>"
+            ),
             allow_html=True,
         )
 
@@ -1560,9 +1645,11 @@ class CommunityBot(Plugin):
         sync_results = await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
-            f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and \
-                {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['warn_inactive'])} <br /></p>",
+            (
+                f"<p><b>Users inactive for between {self.config['warn_threshold_days']} and "
+                f"{self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['warn_inactive'])} <br /></p>"
+            ),
             allow_html=True,
         )
 
@@ -1581,8 +1668,10 @@ class CommunityBot(Plugin):
         sync_results = await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
-            f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> \
-                {'<br />'.join(report['kick_inactive'])} <br /></p>",
+            (
+                f"<p><b>Users inactive for at least {self.config['kick_threshold_days']} days:</b><br /> "
+                f"{'<br />'.join(report['kick_inactive'])} <br /></p>"
+            ),
             allow_html=True,
         )
 
@@ -1600,8 +1689,10 @@ class CommunityBot(Plugin):
         sync_results = await self.do_sync()
         report = await self.generate_report()
         await evt.respond(
-            f"<p><b>Ignored users:</b><br /> \
-                {'<br />'.join(report['ignored'])}</p>",
+            (
+                f"<p><b>Ignored users:</b><br /> "
+                f"{'<br />'.join(report['ignored'])}</p>"
+            ),
             allow_html=True,
         )
 
@@ -1644,8 +1735,10 @@ class CommunityBot(Plugin):
                     error_list[user] = []
                     error_list[user].append(roomname or room)
 
-        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
+        results = (
+            "the following users were purged:<p><code>{purge_list}</code></p>"
+            "the following errors were recorded:<p><code>{error_list}</code></p>"
+        ).format(
             purge_list=purge_list, error_list=error_list
         )
         await evt.respond(results, allow_html=True, edits=msg)
@@ -1691,8 +1784,10 @@ class CommunityBot(Plugin):
                 error_list[user] = []
                 error_list[user].append(roomname or room)
 
-        results = "the following users were kicked:<p><code>{kick_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
+        results = (
+            "the following users were kicked:<p><code>{kick_list}</code></p>"
+            "the following errors were recorded:<p><code>{error_list}</code></p>"
+        ).format(
             kick_list=kick_list, error_list=error_list
         )
         await evt.respond(results, allow_html=True, edits=msg)
@@ -1859,8 +1954,10 @@ class CommunityBot(Plugin):
 
     @room.subcommand(
         "create",
-        help="create a new room titled <roomname> and add it to the parent space. \
-                          optionally include `--encrypted` or `--unencrypted` to force regardless of the default settings.",
+        help=(
+            "create a new room titled <roomname> and add it to the parent space. "
+            "optionally include `--encrypted` or `--unencrypted` to force regardless of the default settings."
+        ),
     )
     @command.argument("roomname", pass_raw=True, required=True)
     @decorators.require_parent_room
@@ -1868,9 +1965,9 @@ class CommunityBot(Plugin):
     async def room_create(self, evt: MessageEvent, roomname: str) -> None:
         if (roomname == "help") or len(roomname) == 0:
             await evt.reply(
-                'pass me a room name (like "cool topic") and i will create it and add it to the space. \
-                            use `--encrypted` or `--unencrypted` to ensure encryption is enabled/disabled at creation time even if that isnt my default \
-                            setting.'
+                'pass me a room name (like "cool topic") and i will create it and add it to the space. '
+                'use `--encrypted` or `--unencrypted` to ensure encryption is enabled/disabled at creation time even if that isnt my default '
+                'setting.'
             )
             return
 
@@ -2459,8 +2556,10 @@ class CommunityBot(Plugin):
             if len(guest_list) == 0:
                 guest_list = ["None"]
             await evt.reply(
-                f"<b>Guests in this room are:</b><br /> \
-                    {'<br />'.join(guest_list)}",
+                (
+                    f"<b>Guests in this room are:</b><br /> "
+                    f"{'<br />'.join(guest_list)}"
+                ),
                 allow_html=True,
             )
         except Exception as e:
@@ -2875,10 +2974,12 @@ class CommunityBot(Plugin):
         """Store verification state in the database."""
         # Try to insert first, if it fails due to existing record, then update
         try:
-            insert_query = """INSERT INTO verification_states
-                              (dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, \
-                               required_power_level)
-                              VALUES ($1, $2, $3, $4, $5, $6)"""
+            insert_query = (
+                "INSERT INTO verification_states "
+                "(dm_room_id, user_id, target_room_id, verification_phrase, attempts_remaining, "
+                "required_power_level) "
+                "VALUES ($1, $2, $3, $4, $5, $6)"
+            )
             await self.database.execute(
                 insert_query,
                 dm_room_id,
@@ -2896,13 +2997,15 @@ class CommunityBot(Plugin):
                 or "duplicate key" in str(e).lower()
             ):
                 self.log.debug(f"Record exists for {dm_room_id}, updating instead")
-                update_query = """UPDATE verification_states
-                                  SET verification_phrase  = $4, \
-                                      attempts_remaining   = $5, \
-                                      required_power_level = $6, \
-                                      user_id              = $2, \
-                                      target_room_id       = $3 \
-                                  WHERE dm_room_id = $1"""
+                update_query = (
+                    "UPDATE verification_states "
+                    "SET verification_phrase = $4, "
+                    "attempts_remaining = $5, "
+                    "required_power_level = $6, "
+                    "user_id = $2, "
+                    "target_room_id = $3 "
+                    "WHERE dm_room_id = $1"
+                )
                 await self.database.execute(
                     update_query,
                     dm_room_id,
