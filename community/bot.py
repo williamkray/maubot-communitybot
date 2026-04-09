@@ -436,7 +436,7 @@ class CommunityBot(Plugin):
             filtered_rooms = [r for r in rooms if r in joined_rooms]
             
             if len(rooms) != len(filtered_rooms):
-                self.log.info(f"Ignoriere {len(rooms) - len(filtered_rooms)} Räume aus dem Space, da der Bot dort kein Mitglied ist.")
+                self.log.info(f"Ignored {len(rooms) - len(filtered_rooms)} because Bot is not part of the rooms.")
             
             return filtered_rooms
         except Exception as e:
