@@ -1010,14 +1010,21 @@ class CommunityBot(Plugin):
                     await self.client.send_notice(evt.room_id, html=greeting)
                 else:
                     pass
+                    
                 if self.config["notification_room"]:
                     roomnamestate = await self.client.get_state_event(
-                        evt.room_id, "m.room.name"
+                         evt.room_id, "m.room.name"
                     )
-                    roomname = roomnamestate["name"]
+                    
+                    roomname = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
+                    
                     notification_message = self.config[
                         "join_notification_message"
-                    ].format(user=evt.sender, room=roomname)
+                    ].format(
+                        user=evt.sender, 
+                        room=roomname, 
+                        room_id=evt.room_id  # <--- Das ist neu!
+                    )
                     await self.client.send_notice(
                         self.config["notification_room"], html=notification_message
                     )
