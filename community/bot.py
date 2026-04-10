@@ -71,6 +71,7 @@ class Config(BaseProxyConfig):
         helper.copy("welcome_sleep")
         helper.copy("parent_room")
         helper.copy("community_slug")
+        helper.copy("use_community_slug")
         helper.copy("track_users")
         helper.copy("warn_threshold_days")
         helper.copy("kick_threshold_days")
@@ -178,7 +179,9 @@ class CommunityBot(Plugin):
         Returns:
             tuple: (is_valid, list_of_conflicting_aliases)
         """
-        if not self.config.get("community_slug", ""):
+        if self.config.get("use_community_slug", True) and not self.config.get(
+            "community_slug", ""
+        ):
             if evt:
                 await evt.respond(
                     "Error: No community slug configured. Please run initialize command first."
@@ -187,7 +190,11 @@ class CommunityBot(Plugin):
 
         server = self.client.parse_user_id(self.client.mxid)[1]
         return await room_utils.validate_room_aliases(
-            self.client, room_names, self.config.get("community_slug", ""), server
+            self.client,
+            room_names,
+            self.config.get("community_slug", ""),
+            self.config.get("use_community_slug", True),
+            server,
         )
 
     async def get_moderators_and_above(self) -> list[str]:
@@ -1980,7 +1987,7 @@ class CommunityBot(Plugin):
             return
 
         # Check if community slug is configured
-        if not self.config["community_slug"]:
+        if self.config["use_community_slug"] and not self.config["community_slug"]:
             await evt.reply(
                 "No community slug configured. Please run initialize command first."
             )
@@ -2186,7 +2193,7 @@ class CommunityBot(Plugin):
         aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
 
         # Check if community slug is configured
-        if not self.config["community_slug"]:
+        if self.config["use_community_slug"] and not self.config["community_slug"]:
             await evt.respond(
                 "No community slug configured. Please run initialize command first."
             )
@@ -3124,7 +3131,7 @@ class CommunityBot(Plugin):
 
         try:
             # Generate community slug if not already set
-            if not self.config["community_slug"]:
+            if self.config["use_community_slug"] and not self.config["community_slug"]:
                 community_slug = self.generate_community_slug(community_name)
                 self.config["community_slug"] = community_slug
                 self.log.info(f"Generated community slug: {community_slug}")
@@ -3307,6 +3314,7 @@ class CommunityBot(Plugin):
             await evt.respond(
                 f"Community space initialized successfully!<br /><br />"
                 f"Community Slug: {self.config['community_slug']}<br />"
+                f"Use Community Slug: {self.config['use_community_slug']}"
                 f"Room Version: {self.config['room_version']}<br />"
                 f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a><br />"
                 f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a><br />"

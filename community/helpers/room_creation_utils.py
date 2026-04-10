@@ -38,7 +38,7 @@ async def validate_room_creation_params(
     sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
 
     # Check if community slug is configured
-    if not config.get("community_slug", ""):
+    if config.get("use_community_slug", True) and not config.get("community_slug", ""):
         error_msg = "No community slug configured. Please run initialize command first."
         return sanitized_name, force_encryption, force_unencryption, error_msg, roomname
 
@@ -63,7 +63,10 @@ async def prepare_room_creation_data(
         Tuple of (alias_localpart, server, room_invitees, parent_room)
     """
     # Create alias with community slug
-    alias_localpart = f"{sanitized_name}-{config.get('community_slug', '')}"
+    if config.get("use_community_slug", True):
+        alias_localpart = f"{sanitized_name}-{config.get('community_slug', '')}"
+    else:
+        alias_localpart = sanitized_name
 
     # Get server and invitees
     server = client.parse_user_id(client.mxid)[1]
