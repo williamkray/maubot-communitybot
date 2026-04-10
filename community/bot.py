@@ -6,6 +6,7 @@ import time
 import re
 import fnmatch
 import asyncio
+from html import escape
 import random
 import asyncpg.exceptions
 from datetime import datetime
@@ -79,6 +80,7 @@ class Config(BaseProxyConfig):
         helper.copy("invitees")
         helper.copy("notification_room")
         helper.copy("join_notification_message")
+        helper.copy("matrix_to_base_url")
         helper.copy_dict("greeting_rooms")
         helper.copy_dict("greetings")
         helper.copy("censor")
@@ -101,9 +103,78 @@ class Config(BaseProxyConfig):
 
 class CommunityBot(Plugin):
 
+    def _get_matrix_to_base_url(self) -> str:
+        return str(self.config.get("matrix_to_base_url", "https://matrix.to")).rstrip("/")
+
+
     _redaction_tasks: asyncio.Task = None
     _verification_states: Dict[str, Dict] = {}
     _report_counts: Dict[str, set] = {}
+
+
+    def _matrix_to_url(self, target: str) -> str:
+        base_url = self._get_matrix_to_base_url()
+        return f"{base_url}/#/{target}"
+
+
+    def _render_html_link(self, target: str, label: str) -> str:
+        return f"<a href='{escape(self._matrix_to_url(target), quote=True)}'>{escape(label)}</a>"
+
+    async def _get_user_display_name(self, room_id: RoomID, user_id: str) -> str:
+        try:
+            member_state = await self.client.get_state_event(
+                room_id,
+                EventType.ROOM_MEMBER,
+                state_key=user_id,
+            )
+            displayname = getattr(member_state, "displayname", None)
+            if displayname:
+                return str(displayname)
+        except Exception:
+            pass
+
+        try:
+            return self.client.parse_user_id(user_id)[0]
+        except Exception:
+            return user_id
+
+    def _render_message_template(
+        self,
+        template: str,
+        user_id: str,
+        user_display: Optional[str] = None,
+        room_id: Optional[str] = None,
+        room_text: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        user_url = self._matrix_to_url(user_id)
+        safe_user_display = user_display or user_id
+        safe_room_id = room_id or ""
+        safe_room_text = room_text or safe_room_id
+        room_url = self._matrix_to_url(safe_room_id) if safe_room_id else ""
+
+        plain_text = template.format(
+            user=safe_user_display,
+            user_id=user_id,
+            user_link=user_url,
+            room=safe_room_text,
+            room_link=room_url,
+            room_id=safe_room_id,
+        )
+
+        html_message = template.format(
+            user=escape(safe_user_display),
+            user_id=escape(user_id),
+            user_link=f"<a href='{user_url}'>{escape(safe_user_display)}</a>",
+            room=escape(safe_room_text),
+            room_link=(
+                f"<a href='{room_url}'>{escape(safe_room_text)}</a>"
+                if room_url
+                else escape(safe_room_text)
+            ),
+            room_id=escape(safe_room_id),
+        )
+
+        return plain_text, html_message
 
     async def start(self) -> None:
         await super().start()
@@ -119,6 +190,11 @@ class CommunityBot(Plugin):
         if self._redaction_tasks:
             self._redaction_tasks.cancel()
         await super().stop()
+
+    async def _sleep_if_configured(self, delay: float) -> None:
+        """Sleep without blocking the event loop when a delay is configured."""
+        if delay and delay > 0:
+            await asyncio.sleep(delay)
 
     async def user_permitted(
         self, user_id: UserID, min_level: int = 50, room_id: str = None
@@ -335,8 +411,9 @@ class CommunityBot(Plugin):
                 self.log.warning(f"Could not verify space creation: {e}")
 
             if evt:
+                space_alias = f"#{sanitized_name}:{server}"
                 await evt.respond(
-                    f"<a href='https://matrix.to/#/#{sanitized_name}:{server}'>#{sanitized_name}:{server}</a> has been created.",
+                    f"{self._render_html_link(space_alias, space_alias)} has been created.",
                     edits=mymsg,
                     allow_html=True,
                 )
@@ -871,7 +948,7 @@ class CommunityBot(Plugin):
                         )
                         failed_rooms.append(roomname or room_id)
 
-                    time.sleep(self.config["sleep"])
+                    await self._sleep_if_configured(self.config["sleep"])
 
                 except Exception as e:
                     self.log.warning(f"Failed to update power levels in {room_id}: {e}")
@@ -1011,14 +1088,29 @@ class CommunityBot(Plugin):
                     return
                 greeting_map = self.config["greetings"]
                 greeting_name = self.config["greeting_rooms"][room_id]
-                nick = self.client.parse_user_id(evt.sender)[0]
-                pill = '<a href="https://matrix.to/#/{mxid}">{nick}</a>'.format(
-                    mxid=evt.sender, nick=nick
-                )
+                user_display = await self._get_user_display_name(evt.room_id, evt.sender)
+                try:
+                    roomnamestate = await self.client.get_state_event(
+                        evt.room_id, "m.room.name"
+                    )
+                    room_text = getattr(roomnamestate, "name", str(evt.room_id))
+                except Exception:
+                    room_text = str(evt.room_id)
+
                 if greeting_name != "none":
-                    greeting = greeting_map[greeting_name].format(user=pill)
-                    time.sleep(self.config["welcome_sleep"])
-                    await self.client.send_notice(evt.room_id, html=greeting)
+                    greeting_text, greeting_html = self._render_message_template(
+                        greeting_map[greeting_name],
+                        evt.sender,
+                        user_display,
+                        evt.room_id,
+                        room_text,
+                    )
+                    await self._sleep_if_configured(self.config["welcome_sleep"])
+                    await self.client.send_notice(
+                        evt.room_id,
+                        greeting_text,
+                        html=greeting_html,
+                    )
                 else:
                     pass
                     
@@ -1032,18 +1124,18 @@ class CommunityBot(Plugin):
                     except Exception:
                         room_text = str(evt.room_id)
                     
-                    room_link = f"<a href='https://matrix.to/#/{evt.room_id}'>{room_text}</a>"
-                    
-                    notification_message = self.config[
-                        "join_notification_message"
-                    ].format(
-                        user=evt.sender, 
-                        room=room_text,  
-                        room_link=room_link,
-                        room_id=evt.room_id
+                    user_display = await self._get_user_display_name(evt.room_id, evt.sender)
+                    notification_text, notification_html = self._render_message_template(
+                        self.config["join_notification_message"],
+                        evt.sender,
+                        user_display,
+                        evt.room_id,
+                        room_text,
                     )
                     await self.client.send_notice(
-                        self.config["notification_room"], html=notification_message
+                        self.config["notification_room"],
+                        notification_text,
+                        html=notification_html,
                     )
 
             # Human verification logic
@@ -1313,7 +1405,7 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.REACTION)
     async def handle_reactions(self, evt: MessageEvent) -> None:
-    
+
         if evt.sender == self.client.mxid:
             return
 
@@ -1338,29 +1430,30 @@ class CommunityBot(Plugin):
                 return
 
             target_event_id = relates_to.event_id
-            
+
             if target_event_id not in self._report_counts:
                 self._report_counts[target_event_id] = set()
-                
+
             if evt.sender in self._report_counts[target_event_id]:
                 return
-            
+
             self._report_counts[target_event_id].add(evt.sender)
             current_reports = len(self._report_counts[target_event_id])
 
             try:
                 roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
-                # Wir nennen es intern erst einmal room_text
                 room_text = roomnamestate.get("name") if roomnamestate else str(evt.room_id)
-            except:
+            except Exception:
                 room_text = str(evt.room_id)
-                
-            # Klickable Links
-            room = room_text
-            room_link = f"<a href='https://matrix.to/#/{evt.room_id}'>{room_text}</a>"
-            message_link = f"https://matrix.to/#/{evt.room_id}/{target_event_id}"
 
-            # --- AUTO-REDACT LOGIC ---
+            reporter_display = await self._get_user_display_name(evt.room_id, evt.sender)
+            room_url = self._matrix_to_url(evt.room_id)
+            message_url = self._matrix_to_url(f"{evt.room_id}/{target_event_id}")
+
+            room_link_html = self._render_html_link(evt.room_id, room_text)
+            reporter_link_html = self._render_html_link(evt.sender, reporter_display)
+            message_link_html = f"<a href='{escape(message_url, quote=True)}'>Original Event Link</a>"
+
             if self.config.get("auto_redact_majority", False):
                 try:
                     members = await self.client.get_joined_members(evt.room_id)
@@ -1369,33 +1462,53 @@ class CommunityBot(Plugin):
 
                     if current_reports > threshold:
                         await self.client.redact(
-                            evt.room_id, 
-                            target_event_id, 
+                            evt.room_id,
+                            target_event_id,
                             reason=f"Auto-redacted: Reached majority vote ({current_reports}/{human_count} users)"
                         )
-                        
-                        notification = (
-                            f"<b>Message Auto-Redacted</b> 🗑️<br>"
-                            f"<b>Room:</b> {room_link}<br>"
-                            f"<b>Reason:</b> Community majority vote reached ({current_reports} out of {human_count} members).<br>"
-                            f"<b>Context:</b> <a href='{message_link}'>Original Event Link</a>"
+
+                        notification_text = (
+                            "Message Auto-Redacted 🗑️\n"
+                            f"Room: {room_url}\n"
+                            f"Reason: Community majority vote reached ({current_reports} out of {human_count} members).\n"
+                            f"Context: {message_url}"
                         )
-                        await self.client.send_notice(self.config["notification_room"], html=notification)
-                        
+                        notification_html = (
+                            f"<b>Message Auto-Redacted</b> 🗑️<br>"
+                            f"<b>Room:</b> {room_link_html}<br>"
+                            f"<b>Reason:</b> Community majority vote reached ({current_reports} out of {human_count} members).<br>"
+                            f"<b>Context:</b> {message_link_html}"
+                        )
+                        await self.client.send_notice(
+                            self.config["notification_room"],
+                            notification_text,
+                            html=notification_html,
+                        )
+
                         del self._report_counts[target_event_id]
                         return
                 except Exception as e:
                     self.log.error(f"Failed to auto-redact reported message: {e}")
 
             if current_reports == 1:
-                notification = (
+                notification_text = (
+                    "Message Reported 🚨\n"
+                    f"First Reporter: {reporter_display} ({evt.sender})\n"
+                    f"Room: {room_url}\n"
+                    f"Action: {message_url}"
+                )
+                notification_html = (
                     f"<b>Message Reported</b> 🚨<br>"
-                    f"<b>First Reporter:</b> {evt.sender}<br>"
-                    f"<b>Room:</b> {room_link}<br>"
-                    f"<b>Action:</b> <a href='{message_link}'>Click here to inspect and moderate</a>"
+                    f"<b>First Reporter:</b> {reporter_link_html} ({escape(evt.sender)})<br>"
+                    f"<b>Room:</b> {room_link_html}<br>"
+                    f"<b>Action:</b> <a href='{escape(message_url, quote=True)}'>Click here to inspect and moderate</a>"
                 )
                 try:
-                    await self.client.send_notice(self.config["notification_room"], html=notification)
+                    await self.client.send_notice(
+                        self.config["notification_room"],
+                        notification_text,
+                        html=notification_html,
+                    )
                 except Exception as e:
                     self.log.error(f"Failed to send report notification: {e}")
 
@@ -1791,7 +1904,7 @@ class CommunityBot(Plugin):
                     kick_list[user].append(roomname)
                 else:
                     kick_list[user].append(room)
-                time.sleep(self.config["sleep"])
+                await self._sleep_if_configured(self.config["sleep"])
             except MNotFound:
                 pass
             except Exception as e:
@@ -1941,8 +2054,9 @@ class CommunityBot(Plugin):
             )
 
             if evt:
+                room_alias = f"#{alias_localpart}:{server}"
                 await evt.respond(
-                    f"<a href='https://matrix.to/#/#{alias_localpart}:{server}'>#{alias_localpart}:{server}</a> has been created and added to the space.",
+                    f"{self._render_html_link(room_alias, room_alias)} has been created and added to the space.",
                     edits=mymsg,
                     allow_html=True,
                 )
@@ -3313,12 +3427,12 @@ class CommunityBot(Plugin):
 
             await evt.respond(
                 f"Community space initialized successfully!<br /><br />"
-                f"Community Slug: {self.config['community_slug']}<br />"
-                f"Use Community Slug: {self.config['use_community_slug']}"
-                f"Room Version: {self.config['room_version']}<br />"
-                f"Space: <a href='https://matrix.to/#/{space_alias}'>{space_alias}</a><br />"
-                f"Moderators Room: <a href='https://matrix.to/#/{mod_room_alias}'>{mod_room_alias}</a><br />"
-                f"Waiting Room: <a href='https://matrix.to/#/{waiting_room_alias}'>{waiting_room_alias}</a>{warning_msg}",
+                f"Community Slug: {escape(str(self.config['community_slug']))}<br />"
+                f"Use Community Slug: {escape(str(self.config['use_community_slug']))}"
+                f"Room Version: {escape(str(self.config['room_version']))}<br />"
+                f"Space: {self._render_html_link(space_alias, space_alias)}<br />"
+                f"Moderators Room: {self._render_html_link(mod_room_alias, mod_room_alias)}<br />"
+                f"Waiting Room: {self._render_html_link(waiting_room_alias, waiting_room_alias)}{warning_msg}",
                 edits=msg,
                 allow_html=True,
             )

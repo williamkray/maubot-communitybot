@@ -58,16 +58,21 @@ invitees: []
 
 # auto-greet users in rooms with these messages
 # map greeting messages to a room
-# you can use {user} to reference the joining user in this message using a
-# matrix.to link (rendered as a "pill" in element clients)
+# available placeholders:
+# - {user}: display name of the joining user (falls back to localpart or user ID)
+# - {user_id}: full Matrix user ID
+# - {user_link}: clickable matrix.to-compatible link to the joining user
+# - {room}: room name (or room ID if no name is set)
+# - {room_link}: clickable matrix.to-compatible link to the room
+# - {room_id}: raw room ID
 # html formatting is supported
 # set to {} if you don't care about greetings
 greetings:
   generic: |
-    Welcome {user}! Please be sure to read the topic for helpful links and information.
+    Welcome {user_id}! Please be sure to read the topic for helpful links and information.
     Use <a href="https://google.com">Google</a> for all other queries ;)
   encrypted: |
-    welcome {user}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
+    welcome {user_id}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
     alarmed.
 
 # which of the above greetings should be used in which rooms? use the exact name of each greeting
@@ -87,8 +92,15 @@ welcome_sleep: 0
 notification_room: 
 
 # message to send to the notification room when someone joins one of the above rooms:
+# available placeholders:
+# - {user}: display name of the joining user (falls back to localpart or user ID)
+# - {user_id}: full Matrix user ID
+# - {user_link}: clickable matrix.to-compatible link to the joining user
+# - {room}: room name (or room ID if no name is set)
+# - {room_link}: clickable matrix.to-compatible link to the room
+# - {room_id}: raw room ID
 join_notification_message: |
-  {user} has joined {room_link}.
+  {user_link} ({user_id}) has joined {room_link}.
 
 # whether to censor files/messages
 # can be boolean (true/false) for all-or-nothing behavior,
@@ -177,3 +189,9 @@ verification_message: |
   Thank you for joining {room}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
 
   Please send a message to this chat with the content: "{phrase}"
+
+
+# Base URL for Matrix permalink generation.
+# This is used for placeholders such as {user_link} and {room_link}.
+# Set this to your own matrix.to-compatible instance if you do not want to use https://matrix.to.
+matrix_to_base_url: "https://matrix.to"
