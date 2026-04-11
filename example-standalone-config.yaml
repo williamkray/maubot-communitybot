@@ -126,10 +126,10 @@ plugin_config:
     # set to {} if you don't care about greetings
     greetings:
       generic: |
-        Welcome {user_link}! Please be sure to read the topic for helpful links and information.
+        Welcome {user}! Please be sure to read the topic for helpful links and information.
         Use <a href="https://google.com">Google</a> for all other queries ;)
       encrypted: |
-        welcome {user_link}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
+        welcome {user}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
         alarmed.
 
     # which of the above greetings should be used in which rooms? use the exact name of each greeting
@@ -150,9 +150,9 @@ plugin_config:
 
     # message to send to the notification room when someone joins one of the above rooms:
     join_notification_message: |
-      {user_link} has joined {room_link} ({user_id}).
+      {user} has joined {room}.
 
-    # Base URL for Matrix permalink generation.
+# Base URL for Matrix permalink generation.
     # This is used for placeholders such as {user_link} and {room_link}.
     # Set this to your own matrix.to-compatible instance if you do not want to use https://matrix.to.
     matrix_to_base_url: "https://matrix.to"

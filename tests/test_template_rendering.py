@@ -12,7 +12,11 @@ from community.bot import CommunityBot
 def bot():
     bot = CommunityBot.__new__(CommunityBot)
     bot.client = Mock()
-    bot.config = {"matrix_to_base_url": "https://matrix.to"}
+    bot.config = {
+        "matrix_to_base_url": "https://matrix.to",
+        "user_pill_prefix": "@",
+        "room_pill_prefix": "#",
+    }
     return bot
 
 
@@ -51,7 +55,50 @@ def test_render_message_template_supports_user_id_and_user_link(bot):
         "General",
     )
 
-    assert plain == "Alice / @alice:example.org / https://matrix.to/#/@alice:example.org"
-    assert "Alice / @alice:example.org / " in html
+    assert plain == "@Alice / @alice:example.org / https://matrix.to/#/@alice:example.org"
+    assert "@Alice / @alice:example.org / " in html
     assert '<a href=' in html
     assert '>Alice</a>' in html
+
+
+def test_render_message_template_uses_configurable_user_and_room_pill_prefixes(bot):
+    bot.config["user_pill_prefix"] = ""
+    bot.config["room_pill_prefix"] = ""
+
+    plain, html = bot._render_message_template(
+        "{user} has joined {room}.",
+        "@alice:example.org",
+        "Alice",
+        "!room:example.org",
+        "General",
+    )
+
+    assert plain == "Alice has joined General."
+    assert "<a href='matrix:u/alice:example.org?action=chat'>Alice</a>" in html
+    assert "<a href='matrix:roomid/room:example.org'>General</a>" in html
+
+
+def test_render_message_template_defaults_to_prefixed_user_and_room_pills(bot):
+    plain, html = bot._render_message_template(
+        "{user} has joined {room}.",
+        "@alice:example.org",
+        "Alice",
+        "!room:example.org",
+        "General",
+    )
+
+    assert plain == "@Alice has joined #General."
+    assert "<a href='matrix:u/alice:example.org?action=chat'>@Alice</a>" in html
+    assert "<a href='matrix:roomid/room:example.org'>#General</a>" in html
+
+
+def test_matrix_uri_helpers_are_consistent():
+    from community.bot import CommunityBot
+
+    bot = CommunityBot.__new__(CommunityBot)
+    bot.config = {}
+
+    assert bot._matrix_user_uri("@alice:example.org") == "matrix:u/alice:example.org?action=chat"
+    assert bot._matrix_room_uri("!roomid:example.org", "#general:example.org") == "matrix:r/general:example.org"
+    assert bot._matrix_room_uri("!roomid:example.org", None) == "matrix:roomid/roomid:example.org"
+    assert bot._matrix_event_uri("!roomid:example.org", "$eventid") == "matrix:roomid/roomid:example.org/e/eventid"

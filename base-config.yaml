@@ -69,10 +69,10 @@ invitees: []
 # set to {} if you don't care about greetings
 greetings:
   generic: |
-    Welcome {user_id}! Please be sure to read the topic for helpful links and information.
+    Welcome {user}! Please be sure to read the topic for helpful links and information.
     Use <a href="https://google.com">Google</a> for all other queries ;)
   encrypted: |
-    welcome {user_id}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
+    welcome {user}, this is an encrypted room, so you may not be able to see messages previously sent here. don't be
     alarmed.
 
 # which of the above greetings should be used in which rooms? use the exact name of each greeting
@@ -100,7 +100,7 @@ notification_room:
 # - {room_link}: clickable matrix.to-compatible link to the room
 # - {room_id}: raw room ID
 join_notification_message: |
-  {user_link} ({user_id}) has joined {room_link}.
+  {user} has joined {room}.
 
 # whether to censor files/messages
 # can be boolean (true/false) for all-or-nothing behavior,
@@ -190,8 +190,10 @@ verification_message: |
 
   Please send a message to this chat with the content: "{phrase}"
 
+# prefixes used for the clickable {user} and {room} placeholders in rendered HTML notices.
+# set either value to "" for a cleaner look without a visible prefix.
 
 # Base URL for Matrix permalink generation.
 # This is used for placeholders such as {user_link} and {room_link}.
 # Set this to your own matrix.to-compatible instance if you do not want to use https://matrix.to.
-matrix_to_base_url: 'https://matrix.to'
+matrix_to_base_url: "https://matrix.to"
