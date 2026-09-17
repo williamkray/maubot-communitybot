@@ -87,9 +87,23 @@ welcome_sleep: 0
 # (optional)
 notification_room: 
 
-# message to send to the notification room when someone joins one of the above rooms:
+# messages to send to the notification room on membership changes in managed rooms.
+# available placeholders:
+# - {user}: the affected user's matrix ID
+# - {room}: the room name (or room ID if the room has no name)
+# - {actor}: the user who performed the action (kick/ban only)
+# html formatting is supported. leave a message blank to disable that notification.
 join_notification_message: |
   User <code>{user}</code> has joined <code>{room}</code>.
+
+leave_notification_message: |
+  User <code>{user}</code> has left <code>{room}</code>.
+
+kick_notification_message: |
+  User <code>{user}</code> was kicked from <code>{room}</code> by <code>{actor}</code>.
+
+ban_notification_message: |
+  User <code>{user}</code> was banned from <code>{room}</code> by <code>{actor}</code>.
 
 # whether to censor files/messages
 # can be boolean (true/false) for all-or-nothing behavior,

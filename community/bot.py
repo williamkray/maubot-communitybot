@@ -77,6 +77,9 @@ class Config(BaseProxyConfig):
         helper.copy("invitees")
         helper.copy("notification_room")
         helper.copy("join_notification_message")
+        helper.copy("leave_notification_message")
+        helper.copy("kick_notification_message")
+        helper.copy("ban_notification_message")
         helper.copy_dict("greeting_rooms")
         helper.copy_dict("greetings")
         helper.copy("censor")
@@ -942,20 +945,73 @@ class CommunityBot(Plugin):
                             f"Failed to update power levels state event in {evt.room_id}: {e}"
                         )
 
+    async def send_membership_notification(
+        self, evt: StateEvent, template_key: str, actor_id: str = None
+    ) -> None:
+        """Send a leave/kick/ban notification to the configured notification room.
+
+        Uses the same plain-mxid rendering as the join notification. The affected
+        user is taken from the event's state_key; actor_id (the user who performed
+        a kick or ban) is only supplied for those event types.
+        """
+        # ignore historical events replayed during initial sync
+        if evt.source & SyncStream.STATE:
+            return
+        if not self.config["notification_room"]:
+            return
+
+        # only notify for rooms that belong to the managed space
+        space_rooms = await self.get_space_roomlist()
+        if evt.room_id not in space_rooms:
+            return
+
+        template = self.config.get(template_key)
+        if not template:
+            return  # notification disabled by leaving the message blank
+
+        try:
+            roomnamestate = await self.client.get_state_event(evt.room_id, "m.room.name")
+            roomname = roomnamestate["name"]
+        except Exception:
+            roomname = str(evt.room_id)
+
+        fields = {"user": evt.state_key, "room": roomname}
+        if actor_id:
+            fields["actor"] = actor_id
+
+        try:
+            message = template.format(**fields)
+        except KeyError as e:
+            self.log.warning(
+                f"'{template_key}' references unknown placeholder {e}; skipping notification"
+            )
+            return
+
+        await self.client.send_notice(
+            self.config["notification_room"], html=message
+        )
+
     @event.on(InternalEventType.LEAVE)
     async def handle_leave(self, evt: StateEvent) -> None:
         """Handle voluntary leave events."""
         await self.handle_leave_events(evt)
+        await self.send_membership_notification(evt, "leave_notification_message")
 
     @event.on(InternalEventType.KICK)
     async def handle_kick(self, evt: StateEvent) -> None:
         """Handle kick events."""
         await self.handle_leave_events(evt)
+        await self.send_membership_notification(
+            evt, "kick_notification_message", actor_id=evt.sender
+        )
 
     @event.on(InternalEventType.BAN)
     async def handle_ban(self, evt: StateEvent) -> None:
         """Handle ban events."""
         await self.handle_leave_events(evt)
+        await self.send_membership_notification(
+            evt, "ban_notification_message", actor_id=evt.sender
+        )
 
     @event.on(InternalEventType.JOIN)
     async def newjoin(self, evt: StateEvent) -> None:
