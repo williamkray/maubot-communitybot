@@ -103,6 +103,84 @@ async def upsert_user_timestamp(database, mxid: str, timestamp: int, logger) -> 
         logger.error(f"Failed to upsert user timestamp: {e}")
 
 
+async def record_message_report(
+    database, room_id: str, event_id: str, reporter: str, reported_at: int, logger
+) -> bool:
+    """Record that a user reported a message via a report reaction.
+
+    The (room_id, event_id, reporter) primary key ensures a user can only
+    contribute a single report per message.
+
+    Returns:
+        bool: True if this is a newly recorded report, False if the user had
+        already reported this message (or on error).
+    """
+    try:
+        existing = await database.fetchrow(
+            "SELECT 1 FROM message_reports WHERE room_id = $1 AND event_id = $2 AND reporter = $3",
+            room_id,
+            event_id,
+            reporter,
+        )
+        if existing:
+            return False
+        await database.execute(
+            """
+            INSERT INTO message_reports (room_id, event_id, reporter, reported_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (room_id, event_id, reporter) DO NOTHING
+            """,
+            room_id,
+            event_id,
+            reporter,
+            reported_at,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to record message report: {e}")
+        return False
+
+
+async def count_message_reports(database, room_id: str, event_id: str, logger) -> int:
+    """Count the distinct reporters for a message.
+
+    Returns:
+        int: Number of recorded reports (0 on error).
+    """
+    try:
+        row = await database.fetchrow(
+            "SELECT COUNT(*) AS count FROM message_reports WHERE room_id = $1 AND event_id = $2",
+            room_id,
+            event_id,
+        )
+        return int(row["count"]) if row else 0
+    except Exception as e:
+        logger.error(f"Failed to count message reports: {e}")
+        return 0
+
+
+async def clear_message_reports(database, room_id: str, event_id: str, logger) -> None:
+    """Remove all recorded reports for a message (e.g. once it is redacted)."""
+    try:
+        await database.execute(
+            "DELETE FROM message_reports WHERE room_id = $1 AND event_id = $2",
+            room_id,
+            event_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to clear message reports: {e}")
+
+
+async def purge_stale_message_reports(database, cutoff_ts: int, logger) -> None:
+    """Delete report rows older than cutoff_ts (milliseconds) to bound growth."""
+    try:
+        await database.execute(
+            "DELETE FROM message_reports WHERE reported_at < $1", cutoff_ts
+        )
+    except Exception as e:
+        logger.error(f"Failed to purge stale message reports: {e}")
+
+
 async def get_inactive_users(
     database, warn_threshold_days: int, kick_threshold_days: int, logger
 ) -> Dict[str, List[str]]:

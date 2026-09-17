@@ -199,6 +199,16 @@ plugin_config:
     # redactions are processed every minute, they are not immediate.
     redact_on_ban: true
 
+    # crowd moderation via emoji reactions. reacting with one of these emojis records
+    # a report; the first report on a message notifies notification_room. empty list disables.
+    report_emojis:
+      - "🚩"
+      - "⚠️"
+    # auto-redact a message once >50% of the room's non-bot members report it.
+    auto_redact_majority: false
+    # hours to retain report records before purging (bounds table growth).
+    report_retention_hours: 168
+
     # should we verify that users are human before allowing them to send messages?
     # can be boolean (true/false) for all-or-nothing behavior,
     # or pass a list of room IDs to only verify users in certain rooms

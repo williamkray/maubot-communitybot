@@ -147,6 +147,26 @@ proactive_banning: true
 # redactions are processed every minute, they are not immediate.
 redact_on_ban: true
 
+# crowd moderation via emoji reactions.
+# when a user reacts to a message with one of these emojis, the bot records a
+# report. the first report on a message posts a notice (with a link to the
+# message) to notification_room so a moderator can act. requires notification_room
+# to be set. leave the list empty to disable reporting entirely.
+report_emojis:
+  - "🚩"
+  - "⚠️"
+
+# if true, a message is automatically redacted once more than half of the room's
+# (non-bot) members have reported it, and a notice is posted to notification_room.
+# the bot must have permission to redact in the room. if false, reports are only
+# surfaced to moderators and never acted on automatically.
+auto_redact_majority: false
+
+# how long (in hours) to retain report records before purging them. this only
+# bounds table growth for messages that never reach the redaction threshold;
+# reports are cleared immediately when a message is redacted.
+report_retention_hours: 168
+
 # should we verify that users are human before allowing them to send messages?
 # can be boolean (true/false) for all-or-nothing behavior,
 # or pass a list of room IDs to only verify users in certain rooms

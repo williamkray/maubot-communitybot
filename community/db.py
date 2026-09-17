@@ -36,3 +36,18 @@ async def upgrade_v3(conn: Connection) -> None:
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
     )
+
+@upgrade_table.register(description="Add message report tracking for crowd moderation")
+async def upgrade_v4(conn: Connection) -> None:
+    # tracks per-user reports (emoji reactions) against a message so that
+    # crowd-moderation counts survive restarts. reported_at is the reaction's
+    # origin_server_ts (milliseconds) and is used to purge stale reports.
+    await conn.execute(
+            """CREATE TABLE message_reports (
+                room_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                reporter TEXT NOT NULL,
+                reported_at BIGINT NOT NULL,
+                PRIMARY KEY (room_id, event_id, reporter)
+            )"""
+    )

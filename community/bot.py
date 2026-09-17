@@ -26,6 +26,7 @@ from mautrix.types import (
     MediaMessageEventContent,
     ReactionEvent,
     RedactionEvent,
+    RelationType,
     RoomID,
     RoomAlias,
     PowerLevelStateEventContent,
@@ -90,6 +91,9 @@ class Config(BaseProxyConfig):
         helper.copy("banlists")
         helper.copy("proactive_banning")
         helper.copy("redact_on_ban")
+        helper.copy("report_emojis")
+        helper.copy("auto_redact_majority")
+        helper.copy("report_retention_hours")
         helper.copy("check_if_human")
         helper.copy("verification_phrases")
         helper.copy("verification_attempts")
@@ -359,6 +363,15 @@ class CommunityBot(Plugin):
                 )
                 for room in rooms:
                     await self.redact_messages(room["room_id"])
+                # purge crowd-moderation reports that never reached threshold
+                retention_hours = self.config.get("report_retention_hours", 168)
+                if retention_hours:
+                    cutoff_ms = int(time.time() * 1000) - int(
+                        retention_hours * 3600 * 1000
+                    )
+                    await database_utils.purge_stale_message_reports(
+                        self.database, cutoff_ms, self.log
+                    )
                 await asyncio.sleep(60)  # Run every minute
             except asyncio.CancelledError:
                 break
@@ -1338,17 +1351,123 @@ class CommunityBot(Plugin):
                 await self.upsert_user_timestamp(evt.sender, evt.timestamp)
 
     @event.on(EventType.REACTION)
-    async def update_reaction_timestamp(self, evt: MessageEvent) -> None:
-        if not self.config_manager.is_reaction_tracking_enabled():
-            pass
-        else:
-            rooms_to_manage = await self.get_space_roomlist()
-            # only attempt to track rooms in the space, ignore any other rooms
-            # the bot may happen to be in line banlist policy rooms etc.
-            if evt.room_id not in rooms_to_manage:
-                return
-            else:
-                await self.upsert_user_timestamp(evt.sender, evt.timestamp)
+    async def update_reaction_timestamp(self, evt: ReactionEvent) -> None:
+        # ignore our own reactions (e.g. the verification checkmark)
+        if evt.sender == self.client.mxid:
+            return
+
+        # only care about rooms in the managed space, ignore any other rooms
+        # the bot may happen to be in like banlist policy rooms etc.
+        rooms_to_manage = await self.get_space_roomlist()
+        if evt.room_id not in rooms_to_manage:
+            return
+
+        if self.config_manager.is_reaction_tracking_enabled():
+            await self.upsert_user_timestamp(evt.sender, evt.timestamp)
+
+        # crowd moderation: treat configured emojis as message reports
+        await self.handle_report_reaction(evt)
+
+    def _matrix_to_link(self, target: str, label: str = None) -> str:
+        """Build an HTML matrix.to link for a user/room/event target.
+
+        target is the path after '#/', e.g. an mxid, a room id, or
+        'room_id/event_id' for a message permalink.
+        """
+        label = label or target
+        return f'<a href="https://matrix.to/#/{target}">{label}</a>'
+
+    async def _get_room_name(self, room_id: RoomID) -> str:
+        """Return a room's display name, falling back to its room ID."""
+        try:
+            roomnamestate = await self.client.get_state_event(room_id, "m.room.name")
+            name = roomnamestate["name"] if roomnamestate else None
+            return name or str(room_id)
+        except Exception:
+            return str(room_id)
+
+    async def handle_report_reaction(self, evt: ReactionEvent) -> None:
+        """Handle an emoji reaction that may be a crowd-moderation report."""
+        # reporting requires somewhere to send the report
+        if not self.config["notification_room"]:
+            return
+
+        report_emojis = self.config.get("report_emojis") or []
+        if not report_emojis:
+            return
+
+        relates_to = evt.content.relates_to
+        if not relates_to or relates_to.rel_type != RelationType.ANNOTATION:
+            return
+        if relates_to.key not in report_emojis:
+            return
+
+        room_id = evt.room_id
+        target_event_id = relates_to.event_id
+
+        # record the report; a user can only report a given message once
+        is_new = await database_utils.record_message_report(
+            self.database, str(room_id), str(target_event_id), str(evt.sender),
+            int(evt.timestamp), self.log,
+        )
+        if not is_new:
+            return
+
+        current_reports = await database_utils.count_message_reports(
+            self.database, str(room_id), str(target_event_id), self.log
+        )
+
+        room_name = await self._get_room_name(room_id)
+        room_link = self._matrix_to_link(str(room_id), room_name)
+        event_link = self._matrix_to_link(
+            f"{room_id}/{target_event_id}", "view message"
+        )
+        reporter_link = self._matrix_to_link(str(evt.sender))
+
+        # auto-redact once a majority of the room's non-bot members have reported
+        if self.config.get("auto_redact_majority", False):
+            try:
+                members = await self.client.get_joined_members(room_id)
+                human_count = len([m for m in members if m != self.client.mxid])
+                if human_count > 0 and current_reports > human_count / 2:
+                    await self.client.redact(
+                        room_id,
+                        target_event_id,
+                        reason=(
+                            f"Auto-redacted: community majority report "
+                            f"({current_reports}/{human_count})"
+                        ),
+                    )
+                    await self.client.send_notice(
+                        self.config["notification_room"],
+                        html=(
+                            f"🗑️ <b>Message auto-redacted</b><br>"
+                            f"<b>Room:</b> {room_link}<br>"
+                            f"<b>Reason:</b> community majority report reached "
+                            f"({current_reports} of {human_count} members)."
+                        ),
+                    )
+                    await database_utils.clear_message_reports(
+                        self.database, str(room_id), str(target_event_id), self.log
+                    )
+                    return
+            except Exception as e:
+                self.log.error(f"Failed to auto-redact reported message: {e}")
+
+        # surface the first report to moderators
+        if current_reports == 1:
+            try:
+                await self.client.send_notice(
+                    self.config["notification_room"],
+                    html=(
+                        f"🚨 <b>Message reported</b><br>"
+                        f"<b>First reporter:</b> {reporter_link}<br>"
+                        f"<b>Room:</b> {room_link}<br>"
+                        f"<b>Action:</b> {event_link} to inspect and moderate."
+                    ),
+                )
+            except Exception as e:
+                self.log.error(f"Failed to send report notification: {e}")
 
     @command.new("community", help="manage rooms and members of a space")
     async def community(self) -> None:
