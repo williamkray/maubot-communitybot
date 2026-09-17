@@ -99,6 +99,14 @@ class ConfigManager:
         """
         return self.config.get("community_slug")
 
+    def get_use_community_slug(self) -> bool:
+        """Whether room aliases should be suffixed with the community slug.
+
+        Returns:
+            bool: True if the slug suffix should be used (default True)
+        """
+        return self.config.get("use_community_slug", True)
+
     def get_parent_room(self) -> Optional[str]:
         """Get the parent room ID.
 
@@ -231,6 +239,7 @@ class ConfigManager:
         return {
             "room_version": self.get_room_version(),
             "community_slug": self.get_community_slug(),
+            "use_community_slug": self.get_use_community_slug(),
             "invitees": self.get_invitees(),
             "invite_power_level": self.get_invite_power_level(),
             "encrypt": self.is_encryption_enabled(),

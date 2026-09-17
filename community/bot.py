@@ -174,7 +174,8 @@ class CommunityBot(Plugin):
         Returns:
             tuple: (is_valid, list_of_conflicting_aliases)
         """
-        if not self.config.get("community_slug", ""):
+        use_community_slug = self.config.get("use_community_slug", True)
+        if use_community_slug and not self.config.get("community_slug", ""):
             if evt:
                 await evt.respond(
                     "Error: No community slug configured. Please run initialize command first."
@@ -183,7 +184,11 @@ class CommunityBot(Plugin):
 
         server = self.client.parse_user_id(self.client.mxid)[1]
         return await room_utils.validate_room_aliases(
-            self.client, room_names, self.config.get("community_slug", ""), server
+            self.client,
+            room_names,
+            self.config.get("community_slug", ""),
+            server,
+            use_community_slug,
         )
 
     async def get_moderators_and_above(self) -> list[str]:
@@ -1618,7 +1623,7 @@ class CommunityBot(Plugin):
                         purge_list[user].append(roomname)
                     else:
                         purge_list[user].append(room)
-                    time.sleep("sleep")
+                    await asyncio.sleep(self.config["sleep"])
                 except MNotFound:
                     pass
                 except Exception as e:
@@ -1856,8 +1861,8 @@ class CommunityBot(Plugin):
             )
             return
 
-        # Check if community slug is configured
-        if not self.config["community_slug"]:
+        # Check if community slug is configured (only required when the slug suffix is used)
+        if self.config.get("use_community_slug", True) and not self.config["community_slug"]:
             await evt.reply(
                 "No community slug configured. Please run initialize command first."
             )
@@ -2062,8 +2067,8 @@ class CommunityBot(Plugin):
         # Get list of aliases to transfer while removing them from the old room
         aliases_to_transfer = await self.remove_room_aliases(room_id, evt)
 
-        # Check if community slug is configured
-        if not self.config["community_slug"]:
+        # Check if community slug is configured (only required when the slug suffix is used)
+        if self.config.get("use_community_slug", True) and not self.config["community_slug"]:
             await evt.respond(
                 "No community slug configured. Please run initialize command first."
             )
@@ -2979,8 +2984,8 @@ class CommunityBot(Plugin):
         msg = await evt.respond("Initializing new community space...")
 
         try:
-            # Generate community slug if not already set
-            if not self.config["community_slug"]:
+            # Generate community slug if not already set (skip entirely when the slug is disabled)
+            if self.config.get("use_community_slug", True) and not self.config["community_slug"]:
                 community_slug = self.generate_community_slug(community_name)
                 self.config["community_slug"] = community_slug
                 self.log.info(f"Generated community slug: {community_slug}")

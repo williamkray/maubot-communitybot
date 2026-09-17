@@ -63,6 +63,35 @@ class TestRoomUtils:
         assert result == (True, [])
 
     @pytest.mark.asyncio
+    async def test_validate_room_aliases_no_slug_when_disabled(self):
+        """A missing slug is fine when use_community_slug is False."""
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(side_effect=MNotFound("Room not found", 404))
+
+        result = await validate_room_aliases(
+            client, ["room1"], "", "example.com", use_community_slug=False
+        )
+        assert result == (True, [])
+
+    @pytest.mark.asyncio
+    async def test_validate_room_aliases_no_suffix_when_disabled(self):
+        """Aliases are built without the slug suffix when disabled."""
+        client = Mock()
+
+        def resolve_side_effect(alias):
+            if "room1" in alias:
+                return {"room_id": "!room1:example.com"}  # Exists
+            raise MNotFound()
+
+        client.resolve_room_alias = AsyncMock(side_effect=resolve_side_effect)
+
+        result = await validate_room_aliases(
+            client, ["room1", "room2"], "test", "example.com", use_community_slug=False
+        )
+        # conflict reported without the "-test" suffix
+        assert result == (False, ["#room1:example.com"])
+
+    @pytest.mark.asyncio
     async def test_validate_room_aliases_conflicts(self):
         """Test alias validation with conflicts."""
         client = Mock()
