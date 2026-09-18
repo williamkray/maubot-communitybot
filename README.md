@@ -256,27 +256,37 @@ need to deal with serious spam or coordinated abuse.
 
 ## community events (EXPERIMENTAL)
 
-> **⚠️ Experimental — work in progress.** Event management is included so it can be developed and
-> tested, but it is **incomplete and has known unresolved issues**. Do not rely on it in a
-> production community yet. Behaviour and configuration may change, and some operations may fail
-> (for example, RSVP writes have not been validated against all supported databases). Feedback and
-> fixes are welcome.
+> **⚠️ Experimental — work in progress.** Event management works but is still maturing. The
+> timezone parsing leans on abbreviation/DST heuristics, and changing your RSVP currently means
+> reacting again (removing a reaction does not un-RSVP). Behaviour and configuration may still
+> change. Feedback and fixes are welcome.
 
-the bot can create and track in-person or online community events, each backed by its own room:
+the bot can create and track in-person or online community events, each backed by its own room.
+most subcommands accept the event as a room alias, a room ID, the list index shown by
+`!community event list` (e.g. `2`), or — when you run the command inside the event room — nothing
+at all.
 
 - `!community event create <name>` — create an event (you become the host).
-- `!community event list` — list current, upcoming, and recent past events.
+- `!community event list` — list current, upcoming, and recent past events (with indexes).
 - `!community event describe <room>` — post the event description with RSVP reactions
-  (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest).
+  (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest). Running it again edits the
+  existing description in place rather than posting a duplicate.
 - `!community event update <room> [--date ...] [--time ...] [--location ...] [--description ...]` —
   update event details.
-- `!community event add-link <room> --url URL [--label TEXT]` — attach an extra link (e.g. a signup sheet).
-- `!community event add-organizer <room> <user>` — grant another user permission to manage the event.
 - `!community event attendees <room>` — show current RSVPs and headcount.
+- `!community event add-organizer <room> <user>` — grant another user permission to manage the event.
+- `!community event add-link <room> --url URL [--label TEXT]` — attach a link (e.g. a signup sheet).
+- `!community event links <room>` — list the event's links (numbered).
+- `!community event remove-link <room> <index|url|label>` — remove a link.
+- `!community event edit-link <room> <index|url|label> [--url URL] [--label TEXT]` — change a link.
+- `!community event cancel <room>` — remove the event from the list and stop RSVP tracking (the room
+  itself is left intact; archive it with `!community room archive` if you no longer need it).
 - `!community event ics <room>` — generate and upload an `.ics` calendar file for the event.
 
 members RSVP by reacting to the description message; those who RSVP "yes" or "maybe" are invited to
-the event room automatically. set `events_encrypt_rooms` to control whether event rooms are created
+the event room automatically. the event's DB record, its room topic, and the posted description
+message are kept in sync — editing details or links updates the topic and rewrites the existing
+description in place. set `events_encrypt_rooms` to control whether event rooms are created
 encrypted (default `false` so late-comers can read prior discussion).
 
 # installation

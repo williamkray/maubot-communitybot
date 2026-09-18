@@ -65,7 +65,7 @@ TZ_ABBREV_OFFSETS: Dict[str, int] = {
 RSVP_YES_KEYS = {"👍", "👍️"}
 RSVP_NO_KEYS = {"👎", "👎️"}
 RSVP_MAYBE_KEYS = {"🤔", "🤔️"}
-RSVP_PLUS_ONE_KEY = "➕"
+RSVP_PLUS_ONE_KEYS = {"➕", "➕️"}
 # Emoji to remove a previously indicated plus-one guest
 RSVP_MINUS_ONE_KEYS = {"➖", "➖️"}
 
@@ -98,30 +98,99 @@ def parse_extra_links_json(raw: str) -> List[Dict[str, str]]:
         return []
 
 
-def format_event_topic(
-    name: str,
-    start_ts: int,
-    end_ts: Optional[int],
-    location: Optional[str],
-    host_id: str,
-    organizers: List[str],
-    description: Optional[str],
-    extra_links: List[Dict[str, str]],
-    room_link: str,
-) -> str:
-    """Build room topic text from event fields."""
-    lines = [f"Event: {name}", f"Date/Time: {_format_datetime(start_ts, end_ts)}"]
-    if location:
-        lines.append(f"Location: {location}")
-    lines.append(f"Host: {host_id}")
-    if organizers:
-        lines.append(f"Organizers: {', '.join(organizers)}")
-    if description:
-        lines.append(f"Description: {description}")
-    for link in extra_links:
-        lines.append(f"{link['label']}: {link['url']}")
-    lines.append(f"Room: {room_link}")
-    return " | ".join(lines)
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for dedupe comparison (trim + case-fold)."""
+    return (url or "").strip().casefold()
+
+
+def add_link(
+    links: List[Dict[str, str]], url: str, label: Optional[str] = None
+) -> Tuple[List[Dict[str, str]], bool]:
+    """Append a link, de-duplicating by URL. If the URL already exists, its label
+    is updated instead of adding a duplicate.
+
+    Returns (new_links, added) where added is False if it updated an existing entry.
+    """
+    url = (url or "").strip()
+    label = (label or "Link").strip() or "Link"
+    out = [dict(x) for x in links]
+    for entry in out:
+        if _normalize_url(entry.get("url", "")) == _normalize_url(url):
+            entry["label"] = label
+            return out, False
+    out.append({"label": label, "url": url})
+    return out, True
+
+
+def remove_link(
+    links: List[Dict[str, str]], selector: str
+) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
+    """Remove a link by 1-based index or by matching URL/label.
+
+    Returns (new_links, removed_entry). removed_entry is None if nothing matched.
+    """
+    selector = (selector or "").strip()
+    if not selector:
+        return list(links), None
+    if selector.isdigit():
+        idx = int(selector)
+        if 1 <= idx <= len(links):
+            out = list(links)
+            removed = out.pop(idx - 1)
+            return out, removed
+        return list(links), None
+    for match_key in ("url", "label"):
+        for i, entry in enumerate(links):
+            if (entry.get(match_key, "") or "").casefold() == selector.casefold():
+                out = list(links)
+                removed = out.pop(i)
+                return out, removed
+    return list(links), None
+
+
+def edit_link(
+    links: List[Dict[str, str]],
+    selector: str,
+    new_url: Optional[str] = None,
+    new_label: Optional[str] = None,
+) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
+    """Edit a link's url and/or label, selected by 1-based index or URL/label match.
+
+    Returns (new_links, edited_entry). edited_entry is None if nothing matched.
+    """
+    selector = (selector or "").strip()
+    out = [dict(x) for x in links]
+    target = None
+    if selector.isdigit():
+        idx = int(selector)
+        if 1 <= idx <= len(out):
+            target = out[idx - 1]
+    else:
+        for entry in out:
+            if (
+                (entry.get("url", "") or "").casefold() == selector.casefold()
+                or (entry.get("label", "") or "").casefold() == selector.casefold()
+            ):
+                target = entry
+                break
+    if target is None:
+        return out, None
+    if new_url and new_url.strip():
+        target["url"] = new_url.strip()
+    if new_label and new_label.strip():
+        target["label"] = new_label.strip()
+    return out, target
+
+
+def format_links_list(links: List[Dict[str, str]]) -> str:
+    """Human-readable numbered list of links (HTML) for the list-links command."""
+    if not links:
+        return "No links attached to this event."
+    rows = [
+        f'{i}. <a href="{link["url"]}">{link["label"]}</a> ({link["url"]})'
+        for i, link in enumerate(links, 1)
+    ]
+    return "<br/>".join(rows)
 
 
 def _resolve_timezone(tz_str: str, date_obj: Optional[date] = None):
@@ -476,6 +545,38 @@ def format_event_description_html(
     return "<br/>".join(parts)
 
 
+def format_event_description_text(
+    name: str,
+    start_ts: int,
+    end_ts: Optional[int],
+    location: Optional[str],
+    host_id: str,
+    organizers: List[str],
+    description: Optional[str],
+    extra_links: List[Dict[str, str]],
+    room_id: str,
+    timezone_str: Optional[str] = None,
+) -> str:
+    """Plaintext fallback for the event description message (used as the m.text
+    body alongside the HTML formatted_body, including for edits)."""
+    tz = timezone_str or DEFAULT_TIMEZONE
+    lines = [name, _format_datetime(start_ts, end_ts, tz)]
+    if location:
+        lines.append(f"Location: {location}")
+    lines.append(f"Host: {host_id}")
+    if organizers:
+        lines.append(f"Organizers: {', '.join(organizers)}")
+    if description:
+        lines.append(description)
+    for link in extra_links:
+        lines.append(f"{link['label']}: {link['url']}")
+    lines.append(
+        "RSVP with reactions: 👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest."
+    )
+    lines.append(f"Event room: https://matrix.to/#/{room_id}")
+    return "\n".join(lines)
+
+
 def generate_ics(
     name: str,
     start_ts: int,
@@ -486,9 +587,11 @@ def generate_ics(
     uid_suffix: str,
 ) -> str:
     """Generate .ics file content (VCALENDAR with one VEVENT)."""
-    start_dt = datetime.utcfromtimestamp(start_ts / 1000.0)
+    start_dt = datetime.fromtimestamp(start_ts / 1000.0, tz=UTC_TZ)
     end_ts_use = end_ts if (end_ts and end_ts > start_ts) else start_ts + 3600 * 1000
-    end_dt = datetime.utcfromtimestamp(end_ts_use / 1000.0)
+    end_dt = datetime.fromtimestamp(end_ts_use / 1000.0, tz=UTC_TZ)
+    # DTSTAMP is when the calendar object was created, not the event start.
+    dtstamp = datetime.now(UTC_TZ)
 
     def ics_escape(s: str) -> str:
         return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
@@ -500,7 +603,7 @@ def generate_ics(
         "PRODID:-//CommunityBot//Event//EN",
         "BEGIN:VEVENT",
         f"UID:{uid}",
-        f"DTSTAMP:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTAMP:{dtstamp.strftime('%Y%m%dT%H%M%SZ')}",
         f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
         f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}",
         f"SUMMARY:{ics_escape(name)}",
@@ -546,7 +649,7 @@ def rsvp_status_from_reaction_key(key: str) -> Optional[Tuple[str, bool]]:
         return ("no", False)
     if key_stripped in RSVP_MAYBE_KEYS:
         return ("maybe", False)
-    if key_stripped.upper() == RSVP_PLUS_ONE_KEY.upper():
+    if key_stripped in RSVP_PLUS_ONE_KEYS:
         return ("yes", True)
     return None
 

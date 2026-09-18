@@ -1416,7 +1416,7 @@ class CommunityBot(Plugin):
 
         event_room_id = row["room_id"]
         now_ms = int(time.time() * 1000)
-        # Special case: ➖ reaction removes plus-one without changing status
+        # ➖ removes a previously indicated extra guest without changing status
         if event_utils.is_minus_one_reaction(key):
             await self.database.execute(
                 """UPDATE event_rsvps
@@ -1431,18 +1431,30 @@ class CommunityBot(Plugin):
         rsvp = event_utils.rsvp_status_from_reaction_key(key)
         if not rsvp:
             return False
-        rsvp_status, plus_one = rsvp
+        rsvp_status, adds_plus_one = rsvp
+
+        # Preserve an existing +1 across yes/maybe/no status changes; only ➕ sets
+        # it and only ➖ clears it. Compute the target value in Python so the
+        # upsert stays portable (a boolean OR on INT columns errors on Postgres).
+        existing = await self.database.fetchrow(
+            "SELECT plus_one FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
+            event_room_id,
+            str(evt.sender),
+        )
+        existing_plus_one = 1 if (existing and existing["plus_one"]) else 0
+        plus_one = 1 if adds_plus_one else existing_plus_one
+
         await self.database.execute(
             """INSERT INTO event_rsvps (event_room_id, user_id, rsvp_status, plus_one, updated_ts)
               VALUES ($1, $2, $3, $4, $5)
               ON CONFLICT (event_room_id, user_id)
               DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
-                plus_one = event_rsvps.plus_one OR EXCLUDED.plus_one,
+                plus_one = EXCLUDED.plus_one,
                 updated_ts = EXCLUDED.updated_ts""",
             event_room_id,
             str(evt.sender),
             rsvp_status,
-            1 if plus_one else 0,
+            plus_one,
             now_ms,
         )
         if rsvp_status in ("yes", "maybe"):
@@ -1861,7 +1873,8 @@ class CommunityBot(Plugin):
     async def event(self, evt: MessageEvent) -> None:
         """Main event command - show usage."""
         await evt.reply(
-            "Use !community event <subcommand>. Subcommands: create, list, describe, update, add-organizer, add-link, ics"
+            "Use !community event <subcommand>. Subcommands: create, list, describe, update, "
+            "attendees, add-organizer, add-link, links, remove-link, edit-link, ics, cancel"
         )
 
     @event.subcommand("create", help="create a new event (you become the host)")
@@ -1875,7 +1888,9 @@ class CommunityBot(Plugin):
         if not name:
             await evt.reply("Please provide an event name.")
             return
-        if not self.config.get("community_slug", ""):
+        if self.config.get("use_community_slug", True) and not self.config.get(
+            "community_slug", ""
+        ):
             await evt.reply(
                 "No community slug configured. Please run the initialize command first."
             )
@@ -1988,6 +2003,71 @@ class CommunityBot(Plugin):
         )
         return rows[0] if rows else None
 
+    async def _event_room_list(self):
+        """Return the same current/upcoming/recent event rows used by `list`,
+        ordered so that a 1-based index is stable across list/describe/etc."""
+        now_ms = int(time.time() * 1000)
+        cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        return await self.database.fetch(
+            """SELECT room_id
+               FROM community_events
+               WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
+               ORDER BY event_start_ts ASC""",
+            cutoff_old_ms,
+        )
+
+    async def _resolve_event_room(self, evt: MessageEvent, raw_arg: Optional[str]):
+        """Resolve an event-room argument to a room_id, accepting any of:
+        a list index (``1`` or ``event1``), a room alias (``#foo:server``), a
+        room ID (``!id:server``), or — when omitted — the current room.
+
+        Returns (room_id, error_message); room_id is None when error_message is set.
+        """
+        raw = (raw_arg or "").strip()
+        # list index, e.g. "1" or "event1"
+        if raw and not raw.startswith(("#", "!")):
+            m = re.match(r"^(?:event)?(\d+)$", raw, re.IGNORECASE)
+            if m:
+                idx = int(m.group(1))
+                rows = await self._event_room_list()
+                if not rows or idx < 1 or idx > len(rows):
+                    return (
+                        None,
+                        "That event index does not exist. Use !community event list to see valid indexes.",
+                    )
+                return (rows[idx - 1]["room_id"], None)
+        # alias / room id / current room
+        return await event_utils.resolve_room_id(self.client, raw or None, evt.room_id)
+
+    async def _resolve_event_and_selector(self, evt: MessageEvent, args: str):
+        """For subcommands shaped like ``<room?> <selector...>`` (remove-link,
+        edit-link). Disambiguates the leading token:
+
+        - an explicit ``#alias``/``!id`` first token is always the room;
+        - otherwise, if the current room is itself a registered event, the whole
+          argument string is the selector (targeting the current room);
+        - otherwise the first token is the room (index/alias/id) and the rest is
+          the selector.
+
+        Returns (room_id, selector_str, error_message).
+        """
+        args = (args or "").strip()
+        parts = args.split(None, 1)
+        first = parts[0] if parts else ""
+        if first.startswith(("#", "!")):
+            room_id, err = await self._resolve_event_room(evt, first)
+            selector = parts[1] if len(parts) > 1 else ""
+            return room_id, selector, err
+        # running inside the event room: no need to name it
+        if await self._get_event_row(str(evt.room_id)):
+            return str(evt.room_id), args, None
+        # otherwise the first token identifies the event (index/alias/id)
+        if not parts:
+            return None, "", "Please specify the event room (alias, ID, or list index)."
+        room_id, err = await self._resolve_event_room(evt, first)
+        selector = parts[1] if len(parts) > 1 else ""
+        return room_id, selector, err
+
     async def _can_manage_event(self, user_id: UserID, event_row: dict) -> bool:
         """True if user is host, organizer, or community moderator."""
         if not event_row:
@@ -1999,6 +2079,94 @@ class CommunityBot(Plugin):
             return True
         return await self.user_permitted(user_id, 50)
 
+    async def _edit_message(
+        self, room_id: str, event_id: str, text: str, html: str
+    ) -> None:
+        """Edit a previously-sent message in place using an m.replace relation.
+
+        Reactions attached to the original event are preserved (an edit does not
+        touch child annotations)."""
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {text}",
+            "format": "org.matrix.custom.html",
+            "formatted_body": f"* {html}",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": html,
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": event_id,
+            },
+        }
+        await self.client.send_message_event(room_id, EventType.ROOM_MESSAGE, content)
+
+    async def _sync_event_presentation(self, room_id: str) -> bool:
+        """Regenerate the event room topic and, if a description message has been
+        posted, edit it in place so the DB row, the room topic, and the posted
+        description all agree. Safe to call after any mutation to an event.
+
+        Returns False only if a tracked description message existed but could not
+        be edited (e.g. it was redacted); True otherwise. Callers that don't care
+        can ignore the result.
+        """
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return True
+        orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        tz = event_utils.get_event_timezone(event_row)
+        start_ts = int(event_row["event_start_ts"])
+        end_ts = int(event_row["event_end_ts"]) if event_row["event_end_ts"] else None
+
+        # 1) room topic
+        topic = event_utils.format_event_topic(
+            name=event_row["name"],
+            start_ts=start_ts,
+            end_ts=end_ts,
+            location=event_row["location"],
+            host_id=event_row["host_id"],
+            organizers=orgs,
+            description=event_row["description"],
+            extra_links=links,
+            room_link=f"https://matrix.to/#/{room_id}",
+            timezone_str=tz,
+        )
+        try:
+            await self.client.send_state_event(
+                room_id, EventType.ROOM_TOPIC, {"topic": topic}
+            )
+        except Exception as e:
+            self.log.warning(f"Failed to update event room topic: {e}")
+
+        # 2) edit the posted description message, if one exists
+        desc_event_id = event_row["description_event_id"]
+        desc_room_id = event_row["description_room_id"]
+        if desc_event_id and desc_room_id:
+            common = dict(
+                name=event_row["name"],
+                start_ts=start_ts,
+                end_ts=end_ts,
+                location=event_row["location"],
+                host_id=event_row["host_id"],
+                organizers=orgs,
+                description=event_row["description"],
+                extra_links=links,
+                room_id=room_id,
+                timezone_str=tz,
+            )
+            html = event_utils.format_event_description_html(room_link="", **common)
+            text = event_utils.format_event_description_text(**common)
+            try:
+                await self._edit_message(desc_room_id, desc_event_id, text, html)
+            except Exception as e:
+                self.log.warning(f"Failed to update event description message: {e}")
+                return False
+        return True
+
     @event.subcommand(
         "describe",
         help="post event description with RSVP reactions (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest)",
@@ -2009,42 +2177,36 @@ class CommunityBot(Plugin):
         if not await self.is_user_in_parent_space(evt.sender):
             await evt.reply("Only community members can describe events.")
             return
-        raw_room = (room or "").strip()
-        room_id: Optional[str] = None
-        err: Optional[str] = None
-        # Support numeric or event-index arguments from the list, e.g. "1" or "event1"
-        if raw_room and not raw_room.startswith(("#", "!")):
-            m = re.match(r"^(?:event)?(\d+)$", raw_room, re.IGNORECASE)
-            if m:
-                idx = int(m.group(1))
-                now_ms = int(time.time() * 1000)
-                cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
-                rows = await self.database.fetch(
-                    """SELECT room_id
-                       FROM community_events
-                       WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
-                       ORDER BY event_start_ts ASC""",
-                    cutoff_old_ms,
-                )
-                if not rows or idx < 1 or idx > len(rows):
-                    await evt.reply("That event index does not exist. Use !community event list to see valid indexes.")
-                    return
-                room_id = rows[idx - 1]["room_id"]
-            else:
-                room_id, err = await event_utils.resolve_room_id(
-                    self.client, raw_room or None, evt.room_id
-                )
-        else:
-            room_id, err = await event_utils.resolve_room_id(
-                self.client, raw_room or None, evt.room_id
-            )
+        room_id, err = await self._resolve_event_room(evt, room)
         if err or not room_id:
-            await evt.reply(err or "Please specify an event room (alias or ID).")
+            await evt.reply(err or "Please specify an event room (alias, ID, or index).")
             return
         event_row = await self._get_event_row(room_id)
         if not event_row:
             await evt.reply("This room is not a registered community event.")
             return
+
+        # Idempotent: if a description has already been posted, edit it in place
+        # instead of posting a second message with its own (untracked) reactions.
+        if event_row["description_event_id"] and event_row["description_room_id"]:
+            synced = await self._sync_event_presentation(room_id)
+            if synced:
+                await evt.reply(
+                    "Updated the existing event description in place "
+                    f"(<a href=\"https://matrix.to/#/{event_row['description_room_id']}\">its room</a>). "
+                    "Delete that message and run describe again if you want to repost it.",
+                    allow_html=True,
+                )
+                return
+            # The tracked description couldn't be edited (likely redacted/deleted).
+            # Forget it so this describe call falls through and reposts a fresh one.
+            await self.database.execute(
+                """UPDATE community_events
+                   SET description_event_id = NULL, description_room_id = NULL
+                   WHERE room_id = $1""",
+                room_id,
+            )
+
         orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
         links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
         event_tz = event_utils.get_event_timezone(event_row)
@@ -2065,7 +2227,7 @@ class CommunityBot(Plugin):
         if msg_event_id:
             # Older maubot/matrix clients may not have send_reaction helper,
             # so send m.reaction events manually.
-            for key in ("👍", "👎", "🤔", "➕"):
+            for key in ("👍", "👎", "🤔", "➕", "➖"):
                 await self.client.send_message_event(
                     evt.room_id,
                     EventType.REACTION,
@@ -2103,9 +2265,7 @@ class CommunityBot(Plugin):
         else:
             room_arg = parts[0]
             rest = " ".join(parts[1:])
-        room_id, err = await event_utils.resolve_room_id(
-            self.client, room_arg, evt.room_id
-        )
+        room_id, err = await self._resolve_event_room(evt, room_arg)
         if err or not room_id:
             await evt.reply(err or "Could not resolve room.")
             return
@@ -2282,25 +2442,9 @@ class CommunityBot(Plugin):
                         "Try again or contact an admin. Check server logs for details."
                     )
                     return
-            # Build topic from current DB row so it always matches what describe shows
-            orgs = event_utils.parse_organizers_json(row_after["organizers"] or "[]")
-            links = event_utils.parse_extra_links_json(row_after["extra_links"] or "[]")
-            topic_tz = event_utils.get_event_timezone(row_after)
-            topic = event_utils.format_event_topic(
-                name=row_after["name"],
-                start_ts=int(row_after["event_start_ts"]),
-                end_ts=int(row_after["event_end_ts"]) if row_after["event_end_ts"] else None,
-                location=row_after["location"],
-                host_id=row_after["host_id"],
-                organizers=orgs,
-                description=row_after["description"],
-                extra_links=links,
-                room_link=f"https://matrix.to/#/{event_room_id}",
-                timezone_str=topic_tz,
-            )
-            await self.client.send_state_event(
-                event_room_id, EventType.ROOM_TOPIC, {"topic": topic}
-            )
+            # Regenerate the room topic AND the posted description together so the
+            # DB row, topic, and RSVP message never drift out of sync.
+            await self._sync_event_presentation(event_room_id)
             if date_val or time_val:
                 # If we made a DST-related abbreviation guess, surface that to the user
                 if locals().get("adjust_note"):
@@ -2331,9 +2475,7 @@ class CommunityBot(Plugin):
         else:
             room_arg = parts[0]
             rest = " ".join(parts[1:])
-        room_id, err = await event_utils.resolve_room_id(
-            self.client, room_arg, evt.room_id
-        )
+        room_id, err = await self._resolve_event_room(evt, room_arg)
         if err or not room_id:
             await evt.reply(err or "Could not resolve room.")
             return
@@ -2372,35 +2514,169 @@ class CommunityBot(Plugin):
             await evt.reply("Please provide a URL.")
             return
         links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
-        label_val = (label_val or "Link").strip()
-        links.append({"label": label_val, "url": url_val.strip()})
+        links, added = event_utils.add_link(links, url_val.strip(), label_val)
         await self.database.execute(
             "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
             json.dumps(links),
             room_id,
         )
-        event_tz = event_utils.get_event_timezone(event_row)
-        topic = event_utils.format_event_topic(
-            name=event_row["name"],
-            start_ts=event_row["event_start_ts"],
-            end_ts=event_row["event_end_ts"],
-            location=event_row["location"],
-            host_id=event_row["host_id"],
-            organizers=event_utils.parse_organizers_json(
-                event_row["organizers"] or "[]"
-            ),
-            description=event_row["description"],
-            extra_links=links,
-            room_link=f"https://matrix.to/#/{room_id}",
-            timezone_str=event_tz,
+        await self._sync_event_presentation(room_id)
+        if added:
+            await evt.reply(f"Link added ({len(links)} total). Use `!community event links {room_id}` to list them.")
+        else:
+            await evt.reply("That URL was already attached; updated its label.")
+
+    @event.subcommand("links", help="list the links attached to an event")
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_links(self, evt: MessageEvent, room: str) -> None:
+        if not await self.is_user_in_parent_space(evt.sender):
+            await evt.reply("Only community members can view event links.")
+            return
+        room_id, err = await self._resolve_event_room(evt, room)
+        if err or not room_id:
+            await evt.reply(err or "Please specify an event room (alias, ID, or index).")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        await evt.respond(
+            f"<b>Links for {event_row['name']}</b><br/>"
+            + event_utils.format_links_list(links)
+            + "<br/><br/>Manage with <code>!community event remove-link &lt;room&gt; &lt;#|url|label&gt;</code> "
+            "or <code>edit-link &lt;room&gt; &lt;#|url|label&gt; [--url URL] [--label TEXT]</code>.",
+            allow_html=True,
         )
-        try:
-            await self.client.send_state_event(
-                room_id, EventType.ROOM_TOPIC, {"topic": topic}
+
+    @event.subcommand(
+        "remove-link",
+        help="remove a link from an event. Usage: remove-link <room> <index|url|label>",
+    )
+    @command.argument("args", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_remove_link(self, evt: MessageEvent, args: str) -> None:
+        room_id, selector, err = await self._resolve_event_and_selector(evt, args)
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply(
+                "Only the event host, organizers, or community moderators can remove links."
             )
-        except Exception as e:
-            self.log.warning(f"Failed to update event room topic: {e}")
-        await evt.react("✅")
+            return
+        selector = (selector or "").strip()
+        if not selector:
+            await evt.reply(
+                "Specify which link to remove by index, URL, or label. "
+                "Use !community event links <room> to see them."
+            )
+            return
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        new_links, removed = event_utils.remove_link(links, selector)
+        if removed is None:
+            await evt.reply(f"No link matched '{selector}'. Use !community event links <room> to list them.")
+            return
+        await self.database.execute(
+            "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
+            json.dumps(new_links),
+            room_id,
+        )
+        await self._sync_event_presentation(room_id)
+        await evt.reply(f"Removed link: {removed.get('label', 'Link')} ({removed.get('url', '')}).")
+
+    @event.subcommand(
+        "edit-link",
+        help="edit a link. Usage: edit-link <room> <index|url|label> [--url URL] [--label TEXT]",
+    )
+    @command.argument("args", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_edit_link(self, evt: MessageEvent, args: str) -> None:
+        room_id, rest, err = await self._resolve_event_and_selector(evt, args)
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply(
+                "Only the event host, organizers, or community moderators can edit links."
+            )
+            return
+        # selector is the first chunk before any --flags; flags give new url/label
+        flag_split = (rest or "").split(" --", 1)
+        selector = flag_split[0].strip()
+        flags = ("--" + flag_split[1]) if len(flag_split) > 1 else ""
+        new_url = new_label = None
+        for raw in flags.split(" --"):
+            s = raw.strip().lstrip("-").strip()
+            if not s:
+                continue
+            parts_in = s.split(None, 1)
+            key = (parts_in[0] or "").lower()
+            val = parts_in[1].strip() if len(parts_in) > 1 else ""
+            if key == "url" and val:
+                new_url = val
+            elif key == "label" and val:
+                new_label = val
+        if not selector:
+            await evt.reply("Specify which link to edit (index, URL, or label).")
+            return
+        if not new_url and not new_label:
+            await evt.reply("Provide --url and/or --label with the new value(s).")
+            return
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        new_links, edited = event_utils.edit_link(links, selector, new_url, new_label)
+        if edited is None:
+            await evt.reply(f"No link matched '{selector}'. Use !community event links <room> to list them.")
+            return
+        await self.database.execute(
+            "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
+            json.dumps(new_links),
+            room_id,
+        )
+        await self._sync_event_presentation(room_id)
+        await evt.reply(f"Updated link: {edited.get('label', 'Link')} ({edited.get('url', '')}).")
+
+    @event.subcommand(
+        "cancel",
+        help="cancel an event: removes it from the event list and stops RSVP tracking",
+    )
+    @command.argument("room", pass_raw=True, required=True)
+    @decorators.require_parent_room
+    async def event_cancel(self, evt: MessageEvent, room: str) -> None:
+        room_id, err = await self._resolve_event_room(evt, room)
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply(
+                "Only the event host, organizers, or community moderators can cancel the event."
+            )
+            return
+        # Remove the event registration and its RSVPs. The room itself is left
+        # intact (archive it separately with !community room archive if desired).
+        await self.database.execute(
+            "DELETE FROM event_rsvps WHERE event_room_id = $1", room_id
+        )
+        await self.database.execute(
+            "DELETE FROM community_events WHERE room_id = $1", room_id
+        )
+        await evt.reply(
+            f"Event '{event_row['name']}' cancelled: removed from the event list and RSVP tracking stopped. "
+            "The room still exists — use !community room archive to archive it if you no longer need it."
+        )
 
     @event.subcommand("attendees", help="show current RSVPs and headcount for an event")
     @command.argument("room", pass_raw=True, required=False)
@@ -2409,35 +2685,7 @@ class CommunityBot(Plugin):
         if not await self.is_user_in_parent_space(evt.sender):
             await evt.reply("Only community members can see event attendees.")
             return
-        raw_room = (room or "").strip()
-        room_id: Optional[str] = None
-        err: Optional[str] = None
-        # Support numeric or event-index arguments from the list, e.g. "1" or "event1"
-        if raw_room and not raw_room.startswith(("#", "!")):
-            m = re.match(r"^(?:event)?(\d+)$", raw_room, re.IGNORECASE)
-            if m:
-                idx = int(m.group(1))
-                now_ms = int(time.time() * 1000)
-                cutoff_old_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
-                rows = await self.database.fetch(
-                    """SELECT room_id
-                       FROM community_events
-                       WHERE (COALESCE(event_end_ts, event_start_ts) >= $1) OR (event_start_ts = 0)
-                       ORDER BY event_start_ts ASC""",
-                    cutoff_old_ms,
-                )
-                if not rows or idx < 1 or idx > len(rows):
-                    await evt.reply("That event index does not exist. Use !community event list to see valid indexes.")
-                    return
-                room_id = rows[idx - 1]["room_id"]
-            else:
-                room_id, err = await event_utils.resolve_room_id(
-                    self.client, raw_room or None, evt.room_id
-                )
-        else:
-            room_id, err = await event_utils.resolve_room_id(
-                self.client, raw_room or None, evt.room_id
-            )
+        room_id, err = await self._resolve_event_room(evt, room)
         if err or not room_id:
             await evt.reply(err or "Please specify an event room (alias, ID, or index).")
             return
@@ -2492,9 +2740,7 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "Matrix ID", required=True)
     @decorators.require_parent_room
     async def event_add_organizer(self, evt: MessageEvent, room: str, mxid: UserID) -> None:
-        room_id, err = await event_utils.resolve_room_id(
-            self.client, room.strip(), None
-        )
+        room_id, err = await self._resolve_event_room(evt, room)
         if err or not room_id:
             await evt.reply(err or "Could not resolve room.")
             return
@@ -2516,6 +2762,8 @@ class CommunityBot(Plugin):
             json.dumps(orgs),
             room_id,
         )
+        # keep the topic/description in sync with the new organizer list
+        await self._sync_event_presentation(room_id)
         await evt.react("✅")
 
     @event.subcommand("ics", help="generate and upload an .ics calendar file for the event")
@@ -2525,9 +2773,7 @@ class CommunityBot(Plugin):
         if not await self.is_user_in_parent_space(evt.sender):
             await evt.reply("Only community members can download event .ics.")
             return
-        room_id, err = await event_utils.resolve_room_id(
-            self.client, (room or "").strip() or None, evt.room_id
-        )
+        room_id, err = await self._resolve_event_room(evt, room)
         if err or not room_id:
             await evt.reply(err or "Please specify an event room (alias or ID).")
             return
