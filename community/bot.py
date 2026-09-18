@@ -2334,15 +2334,23 @@ class CommunityBot(Plugin):
             await evt.reply("This room is not a registered community event.")
             return
 
-        # Idempotent: if a description has already been posted, edit it in place
-        # instead of posting a second message with its own (untracked) reactions.
+        # Idempotent: if a description has already been posted, refresh that
+        # message in place instead of posting a second one with its own
+        # (untracked) reactions.
         if event_row["description_event_id"] and event_row["description_room_id"]:
             synced = await self._sync_event_presentation(room_id)
             if synced:
+                desc_link = self._matrix_to_link(
+                    f"{event_row['description_room_id']}/{event_row['description_event_id']}",
+                    "the existing description message",
+                )
                 await evt.reply(
-                    "Updated the existing event description in place "
-                    f"(<a href=\"https://matrix.to/#/{event_row['description_room_id']}\">its room</a>). "
-                    "Delete that message and run describe again if you want to repost it.",
+                    f"This event already has a description — see {desc_link}. "
+                    "I refreshed it to match the event's current details (running "
+                    "<code>describe</code> again just re-syncs it; it won't post a duplicate). "
+                    "<br/>To move the description to a different room, delete that message and run "
+                    "<code>describe</code> in the room you want it. Deleting it and re-posting "
+                    "does <b>not</b> affect anyone's RSVPs or the headcount.",
                     allow_html=True,
                 )
                 return
