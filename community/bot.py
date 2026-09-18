@@ -1448,15 +1448,35 @@ class CommunityBot(Plugin):
             now_ms,
         )
         result = await self._recompute_user_rsvp(event_room_id, str(evt.sender))
+        status = result[0] if result else None
 
-        if result and result[0] in ("yes", "maybe"):
+        if status in ("yes", "maybe"):
             try:
                 members = await self.client.get_joined_members(event_room_id)
                 if evt.sender not in members:
                     await self.client.invite_user(event_room_id, evt.sender)
             except Exception as e:
                 self.log.warning(f"Failed to invite {evt.sender} to event room: {e}")
+        elif kind[0] == "guest":
+            # They set a guest count but haven't RSVP'd yes/maybe for themselves.
+            # The number reaction is still recorded, so once they RSVP the guests
+            # are counted automatically; nudge them to do so.
+            await self._prompt_guest_needs_rsvp(evt, kind[1])
         return True
+
+    async def _prompt_guest_needs_rsvp(self, evt: ReactionEvent, guests: int) -> None:
+        """Nudge a user who added a guest count without RSVPing themselves."""
+        who = self._matrix_to_link(str(evt.sender))
+        plural = "guest" if guests == 1 else "guests"
+        note = (
+            f"{who}: you indicated {guests} additional {plural}, but you haven't "
+            "RSVP'd yet. React 👍 (yes) or 🤔 (maybe) to RSVP for yourself and I'll "
+            "invite you and count your guests."
+        )
+        try:
+            await self.client.send_notice(evt.room_id, html=note)
+        except Exception as e:
+            self.log.warning(f"Failed to send RSVP prompt: {e}")
 
     async def _recompute_user_rsvp(self, event_room_id: str, user_id: str):
         """Recompute a user's RSVP summary (status, guest_count) from their active

@@ -301,6 +301,7 @@ def _make_rsvp_bot(db):
     # bind the real derived-model helpers so the whole flow is exercised
     bot._recompute_user_rsvp = CommunityBot._recompute_user_rsvp.__get__(bot)
     bot._reject_guest_reaction = CommunityBot._reject_guest_reaction.__get__(bot)
+    bot._prompt_guest_needs_rsvp = CommunityBot._prompt_guest_needs_rsvp.__get__(bot)
     bot._matrix_to_link = CommunityBot._matrix_to_link.__get__(bot)
     return bot
 
@@ -435,6 +436,36 @@ class TestRSVPDerivedModelRealDB:
             await _seed_event(db)
             bot = _make_rsvp_bot(db)
             assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("🎉")) is False
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_guest_without_status_prompts_and_retains(self):
+        db = await _make_db()
+        try:
+            await _seed_event(db, max_guests=3)
+            bot = _make_rsvp_bot(db)
+
+            # guest number but no yes/maybe: prompt, no RSVP row, no invite
+            handled = await CommunityBot.handle_event_rsvp(
+                bot, _make_reaction("2️⃣", "$g", ts=1)
+            )
+            assert handled is True
+            bot.client.send_notice.assert_awaited_once()
+            bot.client.invite_user.assert_not_awaited()
+            assert await _fetch_rsvp(db) is None
+            # the guest reaction is retained so it counts once they RSVP
+            assert await db.fetchrow(
+                "SELECT 1 FROM event_reactions WHERE reaction_event_id = '$g'"
+            ) is not None
+
+            # now they RSVP yes -> guests are counted automatically, and (since
+            # they are not yet in the event room) they get invited
+            bot.client.get_joined_members = AsyncMock(return_value={})
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍", "$y", ts=2))
+            row = await _fetch_rsvp(db)
+            assert (row["rsvp_status"], row["guest_count"]) == ("yes", 2)
+            bot.client.invite_user.assert_awaited()
         finally:
             await db.stop()
 
