@@ -997,7 +997,7 @@ class CommunityBot(Plugin):
         if evt.room_id not in space_rooms:
             return
 
-        template = self.config.get(template_key)
+        template = self.config.get(template_key, "")
         if not template:
             return  # notification disabled by leaving the message blank
 
@@ -1629,7 +1629,7 @@ class CommunityBot(Plugin):
         if not self.config["notification_room"]:
             return
 
-        report_emojis = self.config.get("report_emojis") or []
+        report_emojis = self.config.get("report_emojis", []) or []
         if not report_emojis:
             return
 

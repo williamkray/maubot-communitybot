@@ -97,7 +97,7 @@ class ConfigManager:
         Returns:
             str: Community slug or None if not configured
         """
-        return self.config.get("community_slug")
+        return self.config.get("community_slug", None)
 
     def get_use_community_slug(self) -> bool:
         """Whether room aliases should be suffixed with the community slug.
@@ -113,7 +113,7 @@ class ConfigManager:
         Returns:
             str: Parent room ID or None if not configured
         """
-        return self.config.get("parent_room")
+        return self.config.get("parent_room", None)
 
     def get_invitees(self) -> List[str]:
         """Get the list of users to invite to new rooms.
@@ -213,7 +213,7 @@ class ConfigManager:
 
         missing = []
         for config_key in required_configs:
-            if not self.config.get(config_key):
+            if not self.config.get(config_key, None):
                 missing.append(config_key)
 
         return missing
