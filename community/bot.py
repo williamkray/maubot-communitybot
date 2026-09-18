@@ -2345,7 +2345,7 @@ class CommunityBot(Plugin):
                     "the existing description message",
                 )
                 await evt.reply(
-                    f"This event already has a description — see {desc_link}. "
+                    f"This event already has a description, see {desc_link}. "
                     "I refreshed it to match the event's current details (running "
                     "<code>describe</code> again just re-syncs it; it won't post a duplicate). "
                     "<br/>To move the description to a different room, delete that message and run "
