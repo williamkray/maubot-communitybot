@@ -490,12 +490,14 @@ def _make_link_bot(event_row):
     bot.database = Mock()
     bot.database.execute = AsyncMock()
     bot._resolve_event_room = AsyncMock(return_value=(EVENT_ROOM, None))
+    # current room is NOT the event room by default, so the first token is
+    # treated as the event specifier (index/alias/id) unless it starts with #/!
     bot._get_event_row = AsyncMock(return_value=event_row)
     bot._can_manage_event = AsyncMock(return_value=True)
     bot._sync_event_presentation = AsyncMock()
-    # bind the real room+selector resolver so the parsing logic is exercised;
+    # bind the real unified resolver so the parsing logic is exercised;
     # it delegates to the mocked _resolve_event_room for the actual room lookup
-    bot._resolve_event_and_selector = CommunityBot._resolve_event_and_selector.__get__(bot)
+    bot._resolve_event_target = CommunityBot._resolve_event_target.__get__(bot)
     bot.is_user_in_parent_space = AsyncMock(return_value=True)
     bot.check_parent_room = AsyncMock(return_value=True)
     return bot
@@ -613,3 +615,136 @@ class TestEventLinkHandlers:
         await _REMOVE_LINK(bot, evt, f"{EVENT_ROOM} 1")
         bot.database.execute.assert_not_awaited()
         evt.reply.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# D. Real-DB event addressing: index / alias / id / current-room across the
+#    link commands (guards the unified _resolve_event_target resolver).
+# ---------------------------------------------------------------------------
+
+EV_A = "!eventA:example.com"
+EV_B = "!eventB:example.com"
+MODROOM = "!moderators:example.com"  # a non-event room
+FUTURE_TS = 32503680000000  # ~year 3000, safely "upcoming"
+
+
+def _bind_real(bot, *names):
+    for n in names:
+        setattr(bot, n, getattr(CommunityBot, n).__get__(bot))
+
+
+async def _make_addressing_db():
+    from mautrix.util.async_db import Database
+    from community.db import upgrade_table
+
+    db = Database.create("sqlite:///:memory:", upgrade_table=upgrade_table)
+    await db.start()
+    for t in ("community_events", "event_rsvps", "event_reactions"):
+        await db.execute(f"DELETE FROM {t}")
+    # index order follows event_start_ts ASC: A (TBD=0) then B (future)
+    await db.execute(
+        "INSERT INTO community_events (room_id,name,event_start_ts,host_id,created_ts,extra_links,max_additional_guests) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        EV_A, "Alpha", 0, "@h:example.com", 1, json.dumps([{"label": "A1", "url": "https://a1"}]), 1,
+    )
+    await db.execute(
+        "INSERT INTO community_events (room_id,name,event_start_ts,host_id,created_ts,extra_links,max_additional_guests) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        EV_B, "Beta", FUTURE_TS, "@h:example.com", 1, json.dumps([{"label": "B1", "url": "https://b1"}]), 1,
+    )
+    return db
+
+
+def _addressing_bot(db):
+    bot = Mock(spec=CommunityBot)
+    bot.log = Mock()
+    bot.database = db
+    bot.client = Mock()
+    bot.client.mxid = "@bot:example.com"
+    bot.is_user_in_parent_space = AsyncMock(return_value=True)
+    bot._can_manage_event = AsyncMock(return_value=True)
+    bot._sync_event_presentation = AsyncMock()
+    _bind_real(
+        bot, "_resolve_event_target", "_resolve_event_room",
+        "_event_room_list", "_get_event_row",
+    )
+    return bot
+
+
+def _evt_in(room):
+    evt = Mock()
+    evt.sender = "@h:example.com"
+    evt.room_id = room
+    evt.reply = AsyncMock()
+    evt.respond = AsyncMock()
+    return evt
+
+
+async def _labels(db, room_id):
+    row = await db.fetchrow("SELECT extra_links FROM community_events WHERE room_id = $1", room_id)
+    return [x["label"] for x in json.loads(row["extra_links"])]
+
+
+_ADD = CommunityBot.event_add_link.__mb_func__
+_REM = CommunityBot.event_remove_link.__mb_func__
+_EDI = CommunityBot.event_edit_link.__mb_func__
+
+
+class TestEventAddressingRealDB:
+    @pytest.mark.asyncio
+    async def test_add_link_by_index_from_nonevent_room(self):
+        db = await _make_addressing_db()
+        try:
+            bot = _addressing_bot(db)
+            # index 2 -> Beta, run from the (non-event) moderators room
+            await _ADD(bot, _evt_in(MODROOM), "2 --url https://b2 --label B2")
+            assert await _labels(db, EV_B) == ["B1", "B2"]
+            assert await _labels(db, EV_A) == ["A1"]
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_add_link_current_room_no_event_arg(self):
+        db = await _make_addressing_db()
+        try:
+            bot = _addressing_bot(db)
+            # run inside Alpha's room with no event specifier
+            await _ADD(bot, _evt_in(EV_A), "--url https://a2 --label A2")
+            assert await _labels(db, EV_A) == ["A1", "A2"]
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_add_link_by_alias_and_roomid(self):
+        db = await _make_addressing_db()
+        try:
+            bot = _addressing_bot(db)
+            # explicit room id as first token
+            await _ADD(bot, _evt_in(MODROOM), f"{EV_A} --url https://a3 --label A3")
+            assert "A3" in await _labels(db, EV_A)
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_remove_and_edit_link_by_index(self):
+        db = await _make_addressing_db()
+        try:
+            bot = _addressing_bot(db)
+            # remove-link: event index 1 (Alpha), link selector 1
+            await _REM(bot, _evt_in(MODROOM), "1 1")
+            assert await _labels(db, EV_A) == []
+            # edit-link: event index 2 (Beta), link 1, change label
+            await _EDI(bot, _evt_in(MODROOM), "2 1 --label B1x")
+            assert await _labels(db, EV_B) == ["B1x"]
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_remove_link_current_room_selector_only(self):
+        db = await _make_addressing_db()
+        try:
+            bot = _addressing_bot(db)
+            # inside Beta's room, a bare selector removes Beta's link (not event 1)
+            await _REM(bot, _evt_in(EV_B), "1")
+            assert await _labels(db, EV_B) == []
+            assert await _labels(db, EV_A) == ["A1"]
+        finally:
+            await db.stop()

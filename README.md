@@ -261,9 +261,10 @@ need to deal with serious spam or coordinated abuse.
 > change. Feedback and fixes are welcome.
 
 the bot can create and track in-person or online community events, each backed by its own room.
-most subcommands accept the event as a room alias, a room ID, the list index shown by
-`!community event list` (e.g. `2`), or — when you run the command inside the event room — nothing
-at all.
+every subcommand identifies the event the same way: a room alias, a room ID, the list index shown
+by `!community event list` (e.g. `2`), or nothing at all when you run the command inside the event's
+own room. (index addressing matches what `!community event list` currently shows; for an event
+outside that window, use its alias or room id.)
 
 - `!community event create <name>` — create an event (you become the host).
 - `!community event list` — list current, upcoming, and recent past events (with indexes).

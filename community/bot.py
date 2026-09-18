@@ -2182,34 +2182,44 @@ class CommunityBot(Plugin):
         # alias / room id / current room
         return await event_utils.resolve_room_id(self.client, raw or None, evt.room_id)
 
-    async def _resolve_event_and_selector(self, evt: MessageEvent, args: str):
-        """For subcommands shaped like ``<room?> <selector...>`` (remove-link,
-        edit-link). Disambiguates the leading token:
+    async def _resolve_event_target(self, evt: MessageEvent, args: str):
+        """Unified event addressing for every event subcommand that takes a room
+        plus trailing parameters (add-link, remove-link, edit-link, update,
+        add-organizer). Disambiguates the leading token, in priority order:
 
-        - an explicit ``#alias``/``!id`` first token is always the room;
-        - otherwise, if the current room is itself a registered event, the whole
-          argument string is the selector (targeting the current room);
-        - otherwise the first token is the room (index/alias/id) and the rest is
-          the selector.
+        1. an explicit ``#alias`` / ``!id`` first token is always the event room;
+        2. otherwise, if this command was run inside a registered event room, that
+           event is the target and ALL args are treated as parameters (so you
+           never have to name the event you're standing in);
+        3. otherwise the first token identifies the event (a ``!community event
+           list`` index like ``2`` or ``event2``, an alias, or a room id) and the
+           rest are parameters.
 
-        Returns (room_id, selector_str, error_message).
+        Returns (room_id, remaining_args, error_message). Note that index
+        addressing resolves against the same list ``!community event list`` shows;
+        to act on an event outside that window, use its alias or room id.
         """
         args = (args or "").strip()
         parts = args.split(None, 1)
         first = parts[0] if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        # 1. explicit room reference always wins
         if first.startswith(("#", "!")):
             room_id, err = await self._resolve_event_room(evt, first)
-            selector = parts[1] if len(parts) > 1 else ""
-            return room_id, selector, err
-        # running inside the event room: no need to name it
+            return room_id, rest, err
+        # 2. run inside an event room: that event is the target, args are params
         if await self._get_event_row(str(evt.room_id)):
             return str(evt.room_id), args, None
-        # otherwise the first token identifies the event (index/alias/id)
-        if not parts:
-            return None, "", "Please specify the event room (alias, ID, or list index)."
+        # 3. first token identifies the event (index / alias localpart / id)
+        if not first:
+            return (
+                None,
+                "",
+                "Please specify the event: a `!community event list` index (e.g. 2), "
+                "a room alias, or a room id — or run this inside the event's room.",
+            )
         room_id, err = await self._resolve_event_room(evt, first)
-        selector = parts[1] if len(parts) > 1 else ""
-        return room_id, selector, err
+        return room_id, rest, err
 
     async def _can_manage_event(self, user_id: UserID, event_row: dict) -> bool:
         """True if user is host, organizer, or community moderator."""
@@ -2415,20 +2425,12 @@ class CommunityBot(Plugin):
     @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
     async def event_update(self, evt: MessageEvent, args: str) -> None:
-        parts = (args or "").strip().split()
-        if not parts:
-            await evt.reply("Usage: !community event update <room> [--date YYYY-MM-DD] [--time HH:MM or '10:00 - 18:00'] [--location ...] [--description ...]")
+        if not (args or "").strip():
+            await evt.reply("Usage: !community event update <event> [--date YYYY-MM-DD] [--time HH:MM or '10:00 - 18:00'] [--location ...] [--description ...] [--max-guests N|none|unlimited]")
             return
-        # If first token is a flag (e.g. --time), use current room
-        if parts[0].startswith("--"):
-            room_arg = None
-            rest = (args or "").strip()
-        else:
-            room_arg = parts[0]
-            rest = " ".join(parts[1:])
-        room_id, err = await self._resolve_event_room(evt, room_arg)
+        room_id, rest, err = await self._resolve_event_target(evt, args)
         if err or not room_id:
-            await evt.reply(err or "Could not resolve room.")
+            await evt.reply(err or "Could not resolve the event.")
             return
         event_row = await self._get_event_row(room_id)
         if not event_row:
@@ -2639,23 +2641,16 @@ class CommunityBot(Plugin):
     @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
     async def event_add_link(self, evt: MessageEvent, args: str) -> None:
-        parts = (args or "").strip().split()
-        if not parts:
+        if not (args or "").strip():
             await evt.reply(
-                "Usage: !community event add-link <room> --url URL [--label TEXT]\n"
-                "You can omit <room> when running this in the event room."
+                "Usage: !community event add-link <event> --url URL [--label TEXT]\n"
+                "<event> can be a list index, alias, or room id, and may be omitted "
+                "when you run this in the event's room."
             )
             return
-        # If first token is a flag (e.g. --url), use current room
-        if parts[0].startswith("--"):
-            room_arg = None
-            rest = (args or "").strip()
-        else:
-            room_arg = parts[0]
-            rest = " ".join(parts[1:])
-        room_id, err = await self._resolve_event_room(evt, room_arg)
+        room_id, rest, err = await self._resolve_event_target(evt, args)
         if err or not room_id:
-            await evt.reply(err or "Could not resolve room.")
+            await evt.reply(err or "Could not resolve the event.")
             return
         event_row = await self._get_event_row(room_id)
         if not event_row:
@@ -2735,7 +2730,7 @@ class CommunityBot(Plugin):
     @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
     async def event_remove_link(self, evt: MessageEvent, args: str) -> None:
-        room_id, selector, err = await self._resolve_event_and_selector(evt, args)
+        room_id, selector, err = await self._resolve_event_target(evt, args)
         if err or not room_id:
             await evt.reply(err or "Could not resolve room.")
             return
@@ -2775,7 +2770,7 @@ class CommunityBot(Plugin):
     @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
     async def event_edit_link(self, evt: MessageEvent, args: str) -> None:
-        room_id, rest, err = await self._resolve_event_and_selector(evt, args)
+        room_id, rest, err = await self._resolve_event_target(evt, args)
         if err or not room_id:
             await evt.reply(err or "Could not resolve room.")
             return
@@ -2913,14 +2908,22 @@ class CommunityBot(Plugin):
             parts.append("<br/><b>No:</b><br/>" + "<br/>".join(no_list))
         await evt.respond("<br/>".join(parts), allow_html=True)
 
-    @event.subcommand("add-organizer", help="add an organizer who can manage the event")
-    @command.argument("room", required=True)
-    @command.argument("mxid", "Matrix ID", required=True)
+    @event.subcommand(
+        "add-organizer",
+        help="add an organizer who can manage the event. Usage: add-organizer <event> <@user:server> (omit <event> in the event's room)",
+    )
+    @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
-    async def event_add_organizer(self, evt: MessageEvent, room: str, mxid: UserID) -> None:
-        room_id, err = await self._resolve_event_room(evt, room)
+    async def event_add_organizer(self, evt: MessageEvent, args: str) -> None:
+        room_id, rest, err = await self._resolve_event_target(evt, args)
         if err or not room_id:
-            await evt.reply(err or "Could not resolve room.")
+            await evt.reply(err or "Could not resolve the event.")
+            return
+        mxid_str = (rest or "").strip().split()[0] if (rest or "").strip() else ""
+        if not mxid_str.startswith("@"):
+            await evt.reply(
+                "Please provide the organizer's full Matrix ID, e.g. @user:server."
+            )
             return
         event_row = await self._get_event_row(room_id)
         if not event_row:
@@ -2930,9 +2933,8 @@ class CommunityBot(Plugin):
             await evt.reply("Only the event host, organizers, or community moderators can add organizers.")
             return
         orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
-        mxid_str = str(mxid)
         if mxid_str in orgs:
-            await evt.reply(f"{mxid} is already an organizer.")
+            await evt.reply(f"{mxid_str} is already an organizer.")
             return
         orgs.append(mxid_str)
         await self.database.execute(
