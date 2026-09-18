@@ -1,4 +1,5 @@
 .idea/
+scripts/
 data/
 __pycache__/
 *.mbp

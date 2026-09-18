@@ -7,6 +7,22 @@ supposed to be.
 
 # important upgrade notes
 
+## v0.4
+
+new features in this release:
+
+- **emoji-reaction crowd moderation** — let members flag messages with a reaction (see below).
+- **leave/kick/ban notifications** — the notification room now reports departures, not just joins.
+- **`use_community_slug` toggle** — create room aliases without the `-<slug>` suffix.
+- **community events (EXPERIMENTAL)** — see the events section below. this feature is incomplete
+  and has known unresolved issues; it is included so it can be developed further, but is **not
+  recommended for production use** yet.
+
+this release upgrades the plugin database to schema **v6**. the upgrade runs automatically on
+first start and is one-directional — as always, back up your database before upgrading. (note:
+maubot will refuse to load a plugin whose known schema is *older* than the database's current
+version, so do not downgrade to an earlier build once you've run v0.4.)
+
 ## v0.3
         
 New functionality to support room v12 and newer has been added, as well as some significant restructuring of the code
@@ -221,6 +237,47 @@ command to set permissions correctly. **DO NOT DO THIS IN LARGE ROOMS**. if you 
 than a handful of people, consider how many of them actually say anything in a given day
 and whether or not it's worth filling your state event with them. consider alternative
 options.
+
+## crowd moderation via reactions
+
+let your community help moderate itself. set a `notification_room` and a list of `report_emojis`
+(defaults: 🚩 and ⚠️). when a member reacts to a message with one of these emojis, the bot records
+the report; the first report on a message posts a notice to your notification room with a link to
+the offending message so a moderator can act.
+
+if you enable `auto_redact_majority`, a message is automatically redacted once more than half of a
+room's (non-bot) members have reported it, and a notice is posted to the notification room. the bot
+must have permission to redact in the room for this to work. reports are tracked in the database
+(so counts survive restarts) and stale reports are purged after `report_retention_hours`.
+
+this is intended for small, invite-only communities. it is **not** a replacement for a real
+anti-abuse tool — use [Draupnir](https://github.com/the-draupnir-project/Draupnir) or Mjolnir if you
+need to deal with serious spam or coordinated abuse.
+
+## community events (EXPERIMENTAL)
+
+> **⚠️ Experimental — work in progress.** Event management is included so it can be developed and
+> tested, but it is **incomplete and has known unresolved issues**. Do not rely on it in a
+> production community yet. Behaviour and configuration may change, and some operations may fail
+> (for example, RSVP writes have not been validated against all supported databases). Feedback and
+> fixes are welcome.
+
+the bot can create and track in-person or online community events, each backed by its own room:
+
+- `!community event create <name>` — create an event (you become the host).
+- `!community event list` — list current, upcoming, and recent past events.
+- `!community event describe <room>` — post the event description with RSVP reactions
+  (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest).
+- `!community event update <room> [--date ...] [--time ...] [--location ...] [--description ...]` —
+  update event details.
+- `!community event add-link <room> --url URL [--label TEXT]` — attach an extra link (e.g. a signup sheet).
+- `!community event add-organizer <room> <user>` — grant another user permission to manage the event.
+- `!community event attendees <room>` — show current RSVPs and headcount.
+- `!community event ics <room>` — generate and upload an `.ics` calendar file for the event.
+
+members RSVP by reacting to the description message; those who RSVP "yes" or "maybe" are invited to
+the event room automatically. set `events_encrypt_rooms` to control whether event rooms are created
+encrypted (default `false` so late-comers can read prior discussion).
 
 # installation
 
