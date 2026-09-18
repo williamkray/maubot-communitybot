@@ -257,8 +257,7 @@ need to deal with serious spam or coordinated abuse.
 ## community events (EXPERIMENTAL)
 
 > **⚠️ Experimental — work in progress.** Event management works but is still maturing. The
-> timezone parsing leans on abbreviation/DST heuristics, and changing your RSVP currently means
-> reacting again (removing a reaction does not un-RSVP). Behaviour and configuration may still
+> timezone parsing leans on abbreviation/DST heuristics. Behaviour and configuration may still
 > change. Feedback and fixes are welcome.
 
 the bot can create and track in-person or online community events, each backed by its own room.
@@ -269,11 +268,11 @@ at all.
 - `!community event create <name>` — create an event (you become the host).
 - `!community event list` — list current, upcoming, and recent past events (with indexes).
 - `!community event describe <room>` — post the event description with RSVP reactions
-  (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest). Running it again edits the
-  existing description in place rather than posting a duplicate.
-- `!community event update <room> [--date ...] [--time ...] [--location ...] [--description ...]` —
-  update event details.
-- `!community event attendees <room>` — show current RSVPs and headcount.
+  (👍 yes, 👎 no, 🤔 maybe, and keycap numbers 1️⃣–9️⃣ for additional guests). Running it again edits
+  the existing description in place rather than posting a duplicate.
+- `!community event update <room> [--date ...] [--time ...] [--location ...] [--description ...] [--max-guests N|none|unlimited]` —
+  update event details, including the per-event additional-guest cap.
+- `!community event attendees <room>` — show current RSVPs and headcount (including guests).
 - `!community event add-organizer <room> <user>` — grant another user permission to manage the event.
 - `!community event add-link <room> --url URL [--label TEXT]` — attach a link (e.g. a signup sheet).
 - `!community event links <room>` — list the event's links (numbered).
@@ -283,11 +282,19 @@ at all.
   itself is left intact; archive it with `!community room archive` if you no longer need it).
 - `!community event ics <room>` — generate and upload an `.ics` calendar file for the event.
 
-members RSVP by reacting to the description message; those who RSVP "yes" or "maybe" are invited to
-the event room automatically. the event's DB record, its room topic, and the posted description
-message are kept in sync — editing details or links updates the topic and rewrites the existing
-description in place. set `events_encrypt_rooms` to control whether event rooms are created
-encrypted (default `false` so late-comers can read prior discussion).
+**RSVPs and guests.** Members RSVP by reacting to the description message; those who RSVP "yes" or
+"maybe" are invited to the event room automatically. To bring additional guests they also react with
+a keycap number (`3️⃣` = three additional guests) — the most-recent number reaction wins, and
+**removing (redacting) a reaction updates their RSVP**, so un-reacting the number drops the guest
+count and un-reacting the status removes the RSVP entirely. Each event caps additional guests per
+attendee (`events_default_max_additional_guests`, default 1; `0` disallows guests, `-1` means no
+limit); organizers change it per-event with `--max-guests`. If someone reacts with more guests than
+the cap allows, the bot removes that reaction (when it has permission) and explains why.
+
+The event's DB record, its room topic, and the posted description message are kept in sync — editing
+details, links, or the guest cap updates the topic and rewrites the existing description in place.
+Set `events_encrypt_rooms` to control whether event rooms are created encrypted (default `false` so
+late-comers can read prior discussion).
 
 # installation
 

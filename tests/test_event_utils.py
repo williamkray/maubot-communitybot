@@ -2,8 +2,8 @@
 
 Covers:
   A. Pure functions in community/helpers/event_utils.py (link CRUD, formatting, ICS).
-  B. A real-sqlite test of the RSVP upsert (portability + plus_one preservation
-     semantics) driven through CommunityBot.handle_event_rsvp.
+  B. A real-sqlite test of the derived RSVP model (status + guest-number reactions,
+     over-cap enforcement, and redaction recompute) via CommunityBot.
   C. Handler tests for event_remove_link / event_edit_link / event_links.
 """
 
@@ -248,7 +248,7 @@ def test_exactly_one_format_event_topic_definition():
 
 
 # ---------------------------------------------------------------------------
-# B. Real-database RSVP upsert test (portability + plus_one preservation)
+# B. Real-database RSVP derived-model test (guests, enforcement, redaction)
 # ---------------------------------------------------------------------------
 
 EVENT_ROOM = "!eventroom:example.com"
@@ -266,7 +266,24 @@ async def _make_db():
     # Database instances, so start each test from a clean slate.
     await db.execute("DELETE FROM community_events")
     await db.execute("DELETE FROM event_rsvps")
+    await db.execute("DELETE FROM event_reactions")
     return db
+
+
+async def _seed_event(db, max_guests=1):
+    await db.execute(
+        """INSERT INTO community_events
+           (room_id, name, event_start_ts, host_id, created_ts,
+            description_event_id, max_additional_guests)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+        EVENT_ROOM,
+        "Test Event",
+        1_700_000_000_000,
+        "@host:example.com",
+        1_700_000_000_000,
+        DESC_EVENT_ID,
+        max_guests,
+    )
 
 
 def _make_rsvp_bot(db):
@@ -277,15 +294,29 @@ def _make_rsvp_bot(db):
     bot.client.mxid = "@bot:example.com"
     bot.client.get_joined_members = AsyncMock(return_value={RSVP_SENDER: {}})
     bot.client.invite_user = AsyncMock()
+    bot.client.redact = AsyncMock()
+    bot.client.send_notice = AsyncMock()
     bot.is_user_in_parent_space = AsyncMock(return_value=True)
     bot.config = {"parent_room": "!parent:example.com"}
+    # bind the real derived-model helpers so the whole flow is exercised
+    bot._recompute_user_rsvp = CommunityBot._recompute_user_rsvp.__get__(bot)
+    bot._reject_guest_reaction = CommunityBot._reject_guest_reaction.__get__(bot)
+    bot._matrix_to_link = CommunityBot._matrix_to_link.__get__(bot)
     return bot
 
 
-def _make_reaction(key):
+_rid_counter = [0]
+
+
+def _make_reaction(key, event_id=None, ts=1):
     evt = Mock(spec=ReactionEvent)
     evt.sender = RSVP_SENDER
     evt.room_id = "!descroom:example.com"
+    if event_id is None:
+        _rid_counter[0] += 1
+        event_id = f"$r{_rid_counter[0]}:example.com"
+    evt.event_id = event_id
+    evt.timestamp = ts
     evt.content = Mock()
     relates_to = Mock()
     relates_to.rel_type = RelationType.ANNOTATION
@@ -295,58 +326,95 @@ def _make_reaction(key):
     return evt
 
 
+def _make_redaction(redacts):
+    rev = Mock()
+    rev.redacts = redacts
+    rev.sender = RSVP_SENDER
+    return rev
+
+
 async def _fetch_rsvp(db):
     return await db.fetchrow(
-        "SELECT rsvp_status, plus_one FROM event_rsvps "
+        "SELECT rsvp_status, guest_count FROM event_rsvps "
         "WHERE event_room_id = $1 AND user_id = $2",
         EVENT_ROOM,
         RSVP_SENDER,
     )
 
 
-class TestRSVPUpsertRealDB:
+class TestRSVPDerivedModelRealDB:
     @pytest.mark.asyncio
-    async def test_plus_one_semantics_sequence(self):
+    async def test_status_and_guest_number_sequence(self):
         db = await _make_db()
         try:
-            # seed a community_events row keyed by description_event_id
-            await db.execute(
-                """INSERT INTO community_events
-                   (room_id, name, event_start_ts, host_id, created_ts,
-                    description_event_id)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                EVENT_ROOM,
-                "Test Event",
-                1_700_000_000_000,
-                "@host:example.com",
-                1_700_000_000_000,
-                DESC_EVENT_ID,
-            )
+            await _seed_event(db, max_guests=3)
             bot = _make_rsvp_bot(db)
 
-            # 👍 -> yes, +0
-            assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍")) is True
+            # 👍 -> yes, 0 guests
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍", "$a", ts=1))
             row = await _fetch_rsvp(db)
-            assert row["rsvp_status"] == "yes"
-            assert row["plus_one"] == 0
+            assert (row["rsvp_status"], row["guest_count"]) == ("yes", 0)
 
-            # ➕ -> yes, +1
-            assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("➕")) is True
+            # 3️⃣ -> yes, 3 guests
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("3️⃣", "$b", ts=2))
             row = await _fetch_rsvp(db)
-            assert row["rsvp_status"] == "yes"
-            assert row["plus_one"] == 1
+            assert (row["rsvp_status"], row["guest_count"]) == ("yes", 3)
 
-            # 🤔 -> maybe, plus_one PRESERVED (+1)
-            assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("🤔")) is True
+            # 🤔 -> maybe, guest count preserved (most-recent guest reaction still 3️⃣)
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("🤔", "$c", ts=3))
             row = await _fetch_rsvp(db)
-            assert row["rsvp_status"] == "maybe"
-            assert row["plus_one"] == 1
+            assert (row["rsvp_status"], row["guest_count"]) == ("maybe", 3)
 
-            # ➖ -> status preserved (maybe), plus_one cleared (+0)
-            assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("➖")) is True
+            # most-recent guest reaction wins: 1️⃣ after 3️⃣ -> 1 guest
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("1️⃣", "$d", ts=4))
             row = await _fetch_rsvp(db)
-            assert row["rsvp_status"] == "maybe"
-            assert row["plus_one"] == 0
+            assert (row["rsvp_status"], row["guest_count"]) == ("maybe", 1)
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_over_cap_guest_reaction_is_rejected(self):
+        db = await _make_db()
+        try:
+            await _seed_event(db, max_guests=2)
+            bot = _make_rsvp_bot(db)
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍", "$a", ts=1))
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("2️⃣", "$b", ts=2))
+            assert (await _fetch_rsvp(db))["guest_count"] == 2
+
+            # 3️⃣ exceeds the cap of 2: redacted + explained, never recorded
+            handled = await CommunityBot.handle_event_rsvp(
+                bot, _make_reaction("3️⃣", "$c", ts=3)
+            )
+            assert handled is True
+            bot.client.redact.assert_awaited_once()
+            bot.client.send_notice.assert_awaited_once()
+            assert (await _fetch_rsvp(db))["guest_count"] == 2
+            gone = await db.fetchrow(
+                "SELECT 1 FROM event_reactions WHERE reaction_event_id = '$c'"
+            )
+            assert gone is None
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_redaction_recomputes_and_clears(self):
+        db = await _make_db()
+        try:
+            await _seed_event(db, max_guests=3)
+            bot = _make_rsvp_bot(db)
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍", "$a", ts=1))
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("2️⃣", "$b", ts=2))
+            assert (await _fetch_rsvp(db))["guest_count"] == 2
+
+            # redacting the guest reaction drops the count back to 0
+            await CommunityBot.handle_event_reaction_redaction(bot, _make_redaction("$b"))
+            row = await _fetch_rsvp(db)
+            assert (row["rsvp_status"], row["guest_count"]) == ("yes", 0)
+
+            # redacting the status reaction removes the RSVP entirely
+            await CommunityBot.handle_event_reaction_redaction(bot, _make_redaction("$a"))
+            assert await _fetch_rsvp(db) is None
         finally:
             await db.stop()
 
@@ -355,31 +423,17 @@ class TestRSVPUpsertRealDB:
         db = await _make_db()
         try:
             bot = _make_rsvp_bot(db)
-            # no community_events row seeded -> not an RSVP
             assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍")) is False
-            row = await _fetch_rsvp(db)
-            assert row is None
+            assert await _fetch_rsvp(db) is None
         finally:
             await db.stop()
 
     @pytest.mark.asyncio
-    async def test_no_upsert_error_no_op_reaction(self):
+    async def test_non_rsvp_reaction_not_consumed(self):
         db = await _make_db()
         try:
-            await db.execute(
-                """INSERT INTO community_events
-                   (room_id, name, event_start_ts, host_id, created_ts,
-                    description_event_id)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                EVENT_ROOM,
-                "Test Event",
-                1_700_000_000_000,
-                "@host:example.com",
-                1_700_000_000_000,
-                DESC_EVENT_ID,
-            )
+            await _seed_event(db)
             bot = _make_rsvp_bot(db)
-            # a non-RSVP key is not consumed
             assert await CommunityBot.handle_event_rsvp(bot, _make_reaction("🎉")) is False
         finally:
             await db.stop()

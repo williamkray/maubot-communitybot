@@ -102,6 +102,7 @@ class Config(BaseProxyConfig):
         helper.copy("invite_power_level")
         helper.copy("room_version")
         helper.copy("events_encrypt_rooms")
+        helper.copy("events_default_max_additional_guests")
 
 
 class CommunityBot(Plugin):
@@ -1407,57 +1408,48 @@ class CommunityBot(Plugin):
 
         target_event_id = relates_to.event_id
         key = getattr(relates_to, "key", None) or ""
+        kind = event_utils.classify_reaction(key)
+        if not kind:
+            return False  # not a status or guest-count reaction
         row = await self.database.fetchrow(
-            "SELECT room_id FROM community_events WHERE description_event_id = $1",
+            "SELECT room_id, max_additional_guests FROM community_events WHERE description_event_id = $1",
             target_event_id,
         )
         if not (row and await self.is_user_in_parent_space(evt.sender)):
             return False
 
         event_room_id = row["room_id"]
-        now_ms = int(time.time() * 1000)
-        # ➖ removes a previously indicated extra guest without changing status
-        if event_utils.is_minus_one_reaction(key):
-            await self.database.execute(
-                """UPDATE event_rsvps
-                   SET plus_one = 0, updated_ts = $3
-                   WHERE event_room_id = $1 AND user_id = $2""",
-                event_room_id,
-                str(evt.sender),
-                now_ms,
+        max_guests = row["max_additional_guests"]
+        if max_guests is None:
+            max_guests = 1
+        reaction_event_id = str(evt.event_id)
+        # created_ts orders reactions for "most-recent wins"; use the event's
+        # origin_server_ts and fall back to 0 (treat as oldest) rather than
+        # wall-clock, so a missing ts never spuriously wins over real reactions.
+        now_ms = int(getattr(evt, "timestamp", 0) or 0)
+
+        # Enforce the per-event guest cap on number reactions before recording.
+        if kind[0] == "guest" and max_guests >= 0 and kind[1] > max_guests:
+            await self._reject_guest_reaction(
+                evt, reaction_event_id, kind[1], max_guests
             )
             return True
-        # Normal RSVP updates (yes/maybe/no and ➕)
-        rsvp = event_utils.rsvp_status_from_reaction_key(key)
-        if not rsvp:
-            return False
-        rsvp_status, adds_plus_one = rsvp
 
-        # Preserve an existing +1 across yes/maybe/no status changes; only ➕ sets
-        # it and only ➖ clears it. Compute the target value in Python so the
-        # upsert stays portable (a boolean OR on INT columns errors on Postgres).
-        existing = await self.database.fetchrow(
-            "SELECT plus_one FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
-            event_room_id,
-            str(evt.sender),
-        )
-        existing_plus_one = 1 if (existing and existing["plus_one"]) else 0
-        plus_one = 1 if adds_plus_one else existing_plus_one
-
+        # Record the reaction (idempotent) so redactions can undo it, then derive
+        # the user's RSVP from all of their currently-active reactions.
         await self.database.execute(
-            """INSERT INTO event_rsvps (event_room_id, user_id, rsvp_status, plus_one, updated_ts)
-              VALUES ($1, $2, $3, $4, $5)
-              ON CONFLICT (event_room_id, user_id)
-              DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
-                plus_one = EXCLUDED.plus_one,
-                updated_ts = EXCLUDED.updated_ts""",
+            """INSERT INTO event_reactions (reaction_event_id, event_room_id, user_id, key, created_ts)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (reaction_event_id) DO NOTHING""",
+            reaction_event_id,
             event_room_id,
             str(evt.sender),
-            rsvp_status,
-            plus_one,
+            key,
             now_ms,
         )
-        if rsvp_status in ("yes", "maybe"):
+        result = await self._recompute_user_rsvp(event_room_id, str(evt.sender))
+
+        if result and result[0] in ("yes", "maybe"):
             try:
                 members = await self.client.get_joined_members(event_room_id)
                 if evt.sender not in members:
@@ -1465,6 +1457,133 @@ class CommunityBot(Plugin):
             except Exception as e:
                 self.log.warning(f"Failed to invite {evt.sender} to event room: {e}")
         return True
+
+    async def _recompute_user_rsvp(self, event_room_id: str, user_id: str):
+        """Recompute a user's RSVP summary (status, guest_count) from their active
+        tracked reactions and upsert it into event_rsvps, deleting the row when
+        they have no active status reaction. Returns (status, guest_count) or None."""
+        rows = await self.database.fetch(
+            "SELECT key, created_ts FROM event_reactions "
+            "WHERE event_room_id = $1 AND user_id = $2 "
+            "ORDER BY created_ts ASC, reaction_event_id ASC",
+            event_room_id,
+            user_id,
+        )
+        reactions = [{"key": r["key"], "created_ts": r["created_ts"]} for r in rows]
+        result = event_utils.compute_rsvp_from_reactions(reactions)
+        if result is None:
+            await self.database.execute(
+                "DELETE FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
+                event_room_id,
+                user_id,
+            )
+            return None
+        status, guest_count = result
+        now_ms = int(time.time() * 1000)
+        await self.database.execute(
+            """INSERT INTO event_rsvps
+                 (event_room_id, user_id, rsvp_status, plus_one, guest_count, updated_ts)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (event_room_id, user_id)
+               DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
+                 plus_one = EXCLUDED.plus_one,
+                 guest_count = EXCLUDED.guest_count,
+                 updated_ts = EXCLUDED.updated_ts""",
+            event_room_id,
+            user_id,
+            status,
+            1 if guest_count > 0 else 0,  # keep legacy plus_one column meaningful
+            guest_count,
+            now_ms,
+        )
+        return result
+
+    async def _reject_guest_reaction(
+        self, evt: ReactionEvent, reaction_event_id: str, requested: int, max_guests: int
+    ) -> None:
+        """Reject an over-limit guest reaction: redact it if we can, and post a
+        short explanation. The reaction is never recorded, so it does not count."""
+        if max_guests == 0:
+            limit_text = "does not allow additional guests"
+        else:
+            plural = "guest" if max_guests == 1 else "guests"
+            limit_text = f"allows at most {max_guests} additional {plural} per attendee"
+        redacted = False
+        try:
+            await self.client.redact(
+                evt.room_id, reaction_event_id, reason="event guest limit exceeded"
+            )
+            redacted = True
+        except Exception as e:
+            self.log.warning(f"Could not redact over-limit guest reaction: {e}")
+        who = self._matrix_to_link(str(evt.sender))
+        note = (
+            f"{who}: this event {limit_text}, so your reaction for {requested} "
+            "additional guests was not counted."
+        )
+        if not redacted:
+            note += " Please remove that reaction."
+        try:
+            await self.client.send_notice(evt.room_id, html=note)
+        except Exception as e:
+            self.log.warning(f"Failed to send guest-limit notice: {e}")
+
+    @event.on(EventType.ROOM_REDACTION)
+    async def handle_event_reaction_redaction(self, evt: RedactionEvent) -> None:
+        """When a user un-reacts (redacts their reaction) on an event, drop the
+        tracked reaction and recompute their RSVP so the headcount stays correct."""
+        redacted_id = getattr(evt, "redacts", None)
+        if not redacted_id:
+            return
+        row = await self.database.fetchrow(
+            "SELECT event_room_id, user_id FROM event_reactions WHERE reaction_event_id = $1",
+            str(redacted_id),
+        )
+        if not row:
+            return  # not a tracked RSVP reaction
+        await self.database.execute(
+            "DELETE FROM event_reactions WHERE reaction_event_id = $1", str(redacted_id)
+        )
+        await self._recompute_user_rsvp(row["event_room_id"], row["user_id"])
+
+    @staticmethod
+    def _parse_max_guests_arg(val: str) -> int:
+        """Parse a --max-guests value into an int: -1 unlimited, 0 none, else N.
+        Raises ValueError on unparseable input."""
+        v = (val or "").strip().lower()
+        if v in ("unlimited", "no-limit", "nolimit", "inf", "infinite", "-1"):
+            return -1
+        if v in ("none", "no", "0"):
+            return 0
+        n = int(v)  # ValueError propagates for bad input
+        return n if n >= 0 else -1
+
+    async def _seed_guest_reactions(self, event_row, max_guests: int) -> None:
+        """Add keycap number reactions up to the (new) cap on the event's posted
+        description. Duplicate reactions are ignored by the server, so this is
+        safe to call on cap changes. Over-cap reactions are not removed here, but
+        the cap is still enforced when a user actually reacts."""
+        desc_event_id = event_row["description_event_id"]
+        desc_room_id = event_row["description_room_id"]
+        if not (desc_event_id and desc_room_id):
+            return
+        for key in event_utils.seed_reaction_keys(max_guests):
+            if event_utils.guest_count_from_reaction_key(key) is None:
+                continue  # status reactions are already present
+            try:
+                await self.client.send_message_event(
+                    desc_room_id,
+                    EventType.REACTION,
+                    {
+                        "m.relates_to": {
+                            "rel_type": "m.annotation",
+                            "event_id": desc_event_id,
+                            "key": key,
+                        }
+                    },
+                )
+            except Exception as e:
+                self.log.debug(f"Failed to seed guest reaction {key}: {e}")
 
     def _matrix_to_link(self, target: str, label: str = None) -> str:
         """Build an HTML matrix.to link for a user/room/event target.
@@ -1909,6 +2028,7 @@ class CommunityBot(Plugin):
             return
         room_id, room_alias = result
         now_ms = int(time.time() * 1000)
+        max_guests = int(self.config.get("events_default_max_additional_guests", 1))
         topic = event_utils.format_event_topic(
             name=name,
             start_ts=0,
@@ -1920,6 +2040,7 @@ class CommunityBot(Plugin):
             extra_links=[],
             room_link=room_alias,
             timezone_str=event_utils.DEFAULT_TIMEZONE,
+            max_additional_guests=max_guests,
         )
         try:
             await self.client.send_state_event(
@@ -1930,8 +2051,9 @@ class CommunityBot(Plugin):
         await self.database.execute(
             """INSERT INTO community_events (
                 room_id, name, description, event_start_ts, event_end_ts,
-                location, host_id, organizers, extra_links, created_ts, timezone
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+                location, host_id, organizers, extra_links, created_ts, timezone,
+                max_additional_guests
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)""",
             room_id,
             name,
             None,
@@ -1943,6 +2065,7 @@ class CommunityBot(Plugin):
             "[]",
             now_ms,
             event_utils.DEFAULT_TIMEZONE,
+            max_guests,
         )
         await evt.respond(
             "Event created (time is in UTC until you set it). Use !community event update <room> --date YYYY-MM-DD --time HH:MM TZ to set date, time and timezone (e.g. --time 15:00 PST). "
@@ -2121,6 +2244,9 @@ class CommunityBot(Plugin):
         tz = event_utils.get_event_timezone(event_row)
         start_ts = int(event_row["event_start_ts"])
         end_ts = int(event_row["event_end_ts"]) if event_row["event_end_ts"] else None
+        max_guests = event_row["max_additional_guests"]
+        if max_guests is None:
+            max_guests = 1
 
         # 1) room topic
         topic = event_utils.format_event_topic(
@@ -2134,6 +2260,7 @@ class CommunityBot(Plugin):
             extra_links=links,
             room_link=f"https://matrix.to/#/{room_id}",
             timezone_str=tz,
+            max_additional_guests=max_guests,
         )
         try:
             await self.client.send_state_event(
@@ -2157,6 +2284,7 @@ class CommunityBot(Plugin):
                 extra_links=links,
                 room_id=room_id,
                 timezone_str=tz,
+                max_additional_guests=max_guests,
             )
             html = event_utils.format_event_description_html(room_link="", **common)
             text = event_utils.format_event_description_text(**common)
@@ -2169,7 +2297,7 @@ class CommunityBot(Plugin):
 
     @event.subcommand(
         "describe",
-        help="post event description with RSVP reactions (👍 yes, 👎 no, 🤔 maybe, ➕ extra guest)",
+        help="post event description with RSVP reactions (👍 yes, 👎 no, 🤔 maybe, 1️⃣-9️⃣ additional guests)",
     )
     @command.argument("room", pass_raw=True, required=False)
     @decorators.require_parent_room
@@ -2210,6 +2338,9 @@ class CommunityBot(Plugin):
         orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
         links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
         event_tz = event_utils.get_event_timezone(event_row)
+        max_guests = event_row["max_additional_guests"]
+        if max_guests is None:
+            max_guests = 1
         html = event_utils.format_event_description_html(
             name=event_row["name"],
             start_ts=event_row["event_start_ts"],
@@ -2222,12 +2353,14 @@ class CommunityBot(Plugin):
             room_link="",
             room_id=room_id,
             timezone_str=event_tz,
+            max_additional_guests=max_guests,
         )
         msg_event_id = await evt.respond(html, allow_html=True)
         if msg_event_id:
-            # Older maubot/matrix clients may not have send_reaction helper,
-            # so send m.reaction events manually.
-            for key in ("👍", "👎", "🤔", "➕", "➖"):
+            # Seed status reactions plus keycap number reactions up to the event's
+            # guest cap. Older clients lack a send_reaction helper, so send raw
+            # m.reaction events.
+            for key in event_utils.seed_reaction_keys(max_guests):
                 await self.client.send_message_event(
                     evt.room_id,
                     EventType.REACTION,
@@ -2249,7 +2382,7 @@ class CommunityBot(Plugin):
 
     @event.subcommand(
         "update",
-        help="update event details. Use: update <room> [--date YYYY-MM-DD] [--time HH:MM or 'HH:MM - HH:MM'] [--location ...] [--description ...]",
+        help="update event details. Use: update <room> [--date YYYY-MM-DD] [--time HH:MM or 'HH:MM - HH:MM'] [--location ...] [--description ...] [--max-guests N|none|unlimited]",
     )
     @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
@@ -2277,6 +2410,7 @@ class CommunityBot(Plugin):
             await evt.reply("Only the event host, organizers, or community moderators can update the event.")
             return
         date_val = time_val = location_val = description_val = None
+        max_guests_val = None
         # Split on " --" so time spans like "10:00 AM - 6:00 PM PST" stay in one chunk
         raw_chunks = (rest or "").split(" --")
         for raw in raw_chunks:
@@ -2294,6 +2428,15 @@ class CommunityBot(Plugin):
                 location_val = val
             elif key == "description":
                 description_val = val
+            elif key in ("max-guests", "maxguests", "guests") and val:
+                try:
+                    max_guests_val = self._parse_max_guests_arg(val)
+                except ValueError:
+                    await evt.reply(
+                        "Invalid --max-guests value. Use a number (e.g. 2), "
+                        "`none` to disallow guests, or `unlimited`."
+                    )
+                    return
         try:
             event_start_ts = int(event_row["event_start_ts"])
             event_end_ts = event_row["event_end_ts"]
@@ -2400,6 +2543,8 @@ class CommunityBot(Plugin):
                 set_pairs.append(("location", location_val))
             if description_val is not None:
                 set_pairs.append(("description", description_val))
+            if max_guests_val is not None:
+                set_pairs.append(("max_additional_guests", max_guests_val))
             if date_val or time_val:
                 set_pairs.append(("event_start_ts", event_start_ts))
                 set_pairs.append(("event_end_ts", event_end_ts))
@@ -2445,6 +2590,11 @@ class CommunityBot(Plugin):
             # Regenerate the room topic AND the posted description together so the
             # DB row, topic, and RSVP message never drift out of sync.
             await self._sync_event_presentation(event_room_id)
+            # If the guest cap changed, seed any newly-allowed number reactions on
+            # the description message (duplicates are ignored by the server; we do
+            # not remove now-disallowed ones, but the cap is still enforced on use).
+            if max_guests_val is not None:
+                await self._seed_guest_reactions(row_after, max_guests_val)
             if date_val or time_val:
                 # If we made a DST-related abbreviation guess, surface that to the user
                 if locals().get("adjust_note"):
@@ -2694,7 +2844,7 @@ class CommunityBot(Plugin):
             await evt.reply("This room is not a registered community event.")
             return
         rows = await self.database.fetch(
-            "SELECT user_id, rsvp_status, plus_one FROM event_rsvps WHERE event_room_id = $1",
+            "SELECT user_id, rsvp_status, guest_count FROM event_rsvps WHERE event_room_id = $1",
             room_id,
         )
         if not rows:
@@ -2711,21 +2861,21 @@ class CommunityBot(Plugin):
             if user == bot_mxid:
                 continue
             status = (r["rsvp_status"] or "").lower()
-            plus_one = 1 if r["plus_one"] else 0
+            guests = int(r["guest_count"] or 0)
             display = user
-            if plus_one:
-                display += " (+1)"
+            if guests:
+                display += f" (+{guests})"
             if status == "yes":
                 yes_list.append(display)
-                headcount += 1 + plus_one
+                headcount += 1 + guests
             elif status == "maybe":
                 maybe_list.append(display)
-                headcount += 1 + plus_one
+                headcount += 1 + guests
             elif status == "no":
                 no_list.append(display)
         parts = [
             f"<b>Attendees for {event_row['name']}</b>",
-            f"Total headcount (including +1s): <b>{headcount}</b>",
+            f"Total headcount (including guests): <b>{headcount}</b>",
         ]
         if yes_list:
             parts.append("<br/><b>Yes:</b><br/>" + "<br/>".join(yes_list))

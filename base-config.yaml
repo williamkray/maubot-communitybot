@@ -199,6 +199,13 @@ room_version: "10"
 # previous event discussion; set true to match the bot's default encrypt setting for event rooms.
 events_encrypt_rooms: false
 
+# default cap on additional guests each attendee may bring to a new event.
+# attendees indicate guests by reacting to the event description with a keycap
+# number (1️⃣, 2️⃣, ...). set to 0 to disallow guests by default, or -1 for no
+# limit. organizers can override per-event with:
+#   !community event update <room> --max-guests <N|none|unlimited>
+events_default_max_additional_guests: 1
+
 # message to send to users when they need to verify they are human
 # use {room} for the room name and {phrase} for the verification phrase
 verification_message: |

@@ -61,13 +61,43 @@ TZ_ABBREV_OFFSETS: Dict[str, int] = {
     "AEDT": 11,
 }
 
-# RSVP reaction keys we track (emoji and plaintext)
+# RSVP status reaction keys (with and without the emoji variation selector)
 RSVP_YES_KEYS = {"👍", "👍️"}
 RSVP_NO_KEYS = {"👎", "👎️"}
 RSVP_MAYBE_KEYS = {"🤔", "🤔️"}
-RSVP_PLUS_ONE_KEYS = {"➕", "➕️"}
-# Emoji to remove a previously indicated plus-one guest
-RSVP_MINUS_ONE_KEYS = {"➖", "➖️"}
+
+# Additional guests are indicated with keycap number reactions 1️⃣..9️⃣. A user's
+# guest count is the value of their most-recent active number reaction; removing
+# (redacting) it drops the count. There is deliberately no 0️⃣ — "no guests" is
+# simply the absence of a number reaction.
+MAX_SEEDED_GUEST_REACTIONS = 9
+# keycap emoji = digit + optional VS16 (U+FE0F) + combining enclosing keycap (U+20E3)
+_KEYCAP_RE = re.compile("^([1-9])️?⃣$")
+
+
+def guest_count_from_reaction_key(key: str) -> Optional[int]:
+    """Return the guest count (1-9) for a keycap number reaction, else None."""
+    m = _KEYCAP_RE.match((key or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def guest_reaction_key(n: int) -> str:
+    """The canonical keycap reaction string for guest count n (1-9)."""
+    return f"{n}️⃣"
+
+
+def seed_reaction_keys(max_additional_guests: int) -> List[str]:
+    """Reactions the bot should seed on an event description: the status
+    reactions, plus keycap number reactions up to the event's guest cap
+    (capped at MAX_SEEDED_GUEST_REACTIONS; none when guests are disallowed)."""
+    keys = ["👍", "👎", "🤔"]
+    if max_additional_guests == 0:
+        return keys
+    top = MAX_SEEDED_GUEST_REACTIONS
+    if max_additional_guests > 0:
+        top = min(max_additional_guests, MAX_SEEDED_GUEST_REACTIONS)
+    keys.extend(guest_reaction_key(i) for i in range(1, top + 1))
+    return keys
 
 
 def parse_organizers_json(raw: str) -> List[str]:
@@ -469,6 +499,35 @@ def get_event_timezone(row: Any) -> str:
         return DEFAULT_TIMEZONE
 
 
+def guest_policy_text(max_additional_guests: int) -> str:
+    """One-line human description of the additional-guest policy."""
+    if max_additional_guests == 0:
+        return "No additional guests."
+    if max_additional_guests < 0:
+        return "Additional guests: no limit."
+    if max_additional_guests == 1:
+        return "Additional guests: up to 1 per attendee."
+    return f"Additional guests: up to {max_additional_guests} per attendee."
+
+
+def guest_rsvp_instructions(max_additional_guests: int) -> str:
+    """RSVP instructions describing status reactions and the guest-number
+    reactions permitted by the event's cap."""
+    base = "👍 yes, 👎 no, 🤔 maybe"
+    if max_additional_guests == 0:
+        return base + ". This event does not allow additional guests."
+    top = MAX_SEEDED_GUEST_REACTIONS
+    if max_additional_guests > 0:
+        top = min(max_additional_guests, MAX_SEEDED_GUEST_REACTIONS)
+    extra = (
+        f". To bring guests, also react with a number 1️⃣–{top}️⃣ "
+        "for how many additional people you're bringing (remove the reaction to undo)."
+    )
+    if max_additional_guests < 0 or max_additional_guests > MAX_SEEDED_GUEST_REACTIONS:
+        extra += f" (limit {'no limit' if max_additional_guests < 0 else max_additional_guests})."
+    return base + extra
+
+
 def format_event_topic(
     name: str,
     start_ts: int,
@@ -480,6 +539,7 @@ def format_event_topic(
     extra_links: List[Dict[str, str]],
     room_link: str,
     timezone_str: Optional[str] = None,
+    max_additional_guests: int = 1,
 ) -> str:
     """Build room topic text from event fields."""
     tz = timezone_str or DEFAULT_TIMEZONE
@@ -495,6 +555,7 @@ def format_event_topic(
         lines.append(f"Description: {description}")
     for link in extra_links:
         lines.append(f"{link['label']}: {link['url']}")
+    lines.append(guest_policy_text(max_additional_guests))
     lines.append(f"Room: {room_link}")
     return " | ".join(lines)
 
@@ -511,6 +572,7 @@ def format_event_description_html(
     room_link: str,
     room_id: str,
     timezone_str: Optional[str] = None,
+    max_additional_guests: int = 1,
 ) -> str:
     """Build HTML description for the event (for describe command and room topic)."""
     tz = timezone_str or DEFAULT_TIMEZONE
@@ -538,8 +600,8 @@ def format_event_description_html(
     # RSVP instructions and event room link
     parts.append(
         "<br/><i>Use the reactions on this message to RSVP:</i> "
-        "👍 yes, 👎 no, 🤔 maybe, ➕ for an extra guest. "
-        "Yes or maybe responses will be invited to the event room."
+        + guest_rsvp_instructions(max_additional_guests)
+        + " Yes or maybe responses will be invited to the event room."
     )
     parts.append(f'<br/><a href="https://matrix.to/#/{room_id}">Join event room</a>')
     return "<br/>".join(parts)
@@ -556,6 +618,7 @@ def format_event_description_text(
     extra_links: List[Dict[str, str]],
     room_id: str,
     timezone_str: Optional[str] = None,
+    max_additional_guests: int = 1,
 ) -> str:
     """Plaintext fallback for the event description message (used as the m.text
     body alongside the HTML formatted_body, including for edits)."""
@@ -570,9 +633,7 @@ def format_event_description_text(
         lines.append(description)
     for link in extra_links:
         lines.append(f"{link['label']}: {link['url']}")
-    lines.append(
-        "RSVP with reactions: 👍 yes, 👎 no, 🤔 maybe, ➕ extra guest, ➖ remove extra guest."
-    )
+    lines.append("RSVP with reactions: " + guest_rsvp_instructions(max_additional_guests))
     lines.append(f"Event room: https://matrix.to/#/{room_id}")
     return "\n".join(lines)
 
@@ -637,27 +698,66 @@ async def resolve_room_id(
     return (room_arg, None)
 
 
-def rsvp_status_from_reaction_key(key: str) -> Optional[Tuple[str, bool]]:
-    """Map reaction key to (rsvp_status, plus_one). Status is 'yes'|'no'|'maybe'.
-
-    Returns None if key is not an RSVP we track.
-    """
+def rsvp_status_from_reaction_key(key: str) -> Optional[str]:
+    """Map a reaction key to an RSVP status ('yes'|'no'|'maybe'), else None."""
     key_stripped = (key or "").strip()
     if key_stripped in RSVP_YES_KEYS:
-        return ("yes", False)
+        return "yes"
     if key_stripped in RSVP_NO_KEYS:
-        return ("no", False)
+        return "no"
     if key_stripped in RSVP_MAYBE_KEYS:
-        return ("maybe", False)
-    if key_stripped in RSVP_PLUS_ONE_KEYS:
-        return ("yes", True)
+        return "maybe"
     return None
 
 
-def is_minus_one_reaction(key: str) -> bool:
-    """True if the reaction key indicates removing a plus-one guest."""
-    key_stripped = (key or "").strip()
-    return key_stripped in RSVP_MINUS_ONE_KEYS
+def classify_reaction(key: str) -> Optional[Tuple[str, Any]]:
+    """Classify an RSVP reaction key.
+
+    Returns ('status', 'yes'|'no'|'maybe') for a status reaction,
+    ('guest', n) for a keycap number reaction (n in 1..9), or None otherwise.
+    """
+    status = rsvp_status_from_reaction_key(key)
+    if status is not None:
+        return ("status", status)
+    guests = guest_count_from_reaction_key(key)
+    if guests is not None:
+        return ("guest", guests)
+    return None
+
+
+def compute_rsvp_from_reactions(
+    reactions: List[Dict[str, Any]]
+) -> Optional[Tuple[str, int]]:
+    """Derive a user's RSVP from their active tracked reactions.
+
+    Each reaction is a mapping with at least 'key' and 'created_ts'. The status
+    is taken from the most-recent status reaction and the guest count from the
+    most-recent keycap number reaction (0 if none).
+
+    Returns (status, guest_count), or None if there is no active status reaction
+    (in which case the user has no effective RSVP and their summary row, if any,
+    should be removed).
+    """
+    latest_status = None
+    latest_status_ts = None
+    latest_guests = 0
+    latest_guests_ts = None
+    for r in reactions:
+        ts = r.get("created_ts") or 0
+        kind = classify_reaction(r.get("key", ""))
+        if not kind:
+            continue
+        if kind[0] == "status":
+            if latest_status_ts is None or ts >= latest_status_ts:
+                latest_status_ts = ts
+                latest_status = kind[1]
+        else:  # guest
+            if latest_guests_ts is None or ts >= latest_guests_ts:
+                latest_guests_ts = ts
+                latest_guests = kind[1]
+    if latest_status is None:
+        return None
+    return (latest_status, latest_guests)
 
 
 def sanitize_event_name(name: str) -> str:

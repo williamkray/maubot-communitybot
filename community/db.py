@@ -94,3 +94,31 @@ async def upgrade_v6(conn: Connection) -> None:
                 PRIMARY KEY (room_id, event_id, reporter)
             )"""
     )
+
+
+@upgrade_table.register(description="Event guest counts, per-event guest caps, and reaction tracking")
+async def upgrade_v7(conn: Connection) -> None:
+    # Per-invitee additional-guest count (replaces the old 0/1 plus_one).
+    await conn.execute(
+            "ALTER TABLE event_rsvps ADD COLUMN guest_count INTEGER NOT NULL DEFAULT 0"
+    )
+    # Preserve any existing plus_one data as a guest_count of 0 or 1.
+    await conn.execute("UPDATE event_rsvps SET guest_count = plus_one")
+    # Per-event cap on additional guests per invitee: -1 = unlimited, 0 = none.
+    await conn.execute(
+            "ALTER TABLE community_events ADD COLUMN max_additional_guests INTEGER NOT NULL DEFAULT 1"
+    )
+    # Track individual RSVP reaction events so redactions (un-reacting) update
+    # the count, and so RSVP state can be recomputed from the active reactions.
+    await conn.execute(
+            """CREATE TABLE event_reactions (
+                reaction_event_id TEXT PRIMARY KEY,
+                event_room_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                created_ts BIGINT NOT NULL
+            )"""
+    )
+    await conn.execute(
+            "CREATE INDEX idx_event_reactions_event_user ON event_reactions(event_room_id, user_id)"
+    )
