@@ -1021,77 +1021,58 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.ROOM_POWER_LEVELS)
     async def sync_power_levels(self, evt: StateEvent) -> None:
-        # Only care about changes in the parent room
-        if evt.room_id != self.config["parent_room"]:
+        # Ignore our own cascade writes so propagation can't feed back into itself.
+        if evt.sender == self.client.mxid:
             return
 
-        # Get the changed user and their new power level
+        parent = self.config["parent_room"]
+        if not parent:
+            return
+
+        # Decide the scope and mode of this change:
+        #  - a change in the PARENT space is authoritative: it overwrites the same
+        #    users in every managed room (community-wide admins/mods).
+        #  - a change in a managed SUBSPACE is a delegation: it propagates
+        #    additively (max, never lowering) to that subspace's subtree only.
+        if evt.room_id == parent:
+            scope_rooms = await self.get_space_roomlist()
+            mode = "overwrite"
+            scope_label = "parent room"
+        else:
+            managed = await self.get_space_roomlist()
+            if evt.room_id in managed and await room_utils.is_space(
+                self.client, evt.room_id, self.log
+            ):
+                scope_rooms = await self.get_space_roomlist(evt.room_id)
+                mode = "max"
+                scope_label = "subspace"
+            else:
+                return
+
         try:
-            old_levels = evt.prev_content.get("users", {})
+            old_levels = evt.prev_content.get("users", {}) if evt.prev_content else {}
             new_levels = evt.content.get("users", {})
 
-            # Find which user's power level changed
-            changed_users = {}
-            for user, new_level in new_levels.items():
-                if user not in old_levels or old_levels[user] != new_level:
-                    changed_users[user] = new_level
-
+            # Find which users' power levels changed (additions + level changes;
+            # removals are handled by undelegate / parent-leave cleanup).
+            changed_users = {
+                user: level
+                for user, level in new_levels.items()
+                if old_levels.get(user) != level
+            }
             if not changed_users:
                 return
 
-            # Get all rooms in the space (excludes non-child rooms like banlist policy rooms)
-            space_rooms = await self.get_space_roomlist()
-            success_rooms = []
-            failed_rooms = []
+            success_rooms, failed_rooms = await self._apply_user_levels(
+                scope_rooms, changed_users, mode=mode
+            )
 
-            # Apply the same power level changes to each room
-            for room_id in space_rooms:
-                if room_id == self.config["parent_room"]:
-                    continue
-
-                roomname = await common_utils.get_room_name(
-                    self.client, room_id, self.log
-                )
-
-                # Get current power levels
-                try:
-                    # Get current power levels
-                    current_pl = await self.client.get_state_event(
-                        room_id, EventType.ROOM_POWER_LEVELS
-                    )
-
-                    # Update existing power levels object with new levels
-                    users = current_pl.get("users", {})
-                    for user, level in changed_users.items():
-                        users[user] = level
-
-                    current_pl["users"] = users
-
-                    # Send updated power levels
-                    try:
-                        await self.client.send_state_event(
-                            room_id, EventType.ROOM_POWER_LEVELS, current_pl
-                        )
-                        success_rooms.append(roomname or room_id)
-                    except Exception as e:
-                        self.log.error(
-                            f"Failed to send power levels to {roomname or room_id}: {e}"
-                        )
-                        failed_rooms.append(roomname or room_id)
-
-                    await asyncio.sleep(self.config["sleep"])
-
-                except Exception as e:
-                    self.log.warning(f"Failed to update power levels in {room_id}: {e}")
-                    failed_rooms.append(room_id)
-
-            # Send notification if configured
             if self.config["notification_room"]:
                 changes = ", ".join(
-                    [f"{user} → {level}" for user, level in changed_users.items()]
+                    f"{user} → {level}" for user, level in changed_users.items()
                 )
                 notification = (
-                    f"Power level changes ({changes}) propagated from parent room:<br>"
+                    f"Power level changes ({changes}) propagated from {scope_label}:<br>"
                 )
                 notification += (
                     f"Succeeded in: <code>{', '.join(success_rooms)}</code><br>"
@@ -1105,6 +1086,93 @@ class CommunityBot(Plugin):
 
         except Exception as e:
             self.log.error(f"Error syncing power levels: {e}")
+
+    async def _apply_user_levels(
+        self, rooms: list, levels: dict, mode: str = "overwrite"
+    ) -> tuple[list, list]:
+        """Apply ``{user: level}`` to each room's power levels.
+
+        mode="overwrite": set the user to the given level (parent space, the
+        source of truth, changed).
+        mode="max": set the user to max(current, level) so delegation only ever
+        adds power and never lowers an existing (e.g. parent-granted) level.
+
+        Skips users who are creators of a modern (v12+) room, since creators must
+        not appear in ``content.users``. Returns (succeeded, failed) name lists.
+        """
+        success, failed = [], []
+        for room_id in rooms:
+            roomname = (
+                await common_utils.get_room_name(self.client, room_id, self.log)
+                or room_id
+            )
+            try:
+                current_pl = await self.client.get_state_event(
+                    room_id, EventType.ROOM_POWER_LEVELS
+                )
+                _, room_creators = await self.get_room_version_and_creators(room_id)
+                users = current_pl.get("users", {})
+                changed = False
+                for user, level in levels.items():
+                    if user in room_creators:
+                        continue
+                    new_level = (
+                        max(users.get(user, 0), level) if mode == "max" else level
+                    )
+                    if users.get(user) != new_level:
+                        users[user] = new_level
+                        changed = True
+                if not changed:
+                    continue
+                current_pl["users"] = users
+                await self.client.send_state_event(
+                    room_id, EventType.ROOM_POWER_LEVELS, current_pl
+                )
+                success.append(roomname)
+                await asyncio.sleep(self.config["sleep"])
+            except Exception as e:
+                self.log.warning(f"Failed to apply power levels in {room_id}: {e}")
+                failed.append(roomname)
+        return success, failed
+
+    async def _remove_user_from_rooms(
+        self, rooms: list, user: str, keep_level=None
+    ) -> tuple[list, list]:
+        """Remove a user's power-level entry from each room.
+
+        If keep_level is not None the user is instead set to that level, used to
+        preserve a community-wide (parent) grant when undelegating a subspace.
+        Returns (changed, failed) room-name lists.
+        """
+        success, failed = [], []
+        for room_id in rooms:
+            roomname = (
+                await common_utils.get_room_name(self.client, room_id, self.log)
+                or room_id
+            )
+            try:
+                current_pl = await self.client.get_state_event(
+                    room_id, EventType.ROOM_POWER_LEVELS
+                )
+                users = current_pl.get("users", {})
+                if keep_level is not None:
+                    if users.get(user) == keep_level:
+                        continue
+                    users[user] = keep_level
+                else:
+                    if user not in users:
+                        continue
+                    users.pop(user, None)
+                current_pl["users"] = users
+                await self.client.send_state_event(
+                    room_id, EventType.ROOM_POWER_LEVELS, current_pl
+                )
+                success.append(roomname)
+                await asyncio.sleep(self.config["sleep"])
+            except Exception as e:
+                self.log.warning(f"Failed to remove {user} from {room_id}: {e}")
+                failed.append(roomname)
+        return success, failed
 
     async def handle_leave_events(self, evt: StateEvent) -> None:
         """Common logic for handling membership changes (leave/kick/ban)."""
@@ -1121,6 +1189,18 @@ class CommunityBot(Plugin):
             self.log.debug(
                 f"membership change event for {user_id} in {evt.room_id} detected"
             )
+
+            # Parent-space membership is the source of truth for community
+            # membership: if a user leaves (or is removed from) the PARENT space,
+            # remove them from the whole community and strip their power levels.
+            # Scoped to the parent so subspace/room departures don't cascade.
+            if (
+                evt.room_id == self.config["parent_room"]
+                and user_id != self.client.mxid
+            ):
+                await self._cleanup_departed_user(user_id)
+                return
+
             if (
                 isinstance(self.config["check_if_human"], bool)
                 and self.config["check_if_human"]
@@ -1166,6 +1246,36 @@ class CommunityBot(Plugin):
                         self.log.error(
                             f"Failed to update power levels state event in {evt.room_id}: {e}"
                         )
+
+    async def _cleanup_departed_user(self, user: str) -> None:
+        """Remove a user who left the parent space from the whole community.
+
+        Kicks them from every managed room (subspaces and nested rooms included)
+        and strips their power-level entries everywhere, including the parent.
+        Keeps community permissions clean when someone leaves — parent membership
+        is the source of truth for community membership.
+        """
+        if not user or user == self.client.mxid:
+            return
+        parent = self.config["parent_room"]
+        child_rooms = await self.get_space_roomlist()
+        self.log.info(
+            f"{user} left the parent space; removing them from "
+            f"{len(child_rooms)} managed room(s) and stripping power levels"
+        )
+        # Kick from every managed room (skip rooms they're not in).
+        for room_id in child_rooms:
+            try:
+                await self.client.kick_user(
+                    room_id, user, reason="left the community space"
+                )
+                await asyncio.sleep(self.config["sleep"])
+            except MNotFound:
+                pass
+            except Exception as e:
+                self.log.warning(f"Could not kick {user} from {room_id}: {e}")
+        # Strip any lingering power-level entries, including in the parent space.
+        await self._remove_user_from_rooms(child_rooms + [parent], user, keep_level=None)
 
     async def send_membership_notification(
         self, evt: StateEvent, template_key: str, actor_id: str = None
@@ -4620,7 +4730,8 @@ class CommunityBot(Plugin):
     async def space(self, evt: MessageEvent) -> None:
         """Main space command - shows usage by default"""
         await evt.reply(
-            "Use !community space <subcommand> to manage subspaces. Available subcommands: create, list"
+            "Use !community space <subcommand> to manage subspaces. "
+            "Available subcommands: create, list, delegate, undelegate"
         )
 
     @space.subcommand(
@@ -4763,6 +4874,139 @@ class CommunityBot(Plugin):
             chunk += line + "\n"
         if chunk:
             await evt.respond(f"<pre>{chunk}</pre>", allow_html=True)
+
+    @staticmethod
+    def _parse_delegation_level(level: str):
+        """Parse a delegation level: 'admin'->100, 'mod'->50, or an int. None if invalid."""
+        if not level:
+            return 100
+        norm = level.strip().lower()
+        if norm == "admin":
+            return 100
+        if norm in ("mod", "moderator"):
+            return 50
+        try:
+            return int(norm)
+        except ValueError:
+            return None
+
+    async def _resolve_delegation_target(self, subspace: str, evt: MessageEvent):
+        """Resolve+validate a subspace arg for delegation; reply and return None if invalid.
+
+        A subspace with spaces in its display name must be referenced by alias or ID.
+        """
+        target = await self._resolve_space_arg(subspace, evt)
+        if not target:
+            return None
+        if not await room_utils.is_space(self.client, target, self.log):
+            await evt.reply("that target isn't a space, so i can't delegate over it.")
+            return None
+        managed = set([self.config["parent_room"]] + await self.get_space_roomlist())
+        if target not in managed:
+            await evt.reply(
+                "that space isn't part of this community's tree, so i won't touch it."
+            )
+            return None
+        return target
+
+    @space.subcommand(
+        "delegate",
+        help="grant a user power over a subspace and all its rooms. \
+              usage: delegate <user> <subspace> [mod|admin|<level>] (subspace by alias/id if its name has spaces)",
+    )
+    @command.argument("user", required=True)
+    @command.argument("subspace", required=True)
+    @command.argument("level", required=False)
+    @decorators.require_parent_room
+    @decorators.require_permission(min_level=100)
+    async def space_delegate(
+        self, evt: MessageEvent, user: str = None, subspace: str = None, level: str = None
+    ) -> None:
+        await evt.mark_read()
+
+        if not user or not subspace:
+            await evt.reply(
+                "usage: !community space delegate <user> <subspace> [mod|admin|<level>]"
+            )
+            return
+        if not user.startswith("@") or ":" not in user:
+            await evt.reply(
+                "that doesn't look like a full matrix id (e.g. @alice:server.tld)."
+            )
+            return
+        pl_level = self._parse_delegation_level(level)
+        if pl_level is None:
+            await evt.reply("level must be 'mod', 'admin', or a number.")
+            return
+
+        target = await self._resolve_delegation_target(subspace, evt)
+        if not target:
+            return
+
+        # The subspace itself plus everything nested under it (any depth).
+        rooms = [target] + await self.get_space_roomlist(target)
+        msg = await evt.respond(f"delegating {user} across the subspace...")
+        success, failed = await self._apply_user_levels(
+            rooms, {user: pl_level}, mode="max"
+        )
+        result = (
+            f"Delegated <b>{user}</b> (power level {pl_level}) across "
+            f"<b>{await self._get_room_name(target)}</b> and its rooms.<br>"
+            f"Applied in: <code>{', '.join(success) or 'none (already at or above that level)'}</code>"
+        )
+        if failed:
+            result += f"<br>Failed in: <code>{', '.join(failed)}</code>"
+        await evt.respond(result, edits=msg, allow_html=True)
+
+    @space.subcommand(
+        "undelegate",
+        help="revoke a user's delegated power over a subspace and its rooms. \
+              usage: undelegate <user> <subspace>",
+    )
+    @command.argument("user", required=True)
+    @command.argument("subspace", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission(min_level=100)
+    async def space_undelegate(
+        self, evt: MessageEvent, user: str = None, subspace: str = None
+    ) -> None:
+        await evt.mark_read()
+
+        if not user or not subspace:
+            await evt.reply("usage: !community space undelegate <user> <subspace>")
+            return
+
+        target = await self._resolve_delegation_target(subspace, evt)
+        if not target:
+            return
+
+        # Preserve a community-wide (parent) grant if the user has one, so
+        # undelegating a subspace never strips someone's global role.
+        parent_level = None
+        try:
+            parent_pl = await self.client.get_state_event(
+                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
+            )
+            parent_level = parent_pl.get("users", {}).get(user)
+        except Exception as e:
+            self.log.warning(f"Could not read parent power levels: {e}")
+
+        rooms = [target] + await self.get_space_roomlist(target)
+        msg = await evt.respond(f"revoking {user}'s delegation...")
+        success, failed = await self._remove_user_from_rooms(
+            rooms, user, keep_level=parent_level
+        )
+        if parent_level is not None:
+            note = f"kept their community-wide level ({parent_level})"
+        else:
+            note = "removed them from the subtree"
+        result = (
+            f"Undelegated <b>{user}</b> from <b>{await self._get_room_name(target)}</b> "
+            f"— {note}.<br>Changed in: <code>{', '.join(success) or 'none'}</code>"
+        )
+        if failed:
+            result += f"<br>Failed in: <code>{', '.join(failed)}</code>"
+        await evt.respond(result, edits=msg, allow_html=True)
 
     async def store_verification_state(self, dm_room_id: str, state: dict) -> None:
         """Store verification state in the database."""
