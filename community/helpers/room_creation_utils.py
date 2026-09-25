@@ -2,12 +2,9 @@
 
 import re
 import asyncio
-import logging
 from typing import Optional, Tuple, List, Dict, Any
 from mautrix.types import MessageEvent, PowerLevelStateEventContent, EventType
 from mautrix.client import Client
-
-from .common_utils import with_rate_limit_retry
 
 
 async def validate_room_creation_params(
@@ -261,18 +258,16 @@ async def add_room_to_space(
         room_id: Created room ID
         server: Server name
         sleep_duration: Sleep duration between operations
-        log: Optional logger for rate-limit retry diagnostics
+        log: Accepted for backwards compatibility; unused (rate-limit retries
+            are applied centrally by CommunityBot._install_rate_limit_retries).
     """
     if parent_room:
-        await with_rate_limit_retry(
-            lambda: client.send_state_event(
-                parent_room,
-                EventType.SPACE_CHILD,
-                {"via": [server], "suggested": False},
-                state_key=room_id,
-            ),
-            log=log or logging.getLogger("maubot.community"),
-            description="link room to space",
+        # send_state_event is centrally wrapped with rate-limit retry.
+        await client.send_state_event(
+            parent_room,
+            EventType.SPACE_CHILD,
+            {"via": [server], "suggested": False},
+            state_key=room_id,
         )
         await asyncio.sleep(sleep_duration)
 

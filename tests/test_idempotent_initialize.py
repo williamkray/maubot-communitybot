@@ -14,6 +14,7 @@ The bot cannot be instantiated bare (its constructor needs 10 args), so we build
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from mautrix.errors import MNotFound
+from mautrix.types import JoinRule
 
 from community.bot import CommunityBot
 
@@ -21,6 +22,13 @@ SERVER = "example.com"
 SPACE = "!space:example.com"
 MOD_ROOM = "!mod:example.com"
 WAITING_ROOM = "!waiting:example.com"
+
+
+class _Config(dict):
+    """A dict that also supports the config .save() the plugin calls."""
+
+    def save(self):
+        pass
 
 
 def make_bot(**config_overrides):
@@ -31,13 +39,15 @@ def make_bot(**config_overrides):
     bot.client.parse_user_id = Mock(return_value=("bot", SERVER))
     bot.client.resolve_room_alias = AsyncMock()
     bot.client.send_state_event = AsyncMock()
-    bot.config = {
-        "parent_room": SPACE,
-        "community_slug": "tc",
-        "use_community_slug": True,
-        "censor": False,
-        "sleep": 0,
-    }
+    bot.config = _Config(
+        {
+            "parent_room": SPACE,
+            "community_slug": "tc",
+            "use_community_slug": True,
+            "censor": False,
+            "sleep": 0,
+        }
+    )
     bot.config.update(config_overrides)
     # Async methods invoked on self
     bot.get_space_roomlist = AsyncMock(return_value=[])
@@ -45,6 +55,10 @@ def make_bot(**config_overrides):
     bot.get_moderators_and_above = AsyncMock(return_value=[])
     bot.create_room = AsyncMock()
     bot.generate_community_slug = Mock(return_value="tc")
+    bot._invalidate_roomlist_cache = Mock()
+    # Join-rule reconciliation is a no-op by default; tests that exercise it
+    # override this explicitly.
+    bot._ensure_join_rule = AsyncMock(return_value=False)
     return bot
 
 
@@ -191,8 +205,8 @@ class TestRepairCommunity:
         assert "Waiting Room" in args[0]
         # No linking needed (nothing was unlinked).
         add_link.assert_not_called()
-        # Waiting room join rule set + censor updated to include the waiting room.
-        bot.client.send_state_event.assert_awaited_once()
+        # Waiting room join rule reconciled to public + censor updated.
+        bot._ensure_join_rule.assert_any_await(WAITING_ROOM, JoinRule.PUBLIC)
         assert bot.config["censor"] == [WAITING_ROOM]
 
     @pytest.mark.asyncio
@@ -302,3 +316,76 @@ class TestRepairCommunity:
         assert bot.create_room.await_count == 1
         msg = evt.respond.await_args.args[0]
         assert "Failed to create" in msg
+
+
+class TestEnsureJoinRule:
+    """The idempotent join-rule reconciliation helper used by repair."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_already_correct(self):
+        bot = make_bot()
+        current = Mock()
+        current.join_rule = JoinRule.INVITE
+        bot.client.get_state_event = AsyncMock(return_value=current)
+        bot.client.send_state_event = AsyncMock()
+
+        changed = await CommunityBot._ensure_join_rule(bot, MOD_ROOM, JoinRule.INVITE)
+
+        assert changed is False
+        bot.client.send_state_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sets_when_different(self):
+        bot = make_bot()
+        current = Mock()
+        current.join_rule = JoinRule.RESTRICTED
+        bot.client.get_state_event = AsyncMock(return_value=current)
+        bot.client.send_state_event = AsyncMock()
+
+        changed = await CommunityBot._ensure_join_rule(
+            bot, WAITING_ROOM, JoinRule.PUBLIC
+        )
+
+        assert changed is True
+        bot.client.send_state_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sets_when_read_fails(self):
+        bot = make_bot()
+        bot.client.get_state_event = AsyncMock(side_effect=Exception("boom"))
+        bot.client.send_state_event = AsyncMock()
+
+        changed = await CommunityBot._ensure_join_rule(
+            bot, WAITING_ROOM, JoinRule.PUBLIC
+        )
+
+        assert changed is True
+
+
+class TestRepairRestoresJoinRules:
+    @pytest.mark.asyncio
+    async def test_repair_reconciles_join_rules_on_present_rooms(self):
+        """Even when all rooms exist and are linked, repair restores the
+        opinionated join rules (moderators invite-only, waiting room public)."""
+        bot = make_bot()
+        evt = make_evt()
+        bot._discover_community_rooms = AsyncMock(
+            return_value={
+                "space": {"room_id": SPACE, "linked": True},
+                "mod_room": {"room_id": MOD_ROOM, "linked": True},
+                "waiting_room": {"room_id": WAITING_ROOM, "linked": True},
+            }
+        )
+        # mod already correct, waiting room needed fixing
+        bot._ensure_join_rule = AsyncMock(side_effect=[False, True])
+
+        with patch(
+            "community.bot.room_creation_utils.add_room_to_space", new=AsyncMock()
+        ):
+            await CommunityBot._repair_community(bot, evt, "Test Community", "msg")
+
+        calls = bot._ensure_join_rule.await_args_list
+        assert calls[0].args == (MOD_ROOM, JoinRule.INVITE)
+        assert calls[1].args == (WAITING_ROOM, JoinRule.PUBLIC)
+        # nothing created since everything already existed
+        bot.create_room.assert_not_called()

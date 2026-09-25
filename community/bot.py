@@ -118,11 +118,54 @@ class CommunityBot(Plugin):
         await super().start()
         self.config.load_and_update()
         self.config_manager = config_manager.ConfigManager(self.config)
+        # Make every homeserver-mutating client call retry on rate limits.
+        self._install_rate_limit_retries()
         self.client.add_dispatcher(MembershipEventDispatcher)
         # Start background redaction task
         self._redaction_tasks = asyncio.create_task(self._redaction_loop())
         # Clean up stale verification states
         await self.cleanup_stale_verification_states()
+
+    # Client methods that mutate homeserver state and can therefore hit 429s.
+    _RATE_LIMITED_CLIENT_METHODS = (
+        "create_room",
+        "send_state_event",
+        "send_message_event",
+        "invite_user",
+        "kick_user",
+        "ban_user",
+        "unban_user",
+        "redact",
+    )
+
+    def _install_rate_limit_retries(self) -> None:
+        """Wrap the client's mutating methods so they retry on 429 centrally.
+
+        This covers every homeserver mutation (room creation, state events,
+        messages, membership changes, redactions) in one place instead of
+        wrapping call sites individually, so new code inherits retry behavior
+        for free. Idempotent — safe to call more than once (guards against
+        double-wrapping the same client).
+        """
+        client = self.client
+        log = self.log
+        for name in self._RATE_LIMITED_CLIENT_METHODS:
+            orig = getattr(client, name, None)
+            if orig is None or getattr(orig, "_rl_wrapped", False):
+                continue
+
+            def make_wrapper(func, label):
+                async def wrapper(*args, **kwargs):
+                    return await common_utils.with_rate_limit_retry(
+                        lambda: func(*args, **kwargs),
+                        log=log,
+                        description=label,
+                    )
+
+                wrapper._rl_wrapped = True
+                return wrapper
+
+            setattr(client, name, make_wrapper(orig, name))
 
     async def stop(self) -> None:
         if self._redaction_tasks:
@@ -302,17 +345,14 @@ class CommunityBot(Plugin):
             self.log.info(f"  - creation_content: {creation_content}")
             self.log.info(f"  - room_version: {self.config.get('room_version', '1')}")
 
-            space_id = await common_utils.with_rate_limit_retry(
-                lambda: self.client.create_room(
-                    alias_localpart=sanitized_name,
-                    name=space_name,
-                    invitees=invitees,
-                    power_level_override=power_level_override,
-                    creation_content=creation_content,
-                    room_version=self.config.get("room_version", "1"),
-                ),
-                log=self.log,
-                description=f"create space {sanitized_name}",
+            # Rate-limit retries are applied centrally (see _install_rate_limit_retries).
+            space_id = await self.client.create_room(
+                alias_localpart=sanitized_name,
+                name=space_name,
+                invitees=invitees,
+                power_level_override=power_level_override,
+                creation_content=creation_content,
+                room_version=self.config.get("room_version", "1"),
             )
 
             # Verify the space version and type were set correctly
@@ -3349,18 +3389,15 @@ class CommunityBot(Plugin):
                 self.log.info("No power level override")
 
             try:
-                room_id = await common_utils.with_rate_limit_retry(
-                    lambda: self.client.create_room(
-                        alias_localpart=alias_localpart,
-                        name=cleaned_roomname,
-                        invitees=room_invitees,
-                        initial_state=initial_state,
-                        power_level_override=power_levels,
-                        creation_content=creation_content,
-                        room_version=self.config["room_version"],
-                    ),
-                    log=self.log,
-                    description=f"create room {alias_localpart}",
+                # Rate-limit retries are applied centrally (see _install_rate_limit_retries).
+                room_id = await self.client.create_room(
+                    alias_localpart=alias_localpart,
+                    name=cleaned_roomname,
+                    invitees=room_invitees,
+                    initial_state=initial_state,
+                    power_level_override=power_levels,
+                    creation_content=creation_content,
+                    room_version=self.config["room_version"],
                 )
                 self.log.info(f"Room created successfully: {room_id}")
             except Exception as e:
@@ -4891,6 +4928,35 @@ class CommunityBot(Plugin):
             self.log.warning(f"Could not read name for space {room_id}: {e}")
         return ""
 
+    async def _ensure_join_rule(self, room_id: str, expected_rule) -> bool:
+        """Set a room's join rule to expected_rule only if it currently differs.
+
+        Idempotent — returns True if a change was applied, False if the rule was
+        already correct (or on error). Used by repair to restore the opinionated
+        join rules (moderators invite-only, waiting room public) on rooms that
+        were left mis-set by a partial initialize.
+        """
+        try:
+            current = await self.client.get_state_event(
+                room_id, EventType.ROOM_JOIN_RULES
+            )
+            current_rule = getattr(current, "join_rule", None)
+        except Exception:
+            current_rule = None
+        if current_rule == expected_rule:
+            return False
+        try:
+            await self.client.send_state_event(
+                room_id,
+                EventType.ROOM_JOIN_RULES,
+                JoinRulesStateEventContent(join_rule=expected_rule),
+            )
+            self.log.info(f"Set join rule of {room_id} to {expected_rule}")
+            return True
+        except Exception as e:
+            self.log.warning(f"Could not set join rule on {room_id}: {e}")
+            return False
+
     async def _initialize_new_space(
         self, evt: MessageEvent, community_name: str
     ) -> None:
@@ -5218,7 +5284,8 @@ class CommunityBot(Plugin):
 
             # --- Moderators room ---
             mod = discovered["mod_room"]
-            if not mod["room_id"]:
+            mod_room_id = mod["room_id"]
+            if not mod_room_id:
                 # Rebuild the moderator invitee list the same way a fresh init does.
                 moderators = [evt.sender]
                 try:
@@ -5245,13 +5312,6 @@ class CommunityBot(Plugin):
                     )
                     return
                 mod_room_id, _ = result
-
-                # Moderators room is invite-only.
-                await self.client.send_state_event(
-                    mod_room_id,
-                    EventType.ROOM_JOIN_RULES,
-                    JoinRulesStateEventContent(join_rule=JoinRule.INVITE),
-                )
                 status["mod_room"] = "created"
                 changed = True
             elif not mod["linked"]:
@@ -5259,7 +5319,7 @@ class CommunityBot(Plugin):
                 await room_creation_utils.add_room_to_space(
                     self.client,
                     parent_room,
-                    mod["room_id"],
+                    mod_room_id,
                     server,
                     self.config["sleep"],
                     self.log,
@@ -5267,6 +5327,15 @@ class CommunityBot(Plugin):
                 self._invalidate_roomlist_cache()
                 status["mod_room"] = "linked"
                 changed = True
+
+            # Ensure the moderators room is invite-only (restore if mis-set by a
+            # partial initialize). Idempotent — a no-op when already correct.
+            if mod_room_id and await self._ensure_join_rule(
+                mod_room_id, JoinRule.INVITE
+            ):
+                changed = True
+                if status["mod_room"] == "present":
+                    status["mod_room"] = "updated"
 
             # --- Waiting room ---
             waiting = discovered["waiting_room"]
@@ -5288,13 +5357,6 @@ class CommunityBot(Plugin):
                     )
                     return
                 waiting_room_id, _ = result
-
-                # Waiting room is publicly joinable.
-                await self.client.send_state_event(
-                    waiting_room_id,
-                    EventType.ROOM_JOIN_RULES,
-                    JoinRulesStateEventContent(join_rule=JoinRule.PUBLIC),
-                )
                 status["waiting_room"] = "created"
                 changed = True
             elif not waiting["linked"]:
@@ -5309,6 +5371,15 @@ class CommunityBot(Plugin):
                 self._invalidate_roomlist_cache()
                 status["waiting_room"] = "linked"
                 changed = True
+
+            # Ensure the waiting room is publicly joinable (restore if mis-set by
+            # a partial initialize). Idempotent — a no-op when already correct.
+            if waiting_room_id and await self._ensure_join_rule(
+                waiting_room_id, JoinRule.PUBLIC
+            ):
+                changed = True
+                if status["waiting_room"] == "present":
+                    status["waiting_room"] = "updated"
 
             # --- Censor config ---
             # Ensure the waiting room is covered by censorship even if it pre-existed.
