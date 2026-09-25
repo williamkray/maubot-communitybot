@@ -2,6 +2,7 @@
 
 import fnmatch
 import re
+import asyncio
 import time
 from typing import List, Dict, Tuple
 from mautrix.types import EventType, UserID
@@ -131,7 +132,7 @@ async def ban_user_from_rooms(
                 ban_event_map["ban_list"][user].append(roomname)
             else:
                 ban_event_map["ban_list"][user].append(room)
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
         except MNotFound:
             pass
         except Exception as e:

@@ -298,13 +298,17 @@ class CommunityBot(Plugin):
             self.log.info(f"  - creation_content: {creation_content}")
             self.log.info(f"  - room_version: {self.config.get('room_version', '1')}")
 
-            space_id = await self.client.create_room(
-                alias_localpart=sanitized_name,
-                name=space_name,
-                invitees=invitees,
-                power_level_override=power_level_override,
-                creation_content=creation_content,
-                room_version=self.config.get("room_version", "1"),
+            space_id = await common_utils.with_rate_limit_retry(
+                lambda: self.client.create_room(
+                    alias_localpart=sanitized_name,
+                    name=space_name,
+                    invitees=invitees,
+                    power_level_override=power_level_override,
+                    creation_content=creation_content,
+                    room_version=self.config.get("room_version", "1"),
+                ),
+                log=self.log,
+                description=f"create space {sanitized_name}",
             )
 
             # Verify the space version and type were set correctly
@@ -889,7 +893,7 @@ class CommunityBot(Plugin):
                         )
                         failed_rooms.append(roomname or room_id)
 
-                    time.sleep(self.config["sleep"])
+                    await asyncio.sleep(self.config["sleep"])
 
                 except Exception as e:
                     self.log.warning(f"Failed to update power levels in {room_id}: {e}")
@@ -1088,7 +1092,7 @@ class CommunityBot(Plugin):
                 )
                 if greeting_name != "none":
                     greeting = greeting_map[greeting_name].format(user=pill)
-                    time.sleep(self.config["welcome_sleep"])
+                    await asyncio.sleep(self.config["welcome_sleep"])
                     await self.client.send_notice(evt.room_id, html=greeting)
                 else:
                     pass
@@ -3070,7 +3074,7 @@ class CommunityBot(Plugin):
                     kick_list[user].append(roomname)
                 else:
                     kick_list[user].append(room)
-                time.sleep(self.config["sleep"])
+                await asyncio.sleep(self.config["sleep"])
             except MNotFound:
                 pass
             except Exception as e:
@@ -3199,14 +3203,18 @@ class CommunityBot(Plugin):
                 self.log.info("No power level override")
 
             try:
-                room_id = await self.client.create_room(
-                    alias_localpart=alias_localpart,
-                    name=cleaned_roomname,
-                    invitees=room_invitees,
-                    initial_state=initial_state,
-                    power_level_override=power_levels,
-                    creation_content=creation_content,
-                    room_version=self.config["room_version"],
+                room_id = await common_utils.with_rate_limit_retry(
+                    lambda: self.client.create_room(
+                        alias_localpart=alias_localpart,
+                        name=cleaned_roomname,
+                        invitees=room_invitees,
+                        initial_state=initial_state,
+                        power_level_override=power_levels,
+                        creation_content=creation_content,
+                        room_version=self.config["room_version"],
+                    ),
+                    log=self.log,
+                    description=f"create room {alias_localpart}",
                 )
                 self.log.info(f"Room created successfully: {room_id}")
             except Exception as e:
@@ -3220,7 +3228,7 @@ class CommunityBot(Plugin):
 
             # Add room to space
             await room_creation_utils.add_room_to_space(
-                self.client, parent_room, room_id, server, self.config["sleep"]
+                self.client, parent_room, room_id, server, self.config["sleep"], self.log
             )
 
             if evt:

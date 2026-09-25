@@ -2,9 +2,12 @@
 
 import re
 import asyncio
+import logging
 from typing import Optional, Tuple, List, Dict, Any
 from mautrix.types import MessageEvent, PowerLevelStateEventContent, EventType
 from mautrix.client import Client
+
+from .common_utils import with_rate_limit_retry
 
 
 async def validate_room_creation_params(
@@ -243,7 +246,12 @@ def adjust_power_levels_for_modern_rooms(
 
 
 async def add_room_to_space(
-    client: Client, parent_room: str, room_id: str, server: str, sleep_duration: float
+    client: Client,
+    parent_room: str,
+    room_id: str,
+    server: str,
+    sleep_duration: float,
+    log=None,
 ) -> None:
     """Add created room to parent space.
 
@@ -253,13 +261,18 @@ async def add_room_to_space(
         room_id: Created room ID
         server: Server name
         sleep_duration: Sleep duration between operations
+        log: Optional logger for rate-limit retry diagnostics
     """
     if parent_room:
-        await client.send_state_event(
-            parent_room,
-            EventType.SPACE_CHILD,
-            {"via": [server], "suggested": False},
-            state_key=room_id,
+        await with_rate_limit_retry(
+            lambda: client.send_state_event(
+                parent_room,
+                EventType.SPACE_CHILD,
+                {"via": [server], "suggested": False},
+                state_key=room_id,
+            ),
+            log=log or logging.getLogger("maubot.community"),
+            description="link room to space",
         )
         await asyncio.sleep(sleep_duration)
 
