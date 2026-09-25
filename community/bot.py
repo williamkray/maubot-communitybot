@@ -754,10 +754,10 @@ class CommunityBot(Plugin):
                 "ban": power_levels.ban,
                 "invite": power_levels.invite,
                 "tombstone": power_levels.events.get(
-                    "m.room.tombstone", power_levels.events_default
+                    EventType.ROOM_TOMBSTONE, power_levels.events_default
                 ),
                 "power_levels": power_levels.events.get(
-                    "m.room.power_levels", power_levels.events_default
+                    EventType.ROOM_POWER_LEVELS, power_levels.events_default
                 ),
                 "state": power_levels.state_default,
             }
@@ -1513,7 +1513,7 @@ class CommunityBot(Plugin):
 
                         # Get the required power level for sending messages
                         required_level = events.get(
-                            str(EventType.ROOM_MESSAGE), events_default
+                            EventType.ROOM_MESSAGE, events_default
                         )
 
                         self.log.debug(
@@ -4589,7 +4589,7 @@ class CommunityBot(Plugin):
             # Get the required power level for sending messages
             events_default = power_levels.events_default
             events = power_levels.events
-            required_level = events.get(str(EventType.ROOM_MESSAGE), events_default)
+            required_level = events.get(EventType.ROOM_MESSAGE, events_default)
 
             # Set default power level to n-1 (usually 0)
             power_levels.users_default = required_level - 1
@@ -6050,14 +6050,14 @@ class CommunityBot(Plugin):
                 permissions = [
                     (
                         "Send messages",
-                        events.get(str(EventType.ROOM_MESSAGE), events_default),
+                        events.get(EventType.ROOM_MESSAGE, events_default),
                     ),
                     ("Send state events", power_levels.state_default),
                     (
                         "Change power levels",
-                        events.get(str(EventType.ROOM_POWER_LEVELS), events_default),
+                        events.get(EventType.ROOM_POWER_LEVELS, events_default),
                     ),
-                    ("Send tombstone", events.get("m.room.tombstone", events_default)),
+                    ("Send tombstone", events.get(EventType.ROOM_TOMBSTONE, events_default)),
                     ("Invite users", power_levels.invite),
                     ("Kick users", power_levels.kick),
                     ("Ban users", power_levels.ban),
