@@ -31,6 +31,8 @@ from mautrix.types import (
     RoomAlias,
     PowerLevelStateEventContent,
     MessageType,
+    TextMessageEventContent,
+    Format,
     PaginationDirection,
     SpaceChildStateEventContent,
     SpaceParentStateEventContent,
@@ -933,7 +935,13 @@ class CommunityBot(Plugin):
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
 
-        return await user_utils.ban_user_from_rooms(
+        # Single batched notification for the whole community-wide ban, updated
+        # in place when finished (the per-room events are suppressed as bot-sent).
+        notif = await self._post_notification(
+            f"⛔ Starting community-wide ban of <code>{user}</code>…"
+        )
+
+        results = await user_utils.ban_user_from_rooms(
             self.client,
             user,
             roomlist,
@@ -945,6 +953,18 @@ class CommunityBot(Plugin):
             self.config["sleep"],
             self.log,
         )
+
+        banned = results.get("ban_list", {}).get(user, [])
+        errors = results.get("error_list", {})
+        readout = (
+            f"⛔ Banned <code>{user}</code> from {len(banned)} room(s): "
+            f"{self._summarize_rooms(banned)}."
+        )
+        if errors:
+            readout += f" ⚠️ {len(errors)} room(s) had errors."
+        await self._post_notification(readout, edit=notif)
+
+        return results
 
     async def get_banlist_roomids(self):
         return await user_utils.get_banlist_roomids(
@@ -1260,9 +1280,13 @@ class CommunityBot(Plugin):
             # membership: if a user leaves (or is removed from) the PARENT space,
             # remove them from the whole community and strip their power levels.
             # Scoped to the parent so subspace/room departures don't cascade.
+            # Skip bot-initiated departures (a community-wide ban/kick already
+            # removed the user everywhere and posted its own batched notice) to
+            # avoid a redundant second cleanup + message.
             if (
                 evt.room_id == self.config["parent_room"]
                 and user_id != self.client.mxid
+                and evt.sender != self.client.mxid
             ):
                 await self._cleanup_departed_user(user_id)
                 return
@@ -1329,6 +1353,10 @@ class CommunityBot(Plugin):
             f"{user} left the parent space; removing them from "
             f"{len(child_rooms)} managed room(s) and stripping power levels"
         )
+        notif = await self._post_notification(
+            f"🚪 <code>{user}</code> left the community space; removing them from "
+            f"{len(child_rooms)} managed room(s)…"
+        )
         # Kick from every managed room (skip rooms they're not in).
         for room_id in child_rooms:
             try:
@@ -1342,6 +1370,47 @@ class CommunityBot(Plugin):
                 self.log.warning(f"Could not kick {user} from {room_id}: {e}")
         # Strip any lingering power-level entries, including in the parent space.
         await self._remove_user_from_rooms(child_rooms + [parent], user, keep_level=None)
+        await self._post_notification(
+            f"🚪 <code>{user}</code> left the community; removed from all managed "
+            f"rooms and power levels cleaned up.",
+            edit=notif,
+        )
+
+    async def _post_notification(self, html: str, edit=None):
+        """Post (or edit) a notice in the notification room.
+
+        Returns the event ID of the posted/edited message, or None if there is
+        no notification room configured or the send failed. Used to give
+        community-wide actions a single batched message that updates in place,
+        instead of one notification per room.
+        """
+        room = self.config["notification_room"]
+        if not room:
+            return None
+        try:
+            content = TextMessageEventContent(
+                msgtype=MessageType.NOTICE,
+                format=Format.HTML,
+                body=html,
+                formatted_body=html,
+            )
+            if edit:
+                content.set_edit(edit)
+            return await self.client.send_message_event(
+                room, EventType.ROOM_MESSAGE, content
+            )
+        except Exception as e:
+            self.log.warning(f"Failed to post batched notification: {e}")
+            return None
+
+    @staticmethod
+    def _summarize_rooms(names: list) -> str:
+        """Render a short room-name list for a batched action readout."""
+        if not names:
+            return "no rooms"
+        if len(names) <= 6:
+            return ", ".join(names)
+        return ", ".join(names[:6]) + f", and {len(names) - 6} more"
 
     async def send_membership_notification(
         self, evt: StateEvent, template_key: str, actor_id: str = None
@@ -1356,6 +1425,14 @@ class CommunityBot(Plugin):
         if evt.source & SyncStream.STATE:
             return
         if not self.config["notification_room"]:
+            return
+
+        # Bot-initiated membership changes are part of a community-wide action
+        # (ban/kick/unban/purge/cleanup) that posts its own single batched
+        # notification, so skip the per-room notifications to avoid spam.
+        # Organic changes (a user leaving, or a human moderator acting in one
+        # room) still notify individually.
+        if evt.sender == self.client.mxid:
             return
 
         # only notify for rooms that belong to the managed space
@@ -2135,6 +2212,9 @@ class CommunityBot(Plugin):
 
         user = mxid
         msg = await evt.respond("starting the unban...")
+        notif = await self._post_notification(
+            f"✅ Starting community-wide unban of <code>{user}</code>…"
+        )
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
@@ -2161,6 +2241,15 @@ class CommunityBot(Plugin):
             unban_list=unban_list, error_list=error_list
         )
         await evt.respond(results, allow_html=True, edits=msg)
+
+        unbanned = unban_list.get(user, [])
+        readout = (
+            f"✅ Unbanned <code>{user}</code> from {len(unbanned)} room(s): "
+            f"{self._summarize_rooms(unbanned)}."
+        )
+        if error_list:
+            readout += f" ⚠️ {len(error_list)} room(s) had errors."
+        await self._post_notification(readout, edit=notif)
 
         # sync our database after we've made changes to room memberships
         await self.do_sync()
@@ -3365,6 +3454,9 @@ class CommunityBot(Plugin):
         await evt.mark_read()
 
         msg = await evt.respond("starting the purge...")
+        notif = await self._post_notification(
+            "🧹 Starting inactivity purge…"
+        )
         report = await self.generate_report()
         purgeable = report["kick_inactive"]
         roomlist = await self.get_space_roomlist()
@@ -3403,6 +3495,15 @@ class CommunityBot(Plugin):
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
+        purged_users = [u for u, rooms in purge_list.items() if rooms]
+        readout = (
+            f"🧹 Inactivity purge complete — kicked {len(purged_users)} user(s): "
+            f"{self._summarize_rooms(purged_users)}."
+        )
+        if error_list:
+            readout += f" ⚠️ {len(error_list)} user(s) had errors."
+        await self._post_notification(readout, edit=notif)
+
         # sync our database after we've made changes to room memberships
         await self.do_sync()
 
@@ -3417,6 +3518,9 @@ class CommunityBot(Plugin):
 
         user = mxid
         msg = await evt.respond("starting the kick...")
+        notif = await self._post_notification(
+            f"👢 Starting community-wide kick of <code>{user}</code>…"
+        )
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
@@ -3449,6 +3553,15 @@ class CommunityBot(Plugin):
             kick_list=kick_list, error_list=error_list
         )
         await evt.respond(results, allow_html=True, edits=msg)
+
+        kicked = kick_list.get(user, [])
+        readout = (
+            f"👢 Kicked <code>{user}</code> from {len(kicked)} room(s): "
+            f"{self._summarize_rooms(kicked)}."
+        )
+        if error_list:
+            readout += f" ⚠️ {len(error_list)} room(s) had errors."
+        await self._post_notification(readout, edit=notif)
 
         # sync our database after we've made changes to room memberships
         await self.do_sync()
