@@ -72,6 +72,14 @@ Draupnir, Meowlnir, or Mjolnir.
 please read through the comments in the `base-config.yaml` for more thorough explanations, but this covers the high
 points.
 
+## nested spaces (subspaces)
+
+your community can be organized into subspaces (spaces nested inside your parent space). every space-wide operation —
+power level sync, censorship targeting, cross-room bans/kicks/unbans, inactivity purges, activity tracking, and the
+`doctor` diagnostic — automatically traverses the whole space tree to any depth, so rooms living inside a subspace are
+managed just like direct children. the subspaces themselves are managed too (for example, power levels are synced into
+them). cyclic space references are handled safely.
+
 ## initialize a community from scratch
 
 just installed the plugin for the first time, and want to get started on the right foot? start a DM with your bot and run:

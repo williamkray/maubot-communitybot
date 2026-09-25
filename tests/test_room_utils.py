@@ -7,7 +7,8 @@ from mautrix.errors import MNotFound
 
 from community.helpers.room_utils import (
     validate_room_alias, validate_room_aliases, get_room_version_and_creators,
-    is_modern_room_version, user_has_unlimited_power, get_moderators_and_above
+    is_modern_room_version, user_has_unlimited_power, get_moderators_and_above,
+    is_space,
 )
 
 
@@ -226,7 +227,61 @@ class TestRoomUtils:
         """Test getting moderators with error."""
         client = Mock()
         client.get_state_event = AsyncMock(side_effect=Exception("Network error"))
-        
+
         moderators = await get_moderators_and_above(client, "!room:example.com")
-        
+
         assert moderators == []
+
+    @pytest.mark.asyncio
+    async def test_is_space_true_string_type(self):
+        """A create event whose type is the string 'm.space' is a space."""
+        client = Mock()
+        create_content = Mock()
+        create_content.type = "m.space"
+        client.get_state_event = AsyncMock(return_value=create_content)
+
+        assert await is_space(client, "!space:example.com") is True
+        client.get_state_event.assert_called_once_with(
+            "!space:example.com", EventType.ROOM_CREATE
+        )
+
+    @pytest.mark.asyncio
+    async def test_is_space_true_enum_type(self):
+        """A create event whose type is an enum with value 'm.space' is a space."""
+        client = Mock()
+        enum_like = Mock()
+        enum_like.value = "m.space"
+        create_content = Mock()
+        create_content.type = enum_like
+        client.get_state_event = AsyncMock(return_value=create_content)
+
+        assert await is_space(client, "!space:example.com") is True
+
+    @pytest.mark.asyncio
+    async def test_is_space_false_regular_room(self):
+        """A regular room (no create type) is not a space."""
+        client = Mock()
+        create_content = Mock()
+        create_content.type = None
+        create_content.get = Mock(return_value=None)
+        client.get_state_event = AsyncMock(return_value=create_content)
+
+        assert await is_space(client, "!room:example.com") is False
+
+    @pytest.mark.asyncio
+    async def test_is_space_not_found(self):
+        """MNotFound (no create event) resolves to not-a-space, not an error."""
+        client = Mock()
+        client.get_state_event = AsyncMock(
+            side_effect=MNotFound("no create event", 404)
+        )
+
+        assert await is_space(client, "!room:example.com") is False
+
+    @pytest.mark.asyncio
+    async def test_is_space_error(self):
+        """Any other error resolves to not-a-space."""
+        client = Mock()
+        client.get_state_event = AsyncMock(side_effect=Exception("boom"))
+
+        assert await is_space(client, "!room:example.com") is False

@@ -109,6 +109,10 @@ class CommunityBot(Plugin):
 
     _redaction_tasks: asyncio.Task = None
     _verification_states: Dict[str, Dict] = {}
+    # Cached flattened list of all rooms in the managed space tree (including
+    # nested subspaces). None means "not yet computed / invalidated". Rebuilt
+    # lazily by get_space_roomlist() and cleared by _invalidate_roomlist_cache().
+    _roomlist_cache: Optional[list] = None
 
     async def start(self) -> None:
         await super().start()
@@ -450,27 +454,80 @@ class CommunityBot(Plugin):
 
         return results
 
-    async def get_space_roomlist(self) -> list[str]:
-        space = self.config["parent_room"]
+    async def get_space_roomlist(
+        self, space: str = None, _visited: set = None
+    ) -> list[str]:
+        """Return all rooms in the managed space, recursing into subspaces.
+
+        The result is a flattened, de-duplicated list of every room reachable
+        from the parent space through ``m.space.child`` links, at any depth.
+        Nested subspace rooms are themselves included in the list because they
+        are managed too (e.g. power-level sync propagates into them).
+
+        The top-level result (called with no ``space`` argument) is cached;
+        _invalidate_roomlist_cache() clears it when the space tree changes.
+
+        Args:
+            space: Space to enumerate. Defaults to the configured parent room.
+                Passed automatically during recursion into subspaces.
+            _visited: Internal set of already-visited space IDs, used to guard
+                against cycles (spaces can reference each other).
+        """
+        # Top-level call: serve from, or populate, the cache.
+        if space is None:
+            if self._roomlist_cache is not None:
+                # Return a copy so callers can safely mutate (e.g. append the
+                # parent room) without corrupting the cached list.
+                return list(self._roomlist_cache)
+            parent = self.config["parent_room"]
+            if not parent:
+                self.log.warning(
+                    "No parent room configured, cannot get space roomlist"
+                )
+                return []
+            rooms = await self.get_space_roomlist(parent, set())
+            self._roomlist_cache = rooms
+            return list(rooms)
+
+        # Recursive call for a specific (sub)space.
+        if _visited is None:
+            _visited = set()
+        if space in _visited:
+            # Cycle guard: a space we've already enumerated in this traversal.
+            return []
+        _visited.add(space)
+
         rooms = []
-
-        # Check if parent room is configured
-        if not space:
-            self.log.warning("No parent room configured, cannot get space roomlist")
-            return rooms
-
         try:
-            self.log.debug(f"DEBUG getting roomlist from {space} space")
+            self.log.debug(f"getting roomlist from {space} space")
             state = await self.client.get_state(space)
             for evt in state:
                 if evt.type == EventType.SPACE_CHILD:
                     # only look for rooms that include a via path, otherwise they
                     # are not really in the space!
                     if evt.content and evt.content.via:
-                        rooms.append(evt.state_key)
+                        child = evt.state_key
+                        rooms.append(child)
+                        # Recurse into child spaces so their rooms are managed too.
+                        if await room_utils.is_space(self.client, child, self.log):
+                            rooms.extend(
+                                await self.get_space_roomlist(child, _visited)
+                            )
         except Exception as e:
-            self.log.error(f"Error getting space roomlist: {e}")
-        return rooms
+            self.log.error(f"Error getting space roomlist for {space}: {e}")
+
+        # De-duplicate while preserving order (a room can be a child of more
+        # than one subspace within the tree).
+        return list(dict.fromkeys(rooms))
+
+    def _invalidate_roomlist_cache(self) -> None:
+        """Clear the cached space room list.
+
+        Call this whenever the space tree changes (a child room/subspace is
+        added or removed, or the community is re-initialized) so the next
+        get_space_roomlist() call rebuilds it from fresh state.
+        """
+        self._roomlist_cache = None
 
     async def generate_report(self) -> None:
         now = int(time.time() * 1000)
@@ -670,6 +727,8 @@ class CommunityBot(Plugin):
             self.log.info(
                 f"Removed child room reference from space {self.config['parent_room']}"
             )
+            # The space tree changed; drop the cached room list.
+            self._invalidate_roomlist_cache()
 
             # Remove room aliases to release them
             await self.remove_room_aliases(room_id, evt)
@@ -802,6 +861,29 @@ class CommunityBot(Plugin):
             bool: True if user has unlimited power
         """
         return await room_utils.user_has_unlimited_power(self.client, user_id, room_id)
+
+    @event.on(EventType.SPACE_CHILD)
+    async def handle_space_child_change(self, evt: StateEvent) -> None:
+        """Invalidate the cached room list when the managed space tree changes.
+
+        A child room or subspace being added to (or removed from) the parent
+        space or any tracked subspace changes the flattened room list, so drop
+        the cache and let it rebuild lazily on the next access.
+        """
+        if evt.source & SyncStream.STATE:
+            return
+        parent = self.config["parent_room"]
+        if not parent:
+            return
+        # Only rebuild for changes in the parent space or a room we already
+        # track as part of the tree; ignore unrelated spaces the bot may be in.
+        if evt.room_id == parent or (
+            self._roomlist_cache is not None and evt.room_id in self._roomlist_cache
+        ):
+            self.log.debug(
+                f"space child change in {evt.room_id}; invalidating room list cache"
+            )
+            self._invalidate_roomlist_cache()
 
     @event.on(BAN_STATE_EVENT)
     async def check_ban_event(self, evt: StateEvent) -> None:
@@ -3222,6 +3304,8 @@ class CommunityBot(Plugin):
             await room_creation_utils.add_room_to_space(
                 self.client, parent_room, room_id, server, self.config["sleep"]
             )
+            # The space tree changed; drop the cached room list.
+            self._invalidate_roomlist_cache()
 
             if evt:
                 await evt.respond(
@@ -3763,6 +3847,8 @@ class CommunityBot(Plugin):
                     await evt.respond(
                         f"Successfully migrated {len(old_child_rooms)} child rooms to new space"
                     )
+                    # The space tree changed; drop the cached room list.
+                    self._invalidate_roomlist_cache()
                 else:
                     await evt.respond("No child rooms found in old space")
             except Exception as e:
@@ -4456,6 +4542,8 @@ class CommunityBot(Plugin):
             # Set the space as the parent room in config
             self.config["parent_room"] = space_id
             self.log.info(f"Set parent_room to: {space_id}")
+            # New parent space; drop any cached room list from a prior tree.
+            self._invalidate_roomlist_cache()
 
             # Save the updated config
             self.config.save()

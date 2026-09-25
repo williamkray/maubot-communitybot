@@ -118,6 +118,39 @@ async def get_room_version_and_creators(
         return "1", []
 
 
+async def is_space(client, room_id: str, logger=None) -> bool:
+    """Check whether a room is a space (m.space).
+
+    Spaces are created by setting the ``m.room.create`` event's ``type`` to
+    ``"m.space"``. This only fetches the create event (not the full room state)
+    so it stays cheap to call once per child while traversing a space tree.
+
+    Args:
+        client: Matrix client instance
+        room_id: The room ID to check
+        logger: Optional logger for debug output
+
+    Returns:
+        bool: True if the room is a space, False otherwise (including on error)
+    """
+    try:
+        create_content = await client.get_state_event(room_id, EventType.ROOM_CREATE)
+    except MNotFound:
+        return False
+    except Exception as e:
+        if logger:
+            logger.debug(f"Could not determine if {room_id} is a space: {e}")
+        return False
+
+    # Depending on the mautrix version the create "type" is exposed as an
+    # attribute or a dict key, and as a RoomType enum or a raw string, so
+    # normalise to the serialized value before comparing.
+    room_type = getattr(create_content, "type", None)
+    if room_type is None and hasattr(create_content, "get"):
+        room_type = create_content.get("type")
+    return getattr(room_type, "value", room_type) == "m.space"
+
+
 def is_modern_room_version(room_version: str) -> bool:
     """Check if a room version is 12 or newer (modern room versions).
 
