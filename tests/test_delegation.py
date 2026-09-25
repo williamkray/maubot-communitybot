@@ -12,6 +12,9 @@ CommunityBot.<method>(bot, ...), matching the other helper test modules.
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 
+from mautrix.types import EventType, JoinRule, Membership
+from mautrix.errors import MNotFound
+
 from community.bot import CommunityBot
 
 PARENT = "!parent:example.com"
@@ -161,3 +164,86 @@ class TestCleanupDepartedUser:
 
         bot.client.kick_user.assert_not_called()
         bot._remove_user_from_rooms.assert_not_called()
+
+
+class TestAutoInviteOnPromotion:
+    @pytest.mark.asyncio
+    async def test_apply_invites_promoted_user(self):
+        bot = make_bot()
+        store = {R1: pl({})}
+        store_client(bot, store)
+        bot._maybe_auto_invite = AsyncMock()
+        with _patch_room_name():
+            await CommunityBot._apply_user_levels(
+                bot, [R1], {"@x:e": 100}, mode="overwrite"
+            )
+        bot._maybe_auto_invite.assert_awaited_once_with(R1, "@x:e")
+
+    @pytest.mark.asyncio
+    async def test_no_invite_below_threshold(self):
+        bot = make_bot()  # auto_invite_pl defaults to 50
+        store = {R1: pl({})}
+        store_client(bot, store)
+        bot._maybe_auto_invite = AsyncMock()
+        with _patch_room_name():
+            await CommunityBot._apply_user_levels(
+                bot, [R1], {"@x:e": 20}, mode="overwrite"
+            )
+        bot._maybe_auto_invite.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_invite_on_demotion(self):
+        bot = make_bot()
+        store = {R1: pl({"@x:e": 100})}
+        store_client(bot, store)
+        bot._maybe_auto_invite = AsyncMock()
+        with _patch_room_name():
+            await CommunityBot._apply_user_levels(
+                bot, [R1], {"@x:e": 50}, mode="overwrite"
+            )
+        # lowered 100 -> 50: changed but not raised, so no invite
+        bot._maybe_auto_invite.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_maybe_invite_when_invite_only_and_not_member(self):
+        bot = make_bot()
+        jr = Mock()
+        jr.join_rule = JoinRule.INVITE
+
+        async def gse(room, etype, *a):
+            if etype == EventType.ROOM_JOIN_RULES:
+                return jr
+            raise MNotFound("no", "not a member")
+
+        bot.client.get_state_event = AsyncMock(side_effect=gse)
+        bot.client.invite_user = AsyncMock()
+        await CommunityBot._maybe_auto_invite(bot, R1, "@x:e")
+        bot.client.invite_user.assert_awaited_once_with(R1, "@x:e")
+
+    @pytest.mark.asyncio
+    async def test_maybe_invite_skips_restricted_room(self):
+        bot = make_bot()
+        jr = Mock()
+        jr.join_rule = JoinRule.RESTRICTED
+        bot.client.get_state_event = AsyncMock(return_value=jr)
+        bot.client.invite_user = AsyncMock()
+        await CommunityBot._maybe_auto_invite(bot, R1, "@x:e")
+        bot.client.invite_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_maybe_invite_skips_existing_member(self):
+        bot = make_bot()
+        jr = Mock()
+        jr.join_rule = JoinRule.INVITE
+        member = Mock()
+        member.membership = Membership.JOIN
+
+        async def gse(room, etype, *a):
+            if etype == EventType.ROOM_JOIN_RULES:
+                return jr
+            return member
+
+        bot.client.get_state_event = AsyncMock(side_effect=gse)
+        bot.client.invite_user = AsyncMock()
+        await CommunityBot._maybe_auto_invite(bot, R1, "@x:e")
+        bot.client.invite_user.assert_not_called()

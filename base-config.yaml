@@ -31,6 +31,14 @@ encrypt: False
 # of your managed community. otherwise, you must be a space member to join the rooms.
 invite_power_level: 50
 
+# when a user is promoted to this power level (or higher) in a managed room,
+# automatically invite them to that room if it is invite-only (e.g. the
+# moderators room), so newly-promoted admins/mods can actually join it. power
+# level alone never grants the ability to join an invite-only room. applies to
+# promotions via power-level sync, sub-space delegation, and setpower. set this
+# above your admin level (e.g. 101) to disable auto-invites.
+auto_invite_pl: 50
+
 # number of days of inactivity to be considered in the "warning zone"
 # users in this category will appear in the report as inactive
 warn_threshold_days: 30

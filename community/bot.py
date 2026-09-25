@@ -36,6 +36,7 @@ from mautrix.types import (
     SpaceParentStateEventContent,
     JoinRulesStateEventContent,
     JoinRule,
+    Membership,
     RoomCreatePreset,
 )
 from mautrix.errors import MNotFound
@@ -100,6 +101,7 @@ class Config(BaseProxyConfig):
         helper.copy("verification_attempts")
         helper.copy("verification_message")
         helper.copy("invite_power_level")
+        helper.copy("auto_invite_pl")
         helper.copy("room_version")
         helper.copy("events_encrypt_rooms")
         helper.copy("events_default_max_additional_guests")
@@ -1115,6 +1117,7 @@ class CommunityBot(Plugin):
         Skips users who are creators of a modern (v12+) room, since creators must
         not appear in ``content.users``. Returns (succeeded, failed) name lists.
         """
+        threshold = self.config.get("auto_invite_pl", 50)
         success, failed = [], []
         for room_id in rooms:
             roomname = (
@@ -1128,6 +1131,7 @@ class CommunityBot(Plugin):
                 _, room_creators = await self.get_room_version_and_creators(room_id)
                 users = current_pl.get("users", {})
                 changed = False
+                promoted = []  # users we raised to >= auto_invite_pl this call
                 for user, level in levels.items():
                     if user in room_creators:
                         continue
@@ -1135,8 +1139,15 @@ class CommunityBot(Plugin):
                         max(users.get(user, 0), level) if mode == "max" else level
                     )
                     if users.get(user) != new_level:
+                        was_raised = new_level > users.get(user, 0)
                         users[user] = new_level
                         changed = True
+                        if (
+                            was_raised
+                            and threshold is not None
+                            and new_level >= threshold
+                        ):
+                            promoted.append(user)
                 if not changed:
                     continue
                 current_pl["users"] = users
@@ -1144,11 +1155,51 @@ class CommunityBot(Plugin):
                     room_id, EventType.ROOM_POWER_LEVELS, current_pl
                 )
                 success.append(roomname)
+                # Newly-promoted users can't join an invite-only room on power
+                # level alone, so invite them.
+                for user in promoted:
+                    await self._maybe_auto_invite(room_id, user)
                 await asyncio.sleep(self.config["sleep"])
             except Exception as e:
                 self.log.warning(f"Failed to apply power levels in {room_id}: {e}")
                 failed.append(roomname)
         return success, failed
+
+    async def _maybe_auto_invite(self, room_id: str, user: str) -> None:
+        """Invite a newly-promoted user to an invite-only room so they can join.
+
+        No-op for restricted/public rooms (space members can already self-join
+        those) and when the user is already joined or invited. Called after a
+        promotion crosses the auto_invite_pl threshold.
+        """
+        try:
+            jr = await self.client.get_state_event(
+                room_id, EventType.ROOM_JOIN_RULES
+            )
+        except Exception:
+            return
+        if getattr(jr, "join_rule", None) != JoinRule.INVITE:
+            return
+        try:
+            member = await self.client.get_state_event(
+                room_id, EventType.ROOM_MEMBER, user
+            )
+            if getattr(member, "membership", None) in (
+                Membership.JOIN,
+                Membership.INVITE,
+            ):
+                return
+        except MNotFound:
+            pass
+        except Exception:
+            return
+        try:
+            await self.client.invite_user(room_id, user)
+            self.log.info(
+                f"auto-invited promoted user {user} to invite-only room {room_id}"
+            )
+        except Exception as e:
+            self.log.warning(f"could not auto-invite {user} to {room_id}: {e}")
 
     async def _remove_user_from_rooms(
         self, rooms: list, user: str, keep_level=None
