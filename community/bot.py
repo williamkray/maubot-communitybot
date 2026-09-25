@@ -279,13 +279,18 @@ class CommunityBot(Plugin):
         space_name: str,
         evt: MessageEvent = None,
         power_level_override: Optional[PowerLevelStateEventContent] = None,
+        use_slug: bool = False,
     ) -> tuple[str, str]:
-        """Create a new space without community slug suffix.
+        """Create a new space.
 
         Args:
             space_name: The name for the new space
             evt: Optional MessageEvent for progress updates
             power_level_override: Optional power levels to use
+            use_slug: If True, append the community slug to the alias (matching
+                room aliases) when a slug is configured. The parent space
+                (initialize) leaves this False so its alias stays slug-less;
+                subspaces (space create) set it True for consistency with rooms.
 
         Returns:
             tuple: (space_id, space_alias) if successful, None if failed
@@ -296,10 +301,20 @@ class CommunityBot(Plugin):
             invitees = self.config.get("invitees", [])
             server = self.client.parse_user_id(self.client.mxid)[1]
 
+            # Subspaces get the community slug suffix (like rooms) so their
+            # aliases don't collide across communities; the parent space does not.
+            alias_localpart = sanitized_name
+            if (
+                use_slug
+                and self.config.get("use_community_slug", True)
+                and self.config.get("community_slug", "")
+            ):
+                alias_localpart = f"{sanitized_name}-{self.config['community_slug']}"
+
             # Validate that the space alias is available
-            is_available = await self.validate_room_alias(sanitized_name, server)
+            is_available = await self.validate_room_alias(alias_localpart, server)
             if not is_available:
-                error_msg = f"Space alias #{sanitized_name}:{server} already exists. Cannot create space."
+                error_msg = f"Space alias #{alias_localpart}:{server} already exists. Cannot create space."
                 self.log.error(error_msg)
                 if evt:
                     await evt.respond(error_msg)
@@ -307,7 +322,7 @@ class CommunityBot(Plugin):
 
             if evt:
                 mymsg = await evt.respond(
-                    f"creating space {sanitized_name} with room version {self.config.get('room_version', '1')}, give me a minute..."
+                    f"creating space {alias_localpart} with room version {self.config.get('room_version', '1')}, give me a minute..."
                 )
 
             # Prepare creation content with space type
@@ -338,7 +353,7 @@ class CommunityBot(Plugin):
             )
             self.log.info(f"Creation content: {creation_content}")
             self.log.info(f"Calling client.create_room with parameters:")
-            self.log.info(f"  - alias_localpart: {sanitized_name}")
+            self.log.info(f"  - alias_localpart: {alias_localpart}")
             self.log.info(f"  - name: {space_name}")
             self.log.info(f"  - invitees: {invitees}")
             self.log.info(f"  - power_level_override: {power_level_override}")
@@ -347,7 +362,7 @@ class CommunityBot(Plugin):
 
             # Rate-limit retries are applied centrally (see _install_rate_limit_retries).
             space_id = await self.client.create_room(
-                alias_localpart=sanitized_name,
+                alias_localpart=alias_localpart,
                 name=space_name,
                 invitees=invitees,
                 power_level_override=power_level_override,
@@ -404,13 +419,13 @@ class CommunityBot(Plugin):
 
             if evt:
                 await evt.respond(
-                    f"<a href='https://matrix.to/#/#{sanitized_name}:{server}'>#{sanitized_name}:{server}</a> has been created.",
+                    f"<a href='https://matrix.to/#/#{alias_localpart}:{server}'>#{alias_localpart}:{server}</a> has been created.",
                     edits=mymsg,
                     allow_html=True,
                 )
 
             self.log.info(f"Space creation completed successfully: {space_id}")
-            return space_id, f"#{sanitized_name}:{server}"
+            return space_id, f"#{alias_localpart}:{server}"
 
         except Exception as e:
             error_msg = f"Failed to create space: {e}"
@@ -4777,9 +4792,10 @@ class CommunityBot(Plugin):
             target_parent = self.config["parent_room"]
 
         # Create the empty subspace, reusing create_space (handles v10/v12 rules
-        # and space-type creation content). create_space does not link into an
-        # arbitrary parent, so we link explicitly below.
-        subspace_id, subspace_alias = await self.create_space(name, evt)
+        # and space-type creation content). use_slug=True so the subspace alias
+        # gets the community slug suffix, like room aliases. create_space does not
+        # link into an arbitrary parent, so we link explicitly below.
+        subspace_id, subspace_alias = await self.create_space(name, evt, use_slug=True)
         if not subspace_id:
             return  # create_space already reported the error
 
