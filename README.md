@@ -80,6 +80,19 @@ power level sync, censorship targeting, cross-room bans/kicks/unbans, inactivity
 managed just like direct children. the subspaces themselves are managed too (for example, power levels are synced into
 them). cyclic space references are handled safely.
 
+you can build and rearrange the subspace tree with these commands:
+
+- `!community space create <name> [target-space]` — create a new, empty subspace and nest it under a parent. with no
+  `target-space` it is nested directly under your configured parent space; pass a `target-space` (alias, room id, or
+  display name of an existing subspace in the tree) to nest it deeper. subspaces can be nested to any depth.
+- `!community space list` — print the whole space tree as an indented outline (spaces vs rooms, with names and room ids)
+  so you can see the structure at a glance.
+- `!community room move [room] <target-space>` — reparent a room: remove it from its current parent space and add it under
+  `target-space`. omit `[room]` to move the room you run the command in. moving a space into one of its own descendants
+  (which would create a cycle) is rejected.
+
+all three require admin (power level 100) except `space list`, which any moderator can run.
+
 ## initialize a community from scratch
 
 just installed the plugin for the first time, and want to get started on the right foot? start a DM with your bot and run:

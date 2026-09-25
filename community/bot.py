@@ -533,6 +533,70 @@ class CommunityBot(Plugin):
         """
         self._roomlist_cache = None
 
+    async def _resolve_room_arg(self, room: str = None, evt: MessageEvent = None) -> Optional[str]:
+        """Resolve a room argument to a room ID.
+
+        Accepts an alias (``#...``), a room id (``!...``), or ``None``/empty to
+        mean the current room (``evt.room_id``). Returns the room ID, or ``None``
+        if resolution failed (and, when ``evt`` is given, replies with an error).
+        """
+        if not room:
+            return str(evt.room_id) if evt else None
+        if room.startswith("#"):
+            try:
+                resolved = await self.client.resolve_room_alias(room)
+                return resolved["room_id"]
+            except Exception as e:
+                self.log.error(f"error resolving alias {room}: {e}")
+                if evt:
+                    await evt.reply("i couldn't resolve that alias, sorry")
+                return None
+        if room.startswith("!"):
+            return room
+        if evt:
+            await evt.reply("i don't recognize that room, sorry")
+        return None
+
+    async def _resolve_space_arg(
+        self, target: str, evt: MessageEvent = None
+    ) -> Optional[str]:
+        """Resolve a subspace argument (alias / room id / display name) to a room ID.
+
+        Aliases and room ids are resolved directly. Anything else is treated as a
+        display name and matched (case-insensitively) against the parent space and
+        every space in the managed tree. Returns the room ID, or ``None`` if it
+        could not be resolved (and, when ``evt`` is given, replies with an error).
+        """
+        if not target:
+            return None
+        if target.startswith("#"):
+            try:
+                resolved = await self.client.resolve_room_alias(target)
+                return resolved["room_id"]
+            except Exception as e:
+                self.log.error(f"error resolving alias {target}: {e}")
+                if evt:
+                    await evt.reply("i couldn't resolve that alias, sorry")
+                return None
+        if target.startswith("!"):
+            return target
+
+        # Treat as a display name: search the managed tree for a matching space.
+        parent = self.config["parent_room"]
+        candidates = [parent] + await self.get_space_roomlist()
+        wanted = target.strip().lower()
+        for room_id in dict.fromkeys(candidates):
+            if not await room_utils.is_space(self.client, room_id, self.log):
+                continue
+            name = await self._get_room_name(room_id)
+            if name and name.strip().lower() == wanted:
+                return room_id
+        if evt:
+            await evt.reply(
+                f"i couldn't find a subspace named '{target}' in this community, sorry"
+            )
+        return None
+
     async def generate_report(self) -> None:
         now = int(time.time() * 1000)
         warn_days_ago = now - (1000 * 60 * 60 * 24 * self.config["warn_threshold_days"])
@@ -3339,7 +3403,7 @@ class CommunityBot(Plugin):
     async def room(self, evt: MessageEvent) -> None:
         """Main room command - shows usage by default"""
         await evt.reply(
-            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, guests, id, version, setpower, enable-verification"
+            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, move, guests, id, version, setpower, enable-verification"
         )
 
     @room.subcommand(
@@ -4342,6 +4406,326 @@ class CommunityBot(Plugin):
             error_msg = f"Failed to migrate room: {e}"
             self.log.error(error_msg)
             await evt.respond(error_msg, edits=msg)
+
+    async def _find_parent_spaces(self, room_id: str) -> list[str]:
+        """Return the managed spaces that currently list ``room_id`` as a child.
+
+        Reads the room's own ``m.space.parent`` state and cross-checks it against
+        the managed tree, then also scans the tree for any space whose
+        ``m.space.child`` state references this room (so we catch links even if the
+        room's own parent pointer is missing). Only spaces reachable from the
+        configured parent room are returned, so we never touch unmanaged spaces.
+        """
+        parent = self.config["parent_room"]
+        managed = set([parent] + await self.get_space_roomlist())
+        parents: list[str] = []
+
+        # Spaces the room itself points at as parents.
+        try:
+            state = await self.client.get_state(room_id)
+            for evt in state:
+                if evt.type == EventType.SPACE_PARENT and evt.content and getattr(
+                    evt.content, "via", None
+                ):
+                    if evt.state_key in managed:
+                        parents.append(evt.state_key)
+        except Exception as e:
+            self.log.warning(f"Could not read parents of {room_id}: {e}")
+
+        # Spaces in the tree that list this room as a child.
+        for space_id in managed:
+            if space_id in parents:
+                continue
+            if not await room_utils.is_space(self.client, space_id, self.log):
+                continue
+            try:
+                child = await self.client.get_state_event(
+                    space_id, EventType.SPACE_CHILD, state_key=room_id
+                )
+            except MNotFound:
+                continue
+            except Exception:
+                continue
+            if child and getattr(child, "via", None):
+                parents.append(space_id)
+
+        return list(dict.fromkeys(parents))
+
+    @room.subcommand(
+        "move",
+        help="reparent a room: move it out of its current space and into a target subspace. \
+                          usage: move [room] <target-space>",
+    )
+    @command.argument("room", required=False)
+    @command.argument("target_space", required=False)
+    @decorators.require_parent_room
+    @decorators.require_permission(min_level=100)
+    async def room_move(
+        self, evt: MessageEvent, room: str = None, target_space: str = None
+    ) -> None:
+        await evt.mark_read()
+
+        # If only one argument is given, it is the target and the room is current.
+        if target_space is None and room is not None:
+            target_space, room = room, None
+
+        if not target_space:
+            await evt.reply(
+                "usage: !community room move [room] <target-space> — where "
+                "target-space is the alias, id, or name of a subspace to move the "
+                "room into. omit [room] to move the current room."
+            )
+            return
+
+        room_id = await self._resolve_room_arg(room, evt)
+        if not room_id:
+            return
+
+        target_id = await self._resolve_space_arg(target_space, evt)
+        if not target_id:
+            return
+
+        # target must be a space
+        if not await room_utils.is_space(self.client, target_id, self.log):
+            await evt.reply("that target isn't a space, so i can't move a room into it.")
+            return
+
+        # target must be in the managed tree (parent itself, or reachable from it)
+        parent = self.config["parent_room"]
+        managed = set([parent] + await self.get_space_roomlist())
+        if target_id not in managed:
+            await evt.reply(
+                "that space isn't part of this community's tree, so i won't move rooms into it."
+            )
+            return
+
+        # can't move a room into itself
+        if room_id == target_id:
+            await evt.reply("i can't move a room into itself.")
+            return
+
+        # cycle guard: if the room is itself a space, don't move it into one of
+        # its own descendants (that would detach a whole branch into a loop).
+        if await room_utils.is_space(self.client, room_id, self.log):
+            descendants = set(await self.get_space_roomlist(room_id, set()))
+            if target_id in descendants:
+                await evt.reply(
+                    "i can't move a space into one of its own descendants — that would create a cycle."
+                )
+                return
+
+        server = self.client.parse_user_id(self.client.mxid)[1]
+
+        # Find and remove the room's existing parent links within the tree.
+        old_parents = await self._find_parent_spaces(room_id)
+        removed_from = []
+        for old_parent in old_parents:
+            if old_parent == target_id:
+                continue  # already linked here; the add below is idempotent
+            try:
+                # remove child reference from the old parent space
+                await self.client.send_state_event(
+                    old_parent,
+                    EventType.SPACE_CHILD,
+                    {},  # empty content removes the link
+                    state_key=room_id,
+                )
+                await asyncio.sleep(self.config["sleep"])
+                # remove parent reference from the room
+                await self.client.send_state_event(
+                    room_id,
+                    EventType.SPACE_PARENT,
+                    {},  # empty content removes the link
+                    state_key=old_parent,
+                )
+                await asyncio.sleep(self.config["sleep"])
+                removed_from.append(old_parent)
+                self.log.info(f"Unlinked {room_id} from space {old_parent}")
+            except Exception as e:
+                self.log.error(f"Failed to unlink {room_id} from {old_parent}: {e}")
+
+        # Add the new links (child in target, parent in the room).
+        try:
+            await room_creation_utils.add_room_to_space(
+                self.client, target_id, room_id, server, self.config["sleep"]
+            )
+            await self.client.send_state_event(
+                room_id,
+                EventType.SPACE_PARENT,
+                {"via": [server], "canonical": True},
+                state_key=target_id,
+            )
+            await asyncio.sleep(self.config["sleep"])
+        except Exception as e:
+            error_msg = f"Failed to link room into target space: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg)
+            return
+
+        # The space tree changed; drop the cached room list.
+        self._invalidate_roomlist_cache()
+
+        from_name = (
+            ", ".join([await self._get_room_name(p) for p in removed_from])
+            if removed_from
+            else "(no managed parent)"
+        )
+        to_name = await self._get_room_name(target_id)
+        moved_name = await self._get_room_name(room_id)
+        await evt.respond(
+            f"Moved <b>{moved_name}</b> from <b>{from_name}</b> to <b>{to_name}</b>.",
+            allow_html=True,
+        )
+
+    @community.subcommand("space", help="manage subspaces in the community")
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def space(self, evt: MessageEvent) -> None:
+        """Main space command - shows usage by default"""
+        await evt.reply(
+            "Use !community space <subcommand> to manage subspaces. Available subcommands: create, list"
+        )
+
+    @space.subcommand(
+        "create",
+        help="create a new empty subspace and nest it under a parent space. \
+                          usage: create <name> [target-space]",
+    )
+    @command.argument("name", required=True)
+    @command.argument("target", required=False)
+    @decorators.require_parent_room
+    @decorators.require_permission(min_level=100)
+    async def space_create(
+        self, evt: MessageEvent, name: str = None, target: str = None
+    ) -> None:
+        await evt.mark_read()
+
+        if not name or name == "help":
+            await evt.reply(
+                'pass me a subspace name (like "projects") and i will create it and '
+                "nest it under the parent space. optionally pass a target subspace "
+                "(alias, id, or name) to nest it deeper: "
+                "!community space create <name> [target-space]"
+            )
+            return
+
+        # Determine the parent to nest the new subspace under.
+        if target:
+            target_parent = await self._resolve_space_arg(target, evt)
+            if not target_parent:
+                return
+            if not await room_utils.is_space(self.client, target_parent, self.log):
+                await evt.reply("that target isn't a space, so i can't nest under it.")
+                return
+            managed = set(
+                [self.config["parent_room"]] + await self.get_space_roomlist()
+            )
+            if target_parent not in managed:
+                await evt.reply(
+                    "that space isn't part of this community's tree, so i won't nest under it."
+                )
+                return
+        else:
+            target_parent = self.config["parent_room"]
+
+        # Create the empty subspace, reusing create_space (handles v10/v12 rules
+        # and space-type creation content). create_space does not link into an
+        # arbitrary parent, so we link explicitly below.
+        subspace_id, subspace_alias = await self.create_space(name, evt)
+        if not subspace_id:
+            return  # create_space already reported the error
+
+        server = self.client.parse_user_id(self.client.mxid)[1]
+
+        # Link the subspace under its target parent.
+        try:
+            await room_creation_utils.add_room_to_space(
+                self.client, target_parent, subspace_id, server, self.config["sleep"]
+            )
+            await self.client.send_state_event(
+                subspace_id,
+                EventType.SPACE_PARENT,
+                {"via": [server], "canonical": True},
+                state_key=target_parent,
+            )
+            await asyncio.sleep(self.config["sleep"])
+        except Exception as e:
+            error_msg = f"Subspace was created but linking it failed: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg)
+            return
+
+        # The space tree changed; drop the cached room list.
+        self._invalidate_roomlist_cache()
+
+        parent_name = await self._get_room_name(target_parent)
+        await evt.respond(
+            f"Subspace {subspace_alias} ({subspace_id}) created and nested under "
+            f"<b>{parent_name}</b>.",
+            allow_html=True,
+        )
+
+    async def _render_space_tree(
+        self, space_id: str, depth: int, visited: set, lines: list
+    ) -> None:
+        """Recursively append an indented outline of a space's contents.
+
+        Read-only: walks ``m.space.child`` links and marks each entry as a space
+        or a room. Cycle-safe via ``visited``.
+        """
+        if space_id in visited:
+            indent = "  " * depth
+            lines.append(f"{indent}↻ (already shown) {space_id}")
+            return
+        visited.add(space_id)
+
+        indent = "  " * depth
+        name = await self._get_room_name(space_id)
+        marker = "📁" if depth == 0 else "📂"
+        lines.append(f"{indent}{marker} {name} ({space_id})")
+
+        try:
+            state = await self.client.get_state(space_id)
+        except Exception as e:
+            lines.append(f"{indent}  (could not read state: {e})")
+            return
+
+        for st in state:
+            if st.type != EventType.SPACE_CHILD:
+                continue
+            if not (st.content and getattr(st.content, "via", None)):
+                continue
+            child = st.state_key
+            if await room_utils.is_space(self.client, child, self.log):
+                await self._render_space_tree(child, depth + 1, visited, lines)
+            else:
+                child_name = await self._get_room_name(child)
+                child_indent = "  " * (depth + 1)
+                lines.append(f"{child_indent}💬 {child_name} ({child})")
+
+    @space.subcommand("list", help="show the community space tree (subspaces indented)")
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def space_list(self, evt: MessageEvent) -> None:
+        await evt.mark_read()
+
+        parent = self.config["parent_room"]
+        lines: list[str] = []
+        await self._render_space_tree(parent, 0, set(), lines)
+
+        if not lines:
+            await evt.reply("the space tree is empty.")
+            return
+
+        # Chunk output to stay within message size limits.
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 3000:
+                await evt.respond(f"<pre>{chunk}</pre>", allow_html=True)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await evt.respond(f"<pre>{chunk}</pre>", allow_html=True)
 
     async def store_verification_state(self, dm_room_id: str, state: dict) -> None:
         """Store verification state in the database."""
