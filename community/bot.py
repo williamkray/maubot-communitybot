@@ -4373,28 +4373,62 @@ class CommunityBot(Plugin):
 
     @community.subcommand(
         "initialize",
-        help="initialize a new community space with the given name. this command can only be used if no parent room is configured.",
+        help="initialize a community space with the given name. re-runnable: if a parent room is already configured, it discovers what already exists and creates only the missing pieces (space, moderators room, waiting room), then reports created-vs-present.",
     )
-    @command.argument("community_name", pass_raw=True, required=True)
+    @command.argument("community_name", pass_raw=True, required=False)
     async def initialize_community(
-        self, evt: MessageEvent, community_name: str
+        self, evt: MessageEvent, community_name: str = ""
     ) -> None:
         await evt.mark_read()
 
-        # Check if parent room is already configured
-        if self.config["parent_room"]:
-            await evt.reply(
-                "Cannot initialize: a parent room is already configured. Please remove the parent_room configuration first."
-            )
+        community_name = (community_name or "").strip()
+
+        # If no parent room is configured yet, this is a fresh bootstrap.
+        if not self.config["parent_room"]:
+            # Validate community name for a brand new community
+            if not community_name:
+                await evt.reply(
+                    "Please provide a community name. Usage: !community initialize <community_name>"
+                )
+                return
+            await self._initialize_new_space(evt, community_name)
             return
 
-        # Validate community name
-        if not community_name or community_name.isspace():
-            await evt.reply(
-                "Please provide a community name. Usage: !community initialize <community_name>"
-            )
-            return
+        # A parent room already exists: re-run in repair mode. If no name was
+        # provided, recover it from the existing space so child aliases can be
+        # derived the same way they were during the original initialize.
+        if not community_name:
+            community_name = await self._get_space_name(self.config["parent_room"])
+            if not community_name:
+                await evt.reply(
+                    "A community is already configured but I could not read the space name. "
+                    "Please re-run with the community name: !community initialize <community_name>"
+                )
+                return
 
+        msg = await evt.respond(
+            f"Community already configured — checking for missing pieces..."
+        )
+        await self._repair_community(evt, community_name, msg)
+
+    async def _get_space_name(self, room_id: str) -> str:
+        """Read a room's m.room.name, returning an empty string on failure."""
+        try:
+            name_state = await self.client.get_state_event(room_id, "m.room.name")
+            if name_state:
+                return (name_state["name"] or "").strip()
+        except Exception as e:
+            self.log.warning(f"Could not read name for space {room_id}: {e}")
+        return ""
+
+    async def _initialize_new_space(
+        self, evt: MessageEvent, community_name: str
+    ) -> None:
+        """Bootstrap a brand new community space, moderators room and waiting room.
+
+        This is the original (non-idempotent) initialize path, only reached when
+        no parent room is configured yet.
+        """
         msg = await evt.respond("Initializing new community space...")
 
         try:
@@ -4592,6 +4626,262 @@ class CommunityBot(Plugin):
 
         except Exception as e:
             error_msg = f"Failed to initialize community: {e}"
+            self.log.error(error_msg)
+            await evt.respond(error_msg, edits=msg)
+
+    async def _discover_community_rooms(self, community_name: str) -> dict:
+        """Discover which of the expected community rooms already exist.
+
+        Uses alias resolution (not name-scanning) to look up the space and its
+        moderators / waiting rooms by the same aliases initialize would create.
+        The space alias has no slug suffix (matching create_space); child aliases
+        get the community slug suffix when use_community_slug is enabled.
+
+        Returns a dict of the form:
+            {
+                "space": {"room_id": id|None, "linked": bool},
+                "mod_room": {"room_id": id|None, "linked": bool},
+                "waiting_room": {"room_id": id|None, "linked": bool},
+            }
+        "linked" indicates whether an existing room is already a child of the space.
+        """
+        server = self.client.parse_user_id(self.client.mxid)[1]
+        use_slug = self.config.get("use_community_slug", True)
+        slug = self.config.get("community_slug", "")
+
+        # Space alias: no slug suffix, matching create_space
+        space_localpart = message_utils.sanitize_room_name(community_name)
+
+        # Child aliases: optionally suffixed with the community slug (matching create_room)
+        def child_localpart(child_name: str) -> str:
+            base = message_utils.sanitize_room_name(child_name)
+            if use_slug:
+                return f"{base}-{slug}"
+            return base
+
+        expected = {
+            "space": space_localpart,
+            "mod_room": child_localpart(f"{community_name} Moderators"),
+            "waiting_room": child_localpart(f"{community_name} Waiting Room"),
+        }
+
+        # Rooms currently linked as children of the space, to flag unlinked-but-existing ones
+        linked_rooms = set(await self.get_space_roomlist())
+
+        result = {}
+        for key, localpart in expected.items():
+            alias = f"#{localpart}:{server}"
+            room_id = None
+            try:
+                resolved = await self.client.resolve_room_alias(alias)
+                room_id = resolved["room_id"]
+                self.log.info(f"Discovered existing {key} at {alias} -> {room_id}")
+            except MNotFound:
+                self.log.info(f"Expected {key} alias {alias} does not exist")
+            except Exception as e:
+                # Treat any resolution failure as "missing" so we attempt creation
+                self.log.warning(f"Could not resolve {key} alias {alias}: {e}")
+
+            result[key] = {
+                "room_id": room_id,
+                "linked": bool(room_id) and room_id in linked_rooms,
+            }
+
+        return result
+
+    async def _repair_community(
+        self, evt: MessageEvent, community_name: str, msg
+    ) -> None:
+        """Re-runnable initialize: create only missing pieces, link and fix config.
+
+        Does NOT re-apply power levels or touch existing rooms beyond linking them
+        to the space and (for missing rooms) setting their join rules / censor config.
+        """
+        parent_room = self.config["parent_room"]
+
+        try:
+            # Ensure a community slug is available — child aliases are derived from it.
+            if (
+                self.config.get("use_community_slug", True)
+                and not self.config.get("community_slug", "")
+            ):
+                community_slug = self.generate_community_slug(community_name)
+                self.config["community_slug"] = community_slug
+                self.config.save()
+                self.log.info(
+                    f"Regenerated missing community slug for repair: {community_slug}"
+                )
+
+            # Verify the bot can actually operate in the space before doing anything.
+            has_perms, perm_error, _ = await self.check_bot_permissions(
+                parent_room, evt
+            )
+            if not has_perms:
+                await evt.respond(
+                    f"Cannot repair community: {perm_error} "
+                    f"(space {parent_room}). Ensure the bot is a member with "
+                    f"administrative power, then re-run.",
+                    edits=msg,
+                )
+                return
+
+            server = self.client.parse_user_id(self.client.mxid)[1]
+
+            # Discover what already exists.
+            discovered = await self._discover_community_rooms(community_name)
+
+            # Track outcomes for the final summary.
+            status = {
+                "space": "present",
+                "mod_room": "present",
+                "waiting_room": "present",
+                "censor": "unchanged",
+            }
+            changed = False
+
+            # --- Space ---
+            # The space is the parent_room itself; it exists by definition here.
+            # If discovery could not resolve its alias we still proceed, since
+            # parent_room is the source of truth.
+
+            # --- Moderators room ---
+            mod = discovered["mod_room"]
+            if not mod["room_id"]:
+                # Rebuild the moderator invitee list the same way a fresh init does.
+                moderators = [evt.sender]
+                try:
+                    space_moderators = await self.get_moderators_and_above()
+                    if space_moderators:
+                        for user in space_moderators:
+                            if user != self.client.mxid and user != evt.sender:
+                                moderators.append(user)
+                except Exception as e:
+                    self.log.warning(
+                        f"Could not get additional moderators from space: {e}"
+                    )
+
+                result = await self.create_room(
+                    f"{community_name} Moderators",
+                    evt,
+                    invitees=moderators,
+                )
+                if not result:
+                    await evt.respond(
+                        "Failed to create the missing moderators room. "
+                        "Fix the issue and re-run to continue.",
+                        edits=msg,
+                    )
+                    return
+                mod_room_id, _ = result
+
+                # Moderators room is invite-only.
+                await self.client.send_state_event(
+                    mod_room_id,
+                    EventType.ROOM_JOIN_RULES,
+                    JoinRulesStateEventContent(join_rule=JoinRule.INVITE),
+                )
+                status["mod_room"] = "created"
+                changed = True
+            elif not mod["linked"]:
+                # Exists but not attached to the space — link it.
+                await room_creation_utils.add_room_to_space(
+                    self.client,
+                    parent_room,
+                    mod["room_id"],
+                    server,
+                    self.config["sleep"],
+                    self.log,
+                )
+                status["mod_room"] = "linked"
+                changed = True
+
+            # --- Waiting room ---
+            waiting = discovered["waiting_room"]
+            waiting_room_id = waiting["room_id"]
+            if not waiting_room_id:
+                result = await self.create_room(
+                    f"{community_name} Waiting Room --unencrypted",
+                    evt,
+                    creation_content={
+                        "m.federate": True,
+                        "m.room.history_visibility": "joined",
+                    },
+                )
+                if not result:
+                    await evt.respond(
+                        "Failed to create the missing waiting room. "
+                        "Fix the issue and re-run to continue.",
+                        edits=msg,
+                    )
+                    return
+                waiting_room_id, _ = result
+
+                # Waiting room is publicly joinable.
+                await self.client.send_state_event(
+                    waiting_room_id,
+                    EventType.ROOM_JOIN_RULES,
+                    JoinRulesStateEventContent(join_rule=JoinRule.PUBLIC),
+                )
+                status["waiting_room"] = "created"
+                changed = True
+            elif not waiting["linked"]:
+                await room_creation_utils.add_room_to_space(
+                    self.client,
+                    parent_room,
+                    waiting_room_id,
+                    server,
+                    self.config["sleep"],
+                    self.log,
+                )
+                status["waiting_room"] = "linked"
+                changed = True
+
+            # --- Censor config ---
+            # Ensure the waiting room is covered by censorship even if it pre-existed.
+            if waiting_room_id:
+                current_censor = self.config["censor"]
+                if current_censor is False:
+                    self.config["censor"] = [waiting_room_id]
+                    status["censor"] = "updated"
+                    changed = True
+                elif (
+                    isinstance(current_censor, list)
+                    and waiting_room_id not in current_censor
+                ):
+                    current_censor.append(waiting_room_id)
+                    self.config["censor"] = current_censor
+                    status["censor"] = "updated"
+                    changed = True
+                # If censor is True or already lists the waiting room, leave it alone.
+
+            if changed:
+                self.config.save()
+
+            # Build a clear created-vs-present summary.
+            label = {
+                "present": "present",
+                "created": "created",
+                "linked": "linked",
+                "updated": "updated",
+                "unchanged": "unchanged",
+            }
+            summary = (
+                f"Space: {label[status['space']]} · "
+                f"Moderators: {label[status['mod_room']]} · "
+                f"Waiting room: {label[status['waiting_room']]} · "
+                f"censor: {label[status['censor']]}"
+            )
+            if changed:
+                summary = f"Community repaired.<br /><br />{summary}"
+            else:
+                summary = (
+                    f"Community already complete — nothing to do.<br /><br />{summary}"
+                )
+
+            await evt.respond(summary, edits=msg, allow_html=True)
+
+        except Exception as e:
+            error_msg = f"Failed to repair community: {e}"
             self.log.error(error_msg)
             await evt.respond(error_msg, edits=msg)
 
