@@ -4880,6 +4880,7 @@ class CommunityBot(Plugin):
                     self.config["sleep"],
                     self.log,
                 )
+                self._invalidate_roomlist_cache()
                 status["mod_room"] = "linked"
                 changed = True
 
@@ -4921,6 +4922,7 @@ class CommunityBot(Plugin):
                     self.config["sleep"],
                     self.log,
                 )
+                self._invalidate_roomlist_cache()
                 status["waiting_room"] = "linked"
                 changed = True
 
