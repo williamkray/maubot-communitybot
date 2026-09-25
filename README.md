@@ -183,6 +183,30 @@ as an argument to the command. this ensures you don't accidentally un-verify eve
 if you are running legacy rooms not managed by the bot, and the bot does not have permission to
 send power-level state events to the room, it will return a list for you to handle manually.
 
+### auto-invite on promotion
+
+power level alone does not let a user *join* an invite-only room — they can see it in the space but
+get a permission error. so when a power-level change raises a user to or above the `auto_invite_pl`
+threshold (default `50`), the bot invites them to the invite-only managed rooms they aren't already
+in, so the promotion actually takes effect.
+
+be aware of exactly which rooms this touches:
+
+- it only fires for a user whose power level was **raised** in this change and lands at or above
+  `auto_invite_pl`. lowering someone, or a no-op, invites no one.
+- it only invites to rooms whose join rule is exactly `invite`. **public** and **restricted** rooms
+  are skipped, because space members can already self-join those. rooms the bot creates are
+  restricted by default, so they are not affected — the moderators room (invite-only) is the usual
+  target.
+- it skips anyone already joined to or invited to the room.
+- scope follows the power-level change: a change in the parent space applies to all managed rooms; a
+  change in a subspace applies only to that subspace's subtree.
+
+there is no per-room allowlist — the join rule *is* the filter. if you keep private rooms other than
+the moderators room as invite-only inside the managed tree, promoting a user will also invite them
+there. if you don't want that, either make those rooms restricted or set `auto_invite_pl` above your
+highest admin level to disable auto-invite entirely.
+
 ## room creation
 
 use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.
