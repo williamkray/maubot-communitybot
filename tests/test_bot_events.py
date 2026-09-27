@@ -99,8 +99,10 @@ class TestBotEvents:
             
             await real_bot.check_ban_event(mock_state_evt)
         
-        # Should call ban_this_user
-        real_bot.ban_this_user.assert_called_once_with("@banned:example.com")
+        # Should call ban_this_user, staying quiet if the user isn't in any room
+        real_bot.ban_this_user.assert_called_once_with(
+            "@banned:example.com", quiet_if_empty=True
+        )
 
     @pytest.mark.asyncio
     async def test_check_ban_event_proactive_banning_disabled(self, bot, mock_state_evt):

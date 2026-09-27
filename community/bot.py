@@ -930,16 +930,26 @@ class CommunityBot(Plugin):
 
         return removed_aliases
 
-    async def ban_this_user(self, user, reason="banned", all_rooms=False):
+    async def ban_this_user(
+        self, user, reason="banned", all_rooms=False, quiet_if_empty=False
+    ):
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
 
         # Single batched notification for the whole community-wide ban, updated
         # in place when finished (the per-room events are suppressed as bot-sent).
-        notif = await self._post_notification(
-            f"⛔ Starting community-wide ban of <code>{user}</code>…"
-        )
+        #
+        # Proactive bans propagated from an external banlist frequently target
+        # users who aren't in any of our rooms, which would otherwise emit a
+        # noisy "0 room(s): no rooms" notice. In that case (quiet_if_empty) we
+        # defer the notification and only post it if the ban actually landed
+        # somewhere (or errored).
+        notif = None
+        if not quiet_if_empty:
+            notif = await self._post_notification(
+                f"⛔ Starting community-wide ban of <code>{user}</code>…"
+            )
 
         results = await user_utils.ban_user_from_rooms(
             self.client,
@@ -956,6 +966,12 @@ class CommunityBot(Plugin):
 
         banned = results.get("ban_list", {}).get(user, [])
         errors = results.get("error_list", {})
+
+        # Nothing happened and the caller asked to stay quiet in that case:
+        # skip the notification entirely to avoid noise from external banlists.
+        if quiet_if_empty and not banned and not errors:
+            return results
+
         readout = (
             f"⛔ Banned <code>{user}</code> from {len(banned)} room(s): "
             f"{self._summarize_rooms(banned)}."
@@ -1052,7 +1068,9 @@ class CommunityBot(Plugin):
                     )
                     return
                 if bool(re.search("ban$", recommendation)):
-                    await self.ban_this_user(entity)
+                    # Proactive ban from an external banlist: stay silent unless
+                    # the user was actually in one of our rooms.
+                    await self.ban_this_user(entity, quiet_if_empty=True)
             except Exception as e:
                 self.log.error(e)
 
