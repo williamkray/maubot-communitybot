@@ -149,3 +149,36 @@ def test_merge_user_power_levels_does_not_mutate_inputs():
     room_creation_utils.merge_user_power_levels(base, extra)
     assert base == {"@a:x": 100}
     assert extra == {"@b:x": 50}
+
+
+def test_pick_placement_parent_prefers_subspace():
+    # old room lived in a subspace -> keep it there, not the top-level parent
+    assert (
+        room_creation_utils.pick_placement_parent(
+            ["!sub:x"], "!parent:x"
+        )
+        == "!sub:x"
+    )
+
+
+def test_pick_placement_parent_prefers_subspace_over_parent():
+    # if both the subspace and the top-level parent are listed, prefer the subspace
+    assert (
+        room_creation_utils.pick_placement_parent(
+            ["!parent:x", "!sub:x"], "!parent:x"
+        )
+        == "!sub:x"
+    )
+
+
+def test_pick_placement_parent_top_level_room():
+    # old room was a direct child of the top-level parent
+    assert (
+        room_creation_utils.pick_placement_parent(["!parent:x"], "!parent:x")
+        == "!parent:x"
+    )
+
+
+def test_pick_placement_parent_no_parents_falls_back():
+    assert room_creation_utils.pick_placement_parent([], "!parent:x") == "!parent:x"
+    assert room_creation_utils.pick_placement_parent(None, "!parent:x") == "!parent:x"

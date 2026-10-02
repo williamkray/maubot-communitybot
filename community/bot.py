@@ -861,29 +861,34 @@ class CommunityBot(Plugin):
                     await evt.respond(f"Cannot archive room: {error_msg}")
                 return False
 
-            # Try to remove the room from the space first
-            self.log.debug(f"DEBUG removing space state reference from {room_id}")
-            await self.client.send_state_event(
-                room_id=room_id,
-                event_type="m.space.parent",
-                content={},  # Empty content removes the state
-                state_key=self.config["parent_room"],
-            )
-            self.log.info(f"Removed parent space reference from room {room_id}")
-
-            # Remove the child reference from the space
-            self.log.debug(
-                f"DEBUG removing child state reference from {self.config['parent_room']}"
-            )
-            await self.client.send_state_event(
-                self.config["parent_room"],
-                event_type="m.space.child",
-                content={},  # Empty content removes the state
-                state_key=room_id,
-            )
-            self.log.info(
-                f"Removed child room reference from space {self.config['parent_room']}"
-            )
+            # Remove the room from whatever managed space(s) actually list it — a
+            # subspace, or the top-level parent — not just the configured
+            # parent_room (otherwise archiving a subspace room would leave a
+            # stale, tombstoned child link behind in its subspace).
+            archive_parents = await self._find_parent_spaces(room_id)
+            if not archive_parents:
+                archive_parents = [self.config["parent_room"]]
+            for archive_parent in archive_parents:
+                try:
+                    await self.client.send_state_event(
+                        room_id=room_id,
+                        event_type="m.space.parent",
+                        content={},  # Empty content removes the state
+                        state_key=archive_parent,
+                    )
+                    await self.client.send_state_event(
+                        archive_parent,
+                        event_type="m.space.child",
+                        content={},  # Empty content removes the state
+                        state_key=room_id,
+                    )
+                    self.log.info(
+                        f"Removed space links between {room_id} and {archive_parent}"
+                    )
+                except Exception as e:
+                    self.log.warning(
+                        f"Could not unlink {room_id} from {archive_parent}: {e}"
+                    )
             # The space tree changed; drop the cached room list.
             self._invalidate_roomlist_cache()
 
@@ -3953,6 +3958,14 @@ class CommunityBot(Plugin):
                 f"Could not read old room for predecessor pointer: {e}"
             )
 
+        # Home the replacement under the same space the old room lives in (a
+        # subspace, or the top-level community parent) so replacing a subspace
+        # room keeps it in that subspace instead of dumping it at the top level.
+        old_parents = await self._find_parent_spaces(room_id)
+        replacement_parent = room_creation_utils.pick_placement_parent(
+            old_parents, self.config.get("parent_room", "")
+        )
+
         # Get the room name from the state event
         room_name = None
         try:
@@ -4172,7 +4185,10 @@ class CommunityBot(Plugin):
             # Create a regular room
             self.log.info(f"Calling create_room with room_name='{room_name}'")
             new_room_id, new_room_alias = await self.create_room(
-                room_name, evt, creation_content=predecessor_content
+                room_name,
+                evt,
+                creation_content=predecessor_content,
+                target_parent=replacement_parent,
             )
             self.log.info(
                 f"create_room returned: room_id={new_room_id}, alias={new_room_alias}"

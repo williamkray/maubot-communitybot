@@ -76,6 +76,21 @@ async def prepare_room_creation_data(
     return alias_localpart, server, room_invitees, parent_room
 
 
+def pick_placement_parent(old_parents: list, parent_room: str) -> str:
+    """Choose which space a replacement room should be homed under.
+
+    Prefers a subspace the old room lived in over the top-level community
+    ``parent_room`` (so replacing a subspace room keeps it in that subspace),
+    falling back to any found parent, then to ``parent_room``.
+    """
+    subspace_parents = [p for p in (old_parents or []) if p != parent_room]
+    if subspace_parents:
+        return subspace_parents[0]
+    if old_parents:
+        return old_parents[0]
+    return parent_room
+
+
 def merge_user_power_levels(base_users: dict, extra_users: dict) -> dict:
     """Merge two user -> power-level maps, keeping the HIGHER level for any user
     present in both. Returns a new dict (inputs are not mutated). Used so a room
