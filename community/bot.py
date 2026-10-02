@@ -284,6 +284,7 @@ class CommunityBot(Plugin):
         evt: MessageEvent = None,
         power_level_override: Optional[PowerLevelStateEventContent] = None,
         use_slug: bool = False,
+        initial_state: Optional[list] = None,
     ) -> tuple[str, str]:
         """Create a new space.
 
@@ -372,6 +373,7 @@ class CommunityBot(Plugin):
                 power_level_override=power_level_override,
                 creation_content=creation_content,
                 room_version=self.config.get("room_version", "1"),
+                initial_state=initial_state,
             )
 
             # Verify the space version and type were set correctly
@@ -655,6 +657,29 @@ class CommunityBot(Plugin):
                 f"i couldn't find a subspace named '{target}' in this community, sorry"
             )
         return None
+
+    async def _resolve_nesting_target(
+        self, target: str, evt: MessageEvent
+    ) -> Optional[str]:
+        """Resolve+validate a target space to nest a room or subspace under.
+
+        Replies and returns None if it can't be resolved, isn't a space, or
+        isn't part of this community's managed tree. Shared by
+        ``room create --under`` and ``space create --under``.
+        """
+        resolved = await self._resolve_space_arg(target, evt)
+        if not resolved:
+            return None
+        if not await room_utils.is_space(self.client, resolved, self.log):
+            await evt.reply("that target isn't a space, so i can't nest under it.")
+            return None
+        managed = set([self.config["parent_room"]] + await self.get_space_roomlist())
+        if resolved not in managed:
+            await evt.reply(
+                "that space isn't part of this community's tree, so i won't nest under it."
+            )
+            return None
+        return resolved
 
     async def generate_report(self) -> None:
         now = int(time.time() * 1000)
@@ -3592,6 +3617,7 @@ class CommunityBot(Plugin):
         creation_content: Optional[dict] = None,
         invitees: Optional[list[str]] = None,
         event_room: bool = False,
+        target_parent: Optional[str] = None,
     ) -> tuple[str, str] | None:
         """Create a new room and add it to the parent space.
 
@@ -3635,6 +3661,12 @@ class CommunityBot(Plugin):
                 )
             )
 
+            # Rooms nest under the community parent by default; --under lets an
+            # admin nest a new room under a specific managed subspace instead.
+            # The join rule still gates on the top-level community (parent_room)
+            # so any vetted member can join, regardless of tree placement.
+            tree_parent = target_parent or parent_room
+
             # Validate that the alias is available
             is_available = await self.validate_room_alias(alias_localpart, server)
             if not is_available:
@@ -3647,7 +3679,7 @@ class CommunityBot(Plugin):
             # Prepare power levels
             try:
                 power_levels = await room_creation_utils.prepare_power_levels(
-                    self.client, self.config, parent_room, power_level_override
+                    self.client, self.config, tree_parent, power_level_override
                 )
                 self.log.info(f"Power levels prepared successfully: {power_levels}")
             except Exception as e:
@@ -3677,11 +3709,12 @@ class CommunityBot(Plugin):
             # Prepare initial state events
             initial_state = room_creation_utils.prepare_initial_state(
                 self.config,
-                parent_room,
+                tree_parent,
                 server,
                 force_encryption,
                 force_unencryption,
                 creation_content,
+                join_rule_room=parent_room,
             )
 
             # Create the room
@@ -3718,7 +3751,7 @@ class CommunityBot(Plugin):
 
             # Add room to space
             await room_creation_utils.add_room_to_space(
-                self.client, parent_room, room_id, server, self.config["sleep"], self.log
+                self.client, tree_parent, room_id, server, self.config["sleep"], self.log
             )
             # The space tree changed; drop the cached room list.
             self._invalidate_roomlist_cache()
@@ -3753,7 +3786,8 @@ class CommunityBot(Plugin):
     @room.subcommand(
         "create",
         help="create a new room titled <roomname> and add it to the parent space. \
-                          optionally include `--encrypted` or `--unencrypted` to force regardless of the default settings.",
+                          optionally include `--encrypted` or `--unencrypted` to force encryption, and \
+                          `--under <subspace>` to nest the room under a managed subspace instead of the parent.",
     )
     @command.argument("roomname", pass_raw=True, required=True)
     @decorators.require_parent_room
@@ -3763,9 +3797,24 @@ class CommunityBot(Plugin):
             await evt.reply(
                 'pass me a room name (like "cool topic") and i will create it and add it to the space. \
                             use `--encrypted` or `--unencrypted` to ensure encryption is enabled/disabled at creation time even if that isnt my default \
-                            setting.'
+                            setting. use `--under <subspace>` to nest the room under a managed subspace instead of the parent space.'
             )
             return
+
+        # Split out an optional --under/--target <subspace> flag; the remainder
+        # (which may still carry --encrypted/--unencrypted) is the room name.
+        roomname, under_target = room_creation_utils.extract_target_flag(roomname)
+        if len(roomname) == 0:
+            await evt.reply(
+                "pass me a room name before the `--under` flag, like "
+                "`cool topic --under Projects`."
+            )
+            return
+        target_parent = None
+        if under_target:
+            target_parent = await self._resolve_nesting_target(under_target, evt)
+            if not target_parent:
+                return  # _resolve_nesting_target already replied
 
         # Check if community slug is configured (only required when the slug suffix is used)
         if self.config.get("use_community_slug", True) and not self.config["community_slug"]:
@@ -3784,7 +3833,7 @@ class CommunityBot(Plugin):
             )
             return
 
-        result = await self.create_room(roomname, evt)
+        result = await self.create_room(roomname, evt, target_parent=target_parent)
         if not result:
             return  # Error already logged and reported to user by create_room
 
@@ -4934,41 +4983,33 @@ class CommunityBot(Plugin):
     @space.subcommand(
         "create",
         help="create a new empty subspace and nest it under a parent space. \
-                          usage: create <name> [target-space]",
+                          usage: create <name> [--under <target-space>]",
     )
-    @command.argument("name", required=True)
-    @command.argument("target", required=False)
+    @command.argument("args", pass_raw=True, required=True)
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
-    async def space_create(
-        self, evt: MessageEvent, name: str = None, target: str = None
-    ) -> None:
+    async def space_create(self, evt: MessageEvent, args: str = None) -> None:
         await evt.mark_read()
+
+        # Split out an optional --under/--target <space> flag (shared parser with
+        # room create); the remainder is the subspace display name. The alias is
+        # sanitized separately inside create_space, mirroring room create.
+        cleaned, target = room_creation_utils.extract_target_flag(args or "")
+        name = re.sub(r"\s+", " ", cleaned).strip()
 
         if not name or name == "help":
             await evt.reply(
-                'pass me a subspace name (like "projects") and i will create it and '
-                "nest it under the parent space. optionally pass a target subspace "
+                'pass me a subspace name (like "cool projects") and i will create it and '
+                "nest it under the parent space. optionally pass --under <target-space> "
                 "(alias, id, or name) to nest it deeper: "
-                "!community space create <name> [target-space]"
+                "!community space create <name> [--under <target-space>]"
             )
             return
 
         # Determine the parent to nest the new subspace under.
         if target:
-            target_parent = await self._resolve_space_arg(target, evt)
+            target_parent = await self._resolve_nesting_target(target, evt)
             if not target_parent:
-                return
-            if not await room_utils.is_space(self.client, target_parent, self.log):
-                await evt.reply("that target isn't a space, so i can't nest under it.")
-                return
-            managed = set(
-                [self.config["parent_room"]] + await self.get_space_roomlist()
-            )
-            if target_parent not in managed:
-                await evt.reply(
-                    "that space isn't part of this community's tree, so i won't nest under it."
-                )
                 return
         else:
             target_parent = self.config["parent_room"]
@@ -4977,7 +5018,16 @@ class CommunityBot(Plugin):
         # and space-type creation content). use_slug=True so the subspace alias
         # gets the community slug suffix, like room aliases. create_space does not
         # link into an arbitrary parent, so we link explicitly below.
-        subspace_id, subspace_alias = await self.create_space(name, evt, use_slug=True)
+        # Subspaces default to the same "restricted" join rule as managed rooms
+        # so vetted community members (members of the top-level parent space) can
+        # self-join without an explicit invite. Delegated subspace admins can
+        # tighten this later by changing the subspace's join rules.
+        subspace_initial_state = [
+            room_creation_utils.restricted_join_rule_state(self.config["parent_room"])
+        ]
+        subspace_id, subspace_alias = await self.create_space(
+            name, evt, use_slug=True, initial_state=subspace_initial_state
+        )
         if not subspace_id:
             return  # create_space already reported the error
 

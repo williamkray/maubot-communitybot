@@ -82,9 +82,13 @@ them). cyclic space references are handled safely.
 
 you can build and rearrange the subspace tree with these commands:
 
-- `!community space create <name> [target-space]` — create a new, empty subspace and nest it under a parent. with no
-  `target-space` it is nested directly under your configured parent space; pass a `target-space` (alias, room id, or
-  display name of an existing subspace in the tree) to nest it deeper. subspaces can be nested to any depth.
+- `!community space create <name> [--under <target-space>]` — create a new, empty subspace and nest it under a parent.
+  the name may contain spaces (like `room create`); it becomes the subspace's display name and a sanitized alias is
+  derived from it. with no `--under` it is nested directly under your configured parent space; pass `--under
+  <target-space>` (alias, room id, or display name of an existing subspace in the tree) to nest it deeper. `--target`
+  is accepted as a synonym for `--under`. subspaces can be nested to any depth. newly created subspaces use a
+  `restricted` join rule by default — members of your community (the parent space) can join them without an invite, and
+  delegated subspace admins can change this later.
 - `!community space list` — print the whole space tree as an indented outline (spaces vs rooms, with names and room ids)
   so you can see the structure at a glance.
 - `!community room move [room] <target-space>` — reparent a room: remove it from its current parent space and add it under
@@ -211,7 +215,8 @@ highest admin level to disable auto-invite entirely.
 
 use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.
 include the `--encrypt` flag in your command to encrypt the room even if the default configuration is to create rooms
-unencrypted.
+unencrypted. include `--under <subspace>` (alias, room id, or display name of a managed subspace) to nest the new room
+under that subspace instead of the top-level parent; community members can still join it regardless of nesting.
 
 will attempt to sanitize the room name and assign a room alias automatically. the bot user will be assigned very high
 power level (1000) and set permissions based on the parent space user power-levels. this ensures that the

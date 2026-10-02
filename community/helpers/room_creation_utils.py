@@ -149,6 +149,37 @@ async def prepare_power_levels(
         return power_levels
 
 
+def restricted_join_rule_state(parent_room: str) -> Dict[str, Any]:
+    """Build an m.room.join_rules state event using the "restricted" join rule,
+    letting members of ``parent_room`` self-join without an explicit invite.
+    Shared by managed room creation and subspace creation so both default to
+    community-membership-based access."""
+    return {
+        "type": str(EventType.ROOM_JOIN_RULES),
+        "content": {
+            "join_rule": "restricted",
+            "allow": [{"type": "m.room_membership", "room_id": parent_room}],
+        },
+    }
+
+
+def extract_target_flag(text: str) -> Tuple[str, Optional[str]]:
+    """Split an optional ``--under``/``--target <space>`` flag out of a raw
+    command string (shared by ``room create`` and ``space create``).
+
+    The flag value runs until the next ``--flag`` token or end of string, so it
+    may be a multi-word subspace display name (e.g. "Sub V12"); any other flags
+    such as ``--encrypted`` are left in place. Returns
+    ``(text_without_the_under_flag, target_or_None)`` with whitespace collapsed.
+    """
+    m = re.search(r"(?:\s|^)-+(?:under|target)\s+(.+?)(?=\s+-+[a-zA-Z]|$)", text)
+    if not m:
+        return text, None
+    target = m.group(1).strip()
+    cleaned = re.sub(r"\s+", " ", (text[: m.start()] + " " + text[m.end() :])).strip()
+    return cleaned, target
+
+
 def prepare_initial_state(
     config: dict,
     parent_room: str,
@@ -156,6 +187,7 @@ def prepare_initial_state(
     force_encryption: bool,
     force_unencryption: bool,
     creation_content: Optional[Dict[str, Any]] = None,
+    join_rule_room: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Prepare initial state events for room creation.
 
@@ -174,6 +206,11 @@ def prepare_initial_state(
 
     # Only add space parent state if we have a parent room
     if parent_room:
+        # The room/subspace is linked under ``parent_room`` (its place in the
+        # tree), but the restricted join rule can gate on a different room via
+        # ``join_rule_room`` — used so a room nested under a subspace still lets
+        # the whole community join. Defaults to ``parent_room``.
+        join_gate = join_rule_room if join_rule_room else parent_room
         initial_state.extend(
             [
                 {
@@ -181,15 +218,7 @@ def prepare_initial_state(
                     "state_key": parent_room,
                     "content": {"via": [server], "canonical": True},
                 },
-                {
-                    "type": str(EventType.ROOM_JOIN_RULES),
-                    "content": {
-                        "join_rule": "restricted",
-                        "allow": [
-                            {"type": "m.room_membership", "room_id": parent_room}
-                        ],
-                    },
-                },
+                restricted_join_rule_state(join_gate),
             ]
         )
 
