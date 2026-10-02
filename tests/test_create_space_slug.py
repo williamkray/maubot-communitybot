@@ -66,3 +66,19 @@ async def test_no_suffix_when_slug_empty():
     bot = make_bot(community_slug="")
     await CommunityBot.create_space(bot, "Projects", None, use_slug=True)
     assert await _alias_used(bot) == "projects"
+
+
+@pytest.mark.asyncio
+async def test_create_space_merges_extra_creation_content():
+    """extra_creation_content (e.g. a predecessor pointer) is merged into the
+    space's creation_content alongside the m.space type."""
+    bot = make_bot()
+    predecessor = {
+        "predecessor": {"room_id": "!old:example.com", "event_id": "$abc"}
+    }
+    await CommunityBot.create_space(
+        bot, "Projects", None, use_slug=True, extra_creation_content=predecessor
+    )
+    cc = bot.client.create_room.await_args.kwargs["creation_content"]
+    assert cc["type"] == "m.space"
+    assert cc["predecessor"] == {"room_id": "!old:example.com", "event_id": "$abc"}

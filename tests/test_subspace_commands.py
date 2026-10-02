@@ -244,6 +244,31 @@ async def test_space_create_sets_restricted_join_rule(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_space_create_seeds_power_levels_from_parent(monkeypatch):
+    """A new subspace is created with a power_level_override so community admins
+    (the parent's user power levels) are admins in the subspace too."""
+    bot = _make_bot({"!parent:example.com": []}, space_flags={})
+    bot.config["invite_power_level"] = 50
+    bot.create_space = AsyncMock(
+        return_value=("!sub:example.com", "#projects:example.com")
+    )
+    add_to_space = AsyncMock()
+    monkeypatch.setattr(
+        "community.helpers.room_creation_utils.add_room_to_space", add_to_space
+    )
+    bot._invalidate_roomlist_cache = Mock()
+
+    evt = _make_evt()
+    await CommunityBot.space_create.__mb_func__.__wrapped__.__wrapped__(
+        bot, evt, args="projects"
+    )
+
+    bot.create_space.assert_awaited_once()
+    # a power_level_override was supplied (not None) so the subspace is seeded
+    assert bot.create_space.await_args.kwargs.get("power_level_override") is not None
+
+
+@pytest.mark.asyncio
 async def test_space_create_multiword_name_with_under_target(monkeypatch):
     """A multi-word name with --under flag nests under the given target."""
     state_map = {

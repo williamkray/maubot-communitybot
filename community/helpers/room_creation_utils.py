@@ -76,6 +76,17 @@ async def prepare_room_creation_data(
     return alias_localpart, server, room_invitees, parent_room
 
 
+def merge_user_power_levels(base_users: dict, extra_users: dict) -> dict:
+    """Merge two user -> power-level maps, keeping the HIGHER level for any user
+    present in both. Returns a new dict (inputs are not mutated). Used so a room
+    nested under a subspace gets both the community admins and any delegated
+    subspace admins, without ever lowering a community admin's level."""
+    merged = dict(base_users or {})
+    for user_id, level in (extra_users or {}).items():
+        merged[user_id] = max(level, merged.get(user_id, 0))
+    return merged
+
+
 async def prepare_power_levels(
     client: Client,
     config: dict,

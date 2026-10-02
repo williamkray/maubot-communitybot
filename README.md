@@ -5,42 +5,6 @@ a maubot plugin that helps administrators of communities on matrix, based on the
 to leverage [join](https://github.com/williamkray/maubot-join) to ensure your bot doesn't end up somewhere it's not
 supposed to be.
 
-# important upgrade notes
-
-## v0.4
-
-new features in this release:
-
-- **emoji-reaction crowd moderation** — let members flag messages with a reaction (see below).
-- **leave/kick/ban notifications** — the notification room now reports departures, not just joins.
-- **`use_community_slug` toggle** — create room aliases without the `-<slug>` suffix.
-- **community events (EXPERIMENTAL)** — see the events section below. this feature is incomplete
-  and has known unresolved issues; it is included so it can be developed further, but is **not
-  recommended for production use** yet.
-
-this release upgrades the plugin database to schema **v6**. the upgrade runs automatically on
-first start and is one-directional — as always, back up your database before upgrading. (note:
-maubot will refuse to load a plugin whose known schema is *older* than the database's current
-version, so do not downgrade to an earlier build once you've run v0.4.)
-
-## v0.3
-        
-New functionality to support room v12 and newer has been added, as well as some significant restructuring of the code
-and commands! v0.3.0 is potentially a breaking change, please make a backup of your old bot configuration and database
-as necessary before updating in case anything goes horribly wrong. i take no responsibility.
-
-commands are now broken up into more logical groupings, so instead of `!community createroom` it's `!community room
-create`, etc. helpful usage messages are usually passed if you do things wrong so this shouldn't be too complicated but
-i'm too lazy to update the below readme to reflect the new command structures. use your brain.
-
-## v0.2
-
-if you are upgrading from an earlier version to v0.2.0, please note that the user permission model has changed to be easier to manage, but will require some intervention.
-
-statically defined `admins` and `moderators` in the config will no longer be used. instead, user permissions in rooms will be inherited from the parent space or room, and changes will cascade to all child rooms.
-
-to migrate, ensure your bot is an admin of the parent space and use the `!community sync` command to make users in your admin and moderator lists appropriately leveled in that parent space. this will also clear out these lists to prepare for deprecation in a later version. you may want to run `!community setpower` to update your child rooms if there are significant changes.
-
 # should i use this?
 
 why does this exist? there are some great tools out there already that do probably a much better job at combatting spam
@@ -94,8 +58,22 @@ you can build and rearrange the subspace tree with these commands:
 - `!community room move [room] <target-space>` — reparent a room: remove it from its current parent space and add it under
   `target-space`. omit `[room]` to move the room you run the command in. moving a space into one of its own descendants
   (which would create a cycle) is rejected.
+- `!community space delegate <user> <subspace> [mod|admin|<level>]` — grant a user power over a single
+  subspace and every room nested inside it, without making them an admin of the whole community. pass
+  `mod`, `admin`, or a numeric power level (defaults to admin). if the subspace's display name has
+  spaces, reference it by alias or room id.
+- `!community space undelegate <user> <subspace>` — revoke a user's delegated power over a subspace and
+  its rooms (their community-wide power level, if any, is left untouched).
 
-all three require admin (power level 100) except `space list`, which any moderator can run.
+these all require admin (power level 100) except `space list`, which any moderator can run.
+
+## diagnostics
+
+not sure whether the bot has the permissions it needs? run `!community doctor` to audit the bot's
+power levels and permissions across your parent space and every room in the tree (subspaces included),
+and get a report of anything that looks off — rooms where the bot can't set power levels, can't kick,
+can't redact, and so on. pass a room id or alias (e.g. `!community doctor #somewhere:server.tld`) to
+get a detailed breakdown for just that room.
 
 ## initialize a community from scratch
 
@@ -107,7 +85,7 @@ this will perform several actions on your behalf:
 
 1. create a space named for your community, with an appropriate alias on the homeserver, and save the config with this parent room ID
 2. add you to the "invitee" list in the config to be invited to all new rooms
-3. set the bot's power level to 1000, and invite you as an administrator with power level 100
+3. give the bot full administrative power (in legacy pre-v12 rooms that means power level 1000; in modern v12+ rooms the bot is the room creator and has unlimited power with no numeric level), and invite you as an administrator with power level 100
 4. create a room within the space for admins/moderators to execute bot commands, this room is invite only
 5. create a publicly facing room called the waiting room to allow newcomers to join and ask for invitation to your space
 6. enable basic keyword and file upload censorship only on the waiting room
@@ -116,18 +94,35 @@ this will perform several actions on your behalf:
 once these actions have been taken, you can manage moderators, change room avatars, etc as you like, and add more rooms with
 other commands. happy community-managing!
 
-attempts to run this command once a parent room has been set will fail. 
+if a parent room is already configured, re-running `initialize` no longer just bails out — it switches
+to repair mode: it figures out what already exists, creates only the missing pieces (the space link, the
+moderators room, the waiting room), fixes any wrong join rules, and reports a per-component summary of
+what was present, created, linked, or updated. so it's safe to run again if a previous run got
+interrupted partway through.
 
 ## greet new users on joining a room
 
-configure your bot to send a custom greeting to users whenever they join a room! configuration file provides a greeting
-map (define multiple greetings each with an identifier) and then a configuration of which rooms to greet users in, and
-which greeting message the bot should send them.
+configure your bot to send a custom greeting to users whenever they join a room! the config provides a `greetings`
+map (define multiple greetings, each with an identifier) and a `greeting_rooms` mapping that says which greeting to
+send in which room, so different rooms can have different messages.
 
-Configure a `notification_room` to receive messages when someone joins one of the greeting rooms. If you just want
-notifications (perhaps when someone joins the space, where the bot likely cannot send a greeting anyway) set the
-greeting name to `'none'` in the greeting map, and the bot will skip the greeting and send a notification to your
-notification room.
+if you want a join notification but no greeting (for example in the space itself, where the bot usually can't send a
+greeting anyway), set that room's greeting to `'none'` in `greeting_rooms` — the bot skips the message but still posts
+a join notification if you've configured a `notification_room` (see below).
+
+## membership change notifications
+
+set a `notification_room` and the bot will post there when membership changes in your managed rooms. each notification
+is a configurable template; leave a template blank to turn that one off:
+
+- **joins** (`join_notification_message`) — posted when someone joins a room listed in `greeting_rooms`.
+- **leaves** (`leave_notification_message`) — posted when someone leaves any managed room.
+- **kicks** (`kick_notification_message`) — posted when a moderator kicks someone from a managed room.
+- **bans** (`ban_notification_message`) — posted when a moderator bans someone from a managed room.
+
+the placeholders `{user}` and `{room}` work in all of them, and `{actor}` (who did it) is available for kicks and bans.
+the bot's own community-wide actions (like `!community user ban` or `!community purge`) don't spam one message per room —
+they post a single batched notice instead.
 
 ## activity tracking and reporting
 
@@ -137,8 +132,8 @@ with the `purge` subcommand.
 
 supports simple threshold configuration and the option to also track "reaction" activity. 
 
-you can also exempt users from showing as "inactive" in the report by setting their ignore status with the `ignore` and
-`unignore` subcommands, e.g. `!community ignore @takinabreak:fromthis.group`. this is helpful to avoid accidentally
+you can also exempt users from showing as "inactive" in the report by setting their ignore status with the `user ignore` and
+`user unignore` subcommands, e.g. `!community user ignore @takinabreak:fromthis.group`. this is helpful to avoid accidentally
 purging admin accounts, backup accounts, rarely used bots, etc.
 
 `sync` subcommand will actively sync your space member list with the database to track active members properly. new
@@ -146,7 +141,7 @@ members to the space automatically trigger a sync, as do most other commands. th
 may want to run it just to see what it does.
 
 generate a report with the `report` subcommand (i.e. `!community report`) to see your inactive users. you can also
-generate more specific reports using the `inactive`, `purgable`, and `ignored` commands to see users in those specific
+generate more specific reports using the `report inactive`, `report purgable`, and `report ignored` commands to see users in those specific
 categories.
 
 ## user management
@@ -156,18 +151,18 @@ prevent people from inviting randos to your community rooms and bypassing space 
 
 purge inactive users with the `purge` subcommand (i.e. `!community purge`).
 
-kick an individual user from your space and all child rooms, regardless of activity status, with the `kick` subcommand
-(e.g. `!community kick @malicious:user.here`). this is useful in communities built on the concept of private (invite
+kick an individual user from your space and all child rooms, regardless of activity status, with the `user kick` subcommand
+(e.g. `!community user kick @malicious:user.here`). this is useful in communities built on the concept of private (invite
 only) matrix spaces.
 
-if you want more sever action, use the `ban` and `unban` subcommands to ban users from all rooms in the space (this action
+if you want more sever action, use the `user ban` and `user unban` subcommands to ban users from all rooms in the space (this action
 will automatically kick them from those rooms as well). if you've made a mistake, use the unban option, but they will
 need to rejoin all rooms themselves or be re-invited.
 
-if configured with the `redact_on_ban` setting, banning a user from your space will also queue up to their last 100 messages in each room for redaction. if not, you can redact their messages in each individual room using the `!community redact` command.
+if configured with the `redact_on_ban` setting, banning a user from your space will also queue up to their last 100 messages in each room for redaction. if not, you can redact their messages in each individual room using the `!community user redact` command.
 
-use the `guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
-`!community guests #myroom:alias.here`.
+use the `room guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
+`!community room guests #myroom:alias.here`.
 
 ## public banlist support
 
@@ -179,8 +174,8 @@ to this bot, as those concepts are probably best left to more featureful tools.
 ## admin/moderator management
 
 set consistent power levels across all your rooms for your community administrators! user powerlevels will be
-cascaded to all rooms when changed in your parent space. running the setpower subcommand (i.e.
-`!community setpower`) will roll through all rooms in the space and attempt to true-up user
+cascaded to all rooms when changed in your parent space. running the `room setpower` subcommand (i.e.
+`!community room setpower`) will roll through all rooms in the space and attempt to true-up user
 permissions to match. it will skip rooms that you have enabled verification flows on, unless you pass the room-id
 as an argument to the command. this ensures you don't accidentally un-verify everyone unless you mean to.
 
@@ -213,14 +208,15 @@ highest admin level to disable auto-invite entirely.
 
 ## room creation
 
-use the `createroom` subcommand to create a new room according to your preferences, and join it into the parent space.
+use the `!community room create` subcommand to create a new room according to your preferences, and join it into the parent space.
 include the `--encrypt` flag in your command to encrypt the room even if the default configuration is to create rooms
 unencrypted. include `--under <subspace>` (alias, room id, or display name of a managed subspace) to nest the new room
 under that subspace instead of the top-level parent; community members can still join it regardless of nesting.
 
-will attempt to sanitize the room name and assign a room alias automatically. the bot user will be assigned very high
-power level (1000) and set permissions based on the parent space user power-levels. this ensures that the
-bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured in the
+will attempt to sanitize the room name and assign a room alias automatically. the bot user will be given full
+administrative power — in legacy (pre-v12) rooms that's a very high power level (1000), while in modern (v12+) rooms the
+bot is the room creator with unlimited power and no numeric level — and set permissions based on the parent space user
+power-levels. this ensures that the bot is still able to manage room admins. the bot will also invite other users to these new rooms as configured in the
 `invitees` list. populate this list with your space admins, other bots, or any other account you want to make sure gets
 invited to the new room!
 
@@ -228,9 +224,9 @@ rooms created by the bot will have join restriction limited to members of the sp
 
 ## room archival and replacement
 
-use the `archive` subcommand to archive a room. this will remove the room from the parent space, remove all room aliases, and add a tombstone event to indicate the room is archived
+use the `!community room archive` subcommand to archive a room. this will remove the room from the parent space, remove all room aliases, and add a tombstone event to indicate the room is archived
 
-use the `replaceroom` subcommand to replace an existing room with a new one. this is useful when:
+use the `!community room replace` subcommand to replace an existing room with a new one. this is useful when:
 - room members have power levels that cannot be corrected, or room members you cannot kick out
 - you need to revert encryption settings
 - you want to start fresh with a new room while preserving the old room's name and aliases
@@ -243,9 +239,9 @@ functionality where necessary.
 ## get room ID
 
 sometimes you need to know a rooms identifier, but if the room has an alias associated with it not all clients make it
-easy (or possible) to find. this subcommand (`!community roomid`) can be used to return the room id that a room alias
+easy (or possible) to find. this subcommand (`!community room id`) can be used to return the room id that a room alias
 points to. with no argument passed, it will return the current room's ID, or you can pass it an alias (e.g. `!community
-roomid #whatisthisroom:myserver.tld`).
+room id #whatisthisroom:myserver.tld`).
 
 ## message redaction
 
@@ -282,7 +278,7 @@ will become problematic and expensive for very large rooms... strong recommend n
 use this if you expect to have thousands of room members.
 
 if you enable user verification in an existing room, but you don't want to disrupt the
-current users' ability to send messages, you can use the `!community verify-migrate`
+current users' ability to send messages, you can use the `!community room enable-verification`
 command to set permissions correctly. **DO NOT DO THIS IN LARGE ROOMS**. if you have more
 than a handful of people, consider how many of them actually say anything in a given day
 and whether or not it's worth filling your state event with them. consider alternative
@@ -346,6 +342,13 @@ The event's DB record, its room topic, and the posted description message are ke
 details, links, or the guest cap updates the topic and rewrites the existing description in place.
 Set `events_encrypt_rooms` to control whether event rooms are created encrypted (default `false` so
 late-comers can read prior discussion).
+
+# upgrading
+
+upgrading from an older version? the plugin's database upgrades automatically on first start and the
+upgrade is **one-directional**, so always back up your database first and don't downgrade once you've
+run a newer build. version-specific migration notes — including the v0.2 permission-model change and
+the v0.3 command restructuring — live in [UPGRADING.md](UPGRADING.md).
 
 # installation
 

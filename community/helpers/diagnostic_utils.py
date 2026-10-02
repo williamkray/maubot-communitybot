@@ -188,10 +188,13 @@ def generate_space_summary(space_data: Dict[str, Any]) -> str:
     else:
         response += f"{space_status} <b>Administrative privileges:</b> {'Yes' if space_data['has_admin'] else 'No'} (level: {space_data['bot_power_level']})<br />"
 
-    if space_data.get("users_higher"):
-        response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in space_data['users_higher']])}<br />"
-    if space_data.get("users_equal"):
-        response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in space_data['users_equal']])}<br />"
+    # For a creator with unlimited power (v12+), other users holding numeric
+    # power levels are not actually "higher" — don't warn about them.
+    if not space_data.get("bot_has_unlimited_power", False):
+        if space_data.get("users_higher"):
+            response += f"⚠️ <b>Users with higher power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in space_data['users_higher']])}<br />"
+        if space_data.get("users_equal"):
+            response += f"⚠️ <b>Users with equal power:</b> {', '.join([f'{u['user']} ({u['level']})' for u in space_data['users_equal']])}<br />"
 
     response += "<br />"
     return response
@@ -240,9 +243,13 @@ def generate_room_summary(
             else:
                 stats["legacy_rooms"] += 1
 
-        # Generate room info for problematic rooms
+        # Generate room info for problematic rooms. A creator with unlimited
+        # power (v12+) is never "problematic" for power-level conflicts, so don't
+        # list those rooms just because other users hold numeric power levels.
         if category in ["error", "problematic"] or (
-            is_admin and (room_data.get("users_higher") or room_data.get("users_equal"))
+            is_admin
+            and not room_data.get("bot_has_unlimited_power", False)
+            and (room_data.get("users_higher") or room_data.get("users_equal"))
         ):
             if has_error:
                 if room_data["error"] == "Bot not in room":

@@ -285,6 +285,7 @@ class CommunityBot(Plugin):
         power_level_override: Optional[PowerLevelStateEventContent] = None,
         use_slug: bool = False,
         initial_state: Optional[list] = None,
+        extra_creation_content: Optional[dict] = None,
     ) -> tuple[str, str]:
         """Create a new space.
 
@@ -337,6 +338,10 @@ class CommunityBot(Plugin):
                 "m.federate": True,
                 "m.room.history_visibility": "joined",
             }
+            # Merge any caller-provided extra creation content (e.g. a
+            # `predecessor` pointer when replacing a space).
+            if extra_creation_content:
+                creation_content.update(extra_creation_content)
 
             # For modern room versions (12+), remove the bot from power levels
             # as creators have unlimited power by default and cannot appear in power levels
@@ -3676,11 +3681,32 @@ class CommunityBot(Plugin):
                     await evt.respond(error_msg)
                 return None
 
-            # Prepare power levels
+            # Prepare power levels. These come from the community parent (the
+            # source of truth) so community admins get their level in every new
+            # room, no matter where it lives in the tree. When nesting under a
+            # subspace, also merge that subspace's user levels (e.g. delegated
+            # subspace admins), never lowering a community admin's level.
             try:
                 power_levels = await room_creation_utils.prepare_power_levels(
-                    self.client, self.config, tree_parent, power_level_override
+                    self.client, self.config, parent_room, power_level_override
                 )
+                if (
+                    not power_level_override
+                    and tree_parent
+                    and tree_parent != parent_room
+                ):
+                    try:
+                        sub_pl = await self.client.get_state_event(
+                            tree_parent, EventType.ROOM_POWER_LEVELS
+                        )
+                        if sub_pl and getattr(sub_pl, "users", None):
+                            power_levels.users = room_creation_utils.merge_user_power_levels(
+                                power_levels.users, sub_pl.users
+                            )
+                    except Exception as e:
+                        self.log.warning(
+                            f"Could not merge subspace power levels from {tree_parent}: {e}"
+                        )
                 self.log.info(f"Power levels prepared successfully: {power_levels}")
             except Exception as e:
                 self.log.error(f"Failed to prepare power levels: {e}")
@@ -3905,6 +3931,28 @@ class CommunityBot(Plugin):
             self.log.info("Bot permissions check failed, returning")
             return
 
+        # Capture the most recent event in the old room so the replacement room
+        # can point back to it via its m.room.create `predecessor` (clients that
+        # support it show a link back to the replaced room). m.room.create is
+        # immutable, so this must be gathered before the new room is created.
+        # Best-effort: if we can't read it, we just skip the predecessor.
+        predecessor_content = None
+        try:
+            recent = await self.client.get_messages(
+                room_id, direction=PaginationDirection.BACKWARD, limit=1
+            )
+            if recent and recent.events:
+                predecessor_content = {
+                    "predecessor": {
+                        "room_id": room_id,
+                        "event_id": recent.events[0].event_id,
+                    }
+                }
+        except Exception as e:
+            self.log.warning(
+                f"Could not read old room for predecessor pointer: {e}"
+            )
+
         # Get the room name from the state event
         room_name = None
         try:
@@ -4112,7 +4160,10 @@ class CommunityBot(Plugin):
                 f"Calling create_space with room_name='{room_name}', power_level_override={power_level_override is not None}"
             )
             new_room_id, new_room_alias = await self.create_space(
-                room_name, evt, power_level_override
+                room_name,
+                evt,
+                power_level_override,
+                extra_creation_content=predecessor_content,
             )
             self.log.info(
                 f"create_space returned: room_id={new_room_id}, alias={new_room_alias}"
@@ -4120,7 +4171,9 @@ class CommunityBot(Plugin):
         else:
             # Create a regular room
             self.log.info(f"Calling create_room with room_name='{room_name}'")
-            new_room_id, new_room_alias = await self.create_room(room_name, evt)
+            new_room_id, new_room_alias = await self.create_room(
+                room_name, evt, creation_content=predecessor_content
+            )
             self.log.info(
                 f"create_room returned: room_id={new_room_id}, alias={new_room_alias}"
             )
@@ -5025,8 +5078,19 @@ class CommunityBot(Plugin):
         subspace_initial_state = [
             room_creation_utils.restricted_join_rule_state(self.config["parent_room"])
         ]
+        # Seed the new subspace with the community parent's user power levels so
+        # community admins are admins in the subspace too (create_space strips the
+        # bot for modern/v12 creator rooms). Without this the subspace would grant
+        # power to no one but the creator bot.
+        subspace_power_levels = await room_creation_utils.prepare_power_levels(
+            self.client, self.config, self.config["parent_room"], None
+        )
         subspace_id, subspace_alias = await self.create_space(
-            name, evt, use_slug=True, initial_state=subspace_initial_state
+            name,
+            evt,
+            power_level_override=subspace_power_levels,
+            use_slug=True,
+            initial_state=subspace_initial_state,
         )
         if not subspace_id:
             return  # create_space already reported the error
@@ -5952,7 +6016,10 @@ class CommunityBot(Plugin):
                 report["issues"].append(
                     f"Failed to check parent space permissions: {report['space']['error']}"
                 )
-            elif report["space"].get("bot_power_level", 0) < 100:
+            elif (
+                not report["space"].get("bot_has_unlimited_power", False)
+                and report["space"].get("bot_power_level", 0) < 100
+            ):
                 report["issues"].append(
                     f"Bot lacks administrative privileges in parent space (level: {report['space']['bot_power_level']})"
                 )
@@ -5984,11 +6051,13 @@ class CommunityBot(Plugin):
             response = "<h3>🔍 Bot Permission Diagnostic Summary</h3><br /><br />"
 
             # Space summary - only show if there are issues
-            space_has_issues = (
-                "error" in report["space"]
-                or report["space"].get("bot_power_level", 0) < 100
-                or report["space"].get("users_higher")
-                or report["space"].get("users_equal")
+            space_has_issues = "error" in report["space"] or (
+                not report["space"].get("bot_has_unlimited_power", False)
+                and (
+                    report["space"].get("bot_power_level", 0) < 100
+                    or report["space"].get("users_higher")
+                    or report["space"].get("users_equal")
+                )
             )
 
             if space_has_issues:

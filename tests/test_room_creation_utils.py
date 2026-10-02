@@ -121,3 +121,31 @@ def test_prepare_initial_state_join_rule_room_decoupled():
     assert join_rules[0]["content"]["allow"] == [
         {"type": "m.room_membership", "room_id": "!community:example.com"}
     ]
+
+
+def test_merge_user_power_levels_takes_higher():
+    base = {"@a:x": 100, "@b:x": 50}
+    extra = {"@b:x": 100, "@c:x": 50}
+    merged = room_creation_utils.merge_user_power_levels(base, extra)
+    assert merged == {"@a:x": 100, "@b:x": 100, "@c:x": 50}
+
+
+def test_merge_user_power_levels_does_not_lower():
+    base = {"@a:x": 100}
+    extra = {"@a:x": 50}
+    merged = room_creation_utils.merge_user_power_levels(base, extra)
+    assert merged["@a:x"] == 100
+
+
+def test_merge_user_power_levels_handles_none():
+    assert room_creation_utils.merge_user_power_levels(None, {"@a:x": 50}) == {"@a:x": 50}
+    assert room_creation_utils.merge_user_power_levels({"@a:x": 50}, None) == {"@a:x": 50}
+    assert room_creation_utils.merge_user_power_levels(None, None) == {}
+
+
+def test_merge_user_power_levels_does_not_mutate_inputs():
+    base = {"@a:x": 100}
+    extra = {"@b:x": 50}
+    room_creation_utils.merge_user_power_levels(base, extra)
+    assert base == {"@a:x": 100}
+    assert extra == {"@b:x": 50}
