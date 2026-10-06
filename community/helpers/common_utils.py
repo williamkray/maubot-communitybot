@@ -3,6 +3,7 @@
 import asyncio
 import re
 from typing import Optional, Dict, Any
+from urllib.parse import unquote
 from mautrix.types import EventType, MessageEvent
 from mautrix.errors import MLimitExceeded
 
@@ -148,6 +149,46 @@ def format_room_info(room_id: str, room_name: Optional[str] = None) -> str:
     if room_name:
         return f"{room_name} ({room_id})"
     return room_id
+
+
+_A_HREF_RE = re.compile(r'<a\s[^>]*href="([^"]+)"[^>]*>([^<]*)</a>', re.IGNORECASE)
+
+
+def extract_room_ref_from_formatted_body(formatted_body: str, plain_text: str) -> Optional[str]:
+    """Extract a full room alias or ID from a formatted HTML body.
+
+    Matrix clients render room aliases as hyperlinks with truncated display text
+    (e.g. ``#ex+`` linking to ``https://matrix.to/#/#example-room:example.org``). Given
+    the truncated ``plain_text`` arg, this searches the HTML for a matching
+    ``<a>`` tag and extracts the full alias or room ID from its href.
+
+    Handles matrix.to links and matrix: URIs. Returns a full ``#alias:server``
+    or ``!id:server`` string, or ``None`` if no matching link is found.
+    """
+    if not formatted_body or not plain_text:
+        return None
+    needle = plain_text.strip()
+    for m in _A_HREF_RE.finditer(formatted_body):
+        href, link_text = m.group(1), m.group(2).strip()
+        if link_text != needle:
+            continue
+        # matrix.to: https://matrix.to/#/#alias:server or .../!id:server
+        if "matrix.to/#/" in href:
+            fragment = unquote(href.split("matrix.to/#/")[-1])
+            room_ref = fragment.split("?")[0].split("/")[0]
+            if (room_ref.startswith("#") or room_ref.startswith("!")) and ":" in room_ref:
+                return room_ref
+        # matrix: URI — room alias: matrix:r/localpart:server
+        if href.startswith("matrix:r/"):
+            rest = href[len("matrix:r/"):].split("?")[0]
+            if ":" in rest:
+                return f"#{rest}"
+        # matrix: URI — room ID: matrix:roomid/!id:server
+        if href.startswith("matrix:roomid/"):
+            rest = href[len("matrix:roomid/"):].split("?")[0]
+            if rest.startswith("!") and ":" in rest:
+                return rest
+    return None
 
 
 def safe_get(dictionary: Dict[str, Any], key: str, default: Any = None) -> Any:

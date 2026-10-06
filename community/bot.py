@@ -378,7 +378,7 @@ class CommunityBot(Plugin):
                 power_level_override=power_level_override,
                 creation_content=creation_content,
                 room_version=self.config.get("room_version", "1"),
-                initial_state=initial_state,
+                initial_state=initial_state or [],
             )
 
             # Verify the space version and type were set correctly
@@ -606,9 +606,21 @@ class CommunityBot(Plugin):
         mean the current room (``evt.room_id``). Returns the room ID, or ``None``
         if resolution failed (and, when ``evt`` is given, replies with an error).
         """
+        room = (room or "").strip()
         if not room:
             return str(evt.room_id) if evt else None
         if room.startswith("#"):
+            # Clients often render aliases as truncated link text (e.g. "#ex+").
+            # If the arg has no :server part it's definitely incomplete; recover
+            # the real alias from the formatted body before trying to resolve.
+            if ":" not in room and evt:
+                formatted = getattr(evt.content, "formatted_body", None)
+                if formatted:
+                    extracted = common_utils.extract_room_ref_from_formatted_body(
+                        formatted, room
+                    )
+                    if extracted:
+                        room = extracted
             try:
                 resolved = await self.client.resolve_room_alias(room)
                 return resolved["room_id"]
@@ -636,6 +648,14 @@ class CommunityBot(Plugin):
         if not target:
             return None
         if target.startswith("#"):
+            if ":" not in target and evt:
+                formatted = getattr(evt.content, "formatted_body", None)
+                if formatted:
+                    extracted = common_utils.extract_room_ref_from_formatted_body(
+                        formatted, target
+                    )
+                    if extracted:
+                        target = extracted
             try:
                 resolved = await self.client.resolve_room_alias(target)
                 return resolved["room_id"]
@@ -2354,24 +2374,15 @@ class CommunityBot(Plugin):
         help="redact messages from a specific user (optionally in a specific room)",
     )
     @command.argument("mxid", "full matrix ID", required=True)
-    @command.argument("room", "room ID", required=False)
+    @command.argument("room", "room ID", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def user_redact(self, evt: MessageEvent, mxid: UserID, room: str) -> None:
         await evt.mark_read()
 
-        if room:
-            if room.startswith("#"):
-                try:
-                    room_id = await self.client.resolve_room_alias(room)
-                    room_id = room_id["room_id"]
-                except:
-                    evt.reply("i couldn't resolve that alias, sorry")
-                    return
-            else:
-                room_id = room
-        else:
-            room_id = evt.room_id
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
+            return
 
         # get list of messages to redact in this room
         messages = await self.get_messages_to_redact(room_id, mxid)
@@ -2688,6 +2699,13 @@ class CommunityBot(Plugin):
                     )
                 return (rows[idx - 1]["room_id"], None)
         # alias / room id / current room
+        # If alias is incomplete (no :server), try to recover from formatted body.
+        if raw and raw.startswith("#") and ":" not in raw:
+            formatted = getattr(evt.content, "formatted_body", None)
+            if formatted:
+                extracted = common_utils.extract_room_ref_from_formatted_body(formatted, raw)
+                if extracted:
+                    raw = extracted
         return await event_utils.resolve_room_id(self.client, raw or None, evt.room_id)
 
     async def _resolve_event_target(self, evt: MessageEvent, args: str):
@@ -3869,31 +3887,16 @@ class CommunityBot(Plugin):
             return  # Error already logged and reported to user by create_room
 
     @room.subcommand("archive", help="archive a room")
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def room_archive(self, evt: MessageEvent, room: str) -> None:
         await evt.mark_read()
 
-        if not room:
-            room_id = evt.room_id
-            self.log.debug(f"DEBUG room we are archiving is {room_id}")
-        elif room and room.startswith("#"):
-            try:
-                self.log.debug(f"DEBUG trying to resolve alias {room}")
-                room_id = await self.client.resolve_room_alias(room)
-                room_id = room_id["room_id"]
-                self.log.debug(f"DEBUG room we are archiving is {room_id}")
-            except Exception as e:
-                await evt.reply("i couldn't resolve that alias, sorry")
-                self.log.error(f"error resolving alias {room}: {e}")
-                return
-        elif room and room.startswith("!"):
-            room_id = room
-            self.log.debug(f"DEBUG room we are archiving is {room_id}")
-        else:
-            await evt.reply("i don't recognize that room, sorry")
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
             return
+        self.log.debug(f"DEBUG room we are archiving is {room_id}")
 
         success = await self.do_archive_room(room_id, evt)
 
@@ -3902,7 +3905,7 @@ class CommunityBot(Plugin):
             await evt.respond("Room has been archived.")
 
     @room.subcommand("replace", help="replace a room with a new one")
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
     async def room_replace(self, evt: MessageEvent, room: str) -> None:
@@ -3911,17 +3914,10 @@ class CommunityBot(Plugin):
 
         await evt.mark_read()
 
-        if not room:
-            room = evt.room_id
-        # first we need to get relevant room state of the room we want to replace
-        # this includes the room name, alias, and join rules
-        if room.startswith("#"):
-            room_id = await self.client.resolve_room_alias(room)
-            room_id = room_id["room_id"]
-            self.log.info(f"Resolved alias '{room}' to room ID: {room_id}")
-        else:
-            room_id = room
-            self.log.info(f"Using direct room ID: {room_id}")
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
+            return
+        self.log.info(f"Using room ID: {room_id}")
 
         # Check bot permissions in the old room
         self.log.info(f"=== CHECKING BOT PERMISSIONS ===")
@@ -4442,7 +4438,7 @@ class CommunityBot(Plugin):
         "guests",
         help="generate a list of members in a room who are not members of the parent space",
     )
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def room_guests(self, evt: MessageEvent, room: str) -> None:
@@ -4450,19 +4446,9 @@ class CommunityBot(Plugin):
             self.config["parent_room"]
         )
         space_members_list = space_members_obj.keys()
-        room_id = None
-        if room:
-            if room.startswith("#"):
-                try:
-                    thatroom_id = await self.client.resolve_room_alias(room)
-                    room_id = thatroom_id["room_id"]
-                except:
-                    evt.reply("i don't recognize that room, sorry")
-                    return
-            else:
-                room_id = room
-        else:
-            room_id = evt.room_id
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
+            return
         room_members_obj = await self.client.get_joined_members(room_id)
         room_members_list = room_members_obj.keys()
 
@@ -4480,23 +4466,13 @@ class CommunityBot(Plugin):
             await evt.respond(f"something went wrong: {e}")
 
     @room.subcommand("id", help="return the matrix room ID of this, or a given, room")
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def room_id(self, evt: MessageEvent, room: str) -> None:
-        room_id = None
-        if room:
-            if room.startswith("#"):
-                try:
-                    thatroom_id = await self.client.resolve_room_alias(room)
-                    room_id = thatroom_id["room_id"]
-                except:
-                    evt.reply("i don't recognize that room, sorry")
-                    return
-            else:
-                room_id = room
-        else:
-            room_id = evt.room_id
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
+            return
         try:
             await evt.reply(f"Room ID is: {room_id}")
         except Exception as e:
@@ -4505,24 +4481,13 @@ class CommunityBot(Plugin):
     @room.subcommand(
         "version", help="return the room version and creators of this, or a given, room"
     )
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def room_version(self, evt: MessageEvent, room: str) -> None:
-        room_id = None
-        if room:
-            if room.startswith("#"):
-                try:
-                    thatroom_id = await self.client.resolve_room_alias(room)
-                    room_id = thatroom_id["room_id"]
-                except:
-                    evt.reply("i don't recognize that room, sorry")
-                    return
-            else:
-                room_id = room
-        else:
-            room_id = evt.room_id
-
+        room_id = await self._resolve_room_arg(room, evt)
+        if room_id is None:
+            return
         try:
             room_version, creators = await self.get_room_version_and_creators(room_id)
 
@@ -4653,6 +4618,7 @@ class CommunityBot(Plugin):
                     room_power_levels = await self.client.get_state_event(
                         room, EventType.ROOM_POWER_LEVELS
                     )
+                    old_room_users = dict(room_power_levels.users)
                     room_version, room_creators = (
                         await self.get_room_version_and_creators(room)
                     )
@@ -4765,6 +4731,13 @@ class CommunityBot(Plugin):
                         room, EventType.ROOM_POWER_LEVELS, room_power_levels
                     )
                     success_list.append(roomname or room)
+                    # Auto-invite users newly promoted to or above auto_invite_pl.
+                    invite_threshold = self.config.get("auto_invite_pl", 50)
+                    if invite_threshold is not None:
+                        for user, new_level in room_power_levels.users.items():
+                            old_level = old_room_users.get(user, 0)
+                            if old_level < invite_threshold <= new_level:
+                                await self._maybe_auto_invite(room, user)
                     await asyncio.sleep(self.config["sleep"])
 
                 except Exception as e:
@@ -6006,7 +5979,7 @@ class CommunityBot(Plugin):
         "doctor",
         help="review bot permissions across the space and all rooms to identify potential issues",
     )
-    @command.argument("room", required=False)
+    @command.argument("room", required=False, pass_raw=True)
     async def doctor_check(self, evt: MessageEvent, room: str = None) -> None:
         if not await self.check_parent_room(evt):
             return
