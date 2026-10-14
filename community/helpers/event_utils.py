@@ -68,16 +68,23 @@ RSVP_MAYBE_KEYS = {"🤔", "🤔️"}
 
 # Additional guests are indicated with keycap number reactions 1️⃣..9️⃣. A user's
 # guest count is the value of their most-recent active number reaction; removing
-# (redacting) it drops the count. There is deliberately no 0️⃣ — "no guests" is
-# simply the absence of a number reaction.
+# (redacting) it drops the count. 0️⃣ and ➖ are "clear" reactions that set guest
+# count to 0 — useful when the user can no longer find the original reaction to
+# redact it. The bot does not seed these reactions on description messages.
 MAX_SEEDED_GUEST_REACTIONS = 9
 # keycap emoji = digit + optional VS16 (U+FE0F) + combining enclosing keycap (U+20E3)
-_KEYCAP_RE = re.compile("^([1-9])️?⃣$")
+_KEYCAP_RE = re.compile("^([0-9])️?⃣$")
+# minus/remove emoji (with and without the variation selector)
+GUEST_CLEAR_KEYS = {"➖", "➖️"}
 
 
 def guest_count_from_reaction_key(key: str) -> Optional[int]:
-    """Return the guest count (1-9) for a keycap number reaction, else None."""
-    m = _KEYCAP_RE.match((key or "").strip())
+    """Return the guest count (0-9) for a keycap number or clear reaction, else None.
+    0️⃣ and ➖ return 0 (clear guest count). 1️⃣-9️⃣ return 1-9."""
+    key_stripped = (key or "").strip()
+    if key_stripped in GUEST_CLEAR_KEYS:
+        return 0
+    m = _KEYCAP_RE.match(key_stripped)
     return int(m.group(1)) if m else None
 
 
@@ -521,7 +528,7 @@ def guest_rsvp_instructions(max_additional_guests: int) -> str:
         top = min(max_additional_guests, MAX_SEEDED_GUEST_REACTIONS)
     extra = (
         f". To bring guests, also react with a number 1️⃣–{top}️⃣ "
-        "for how many additional people you're bringing (remove the reaction to undo)."
+        "for how many additional people you're bringing (remove the reaction to undo, or react 0️⃣ / ➖ to clear)."
     )
     if max_additional_guests < 0 or max_additional_guests > MAX_SEEDED_GUEST_REACTIONS:
         extra += f" (limit {'no limit' if max_additional_guests < 0 else max_additional_guests})."

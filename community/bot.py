@@ -2047,10 +2047,11 @@ class CommunityBot(Plugin):
                     await self.client.invite_user(event_room_id, evt.sender)
             except Exception as e:
                 self.log.warning(f"Failed to invite {evt.sender} to event room: {e}")
-        elif kind[0] == "guest":
+        elif kind[0] == "guest" and kind[1] > 0:
             # They set a guest count but haven't RSVP'd yes/maybe for themselves.
             # The number reaction is still recorded, so once they RSVP the guests
             # are counted automatically; nudge them to do so.
+            # Skip the nudge for 0️⃣/➖ clear reactions (count=0 means "remove guests").
             await self._prompt_guest_needs_rsvp(evt, kind[1])
         return True
 
@@ -3086,21 +3087,8 @@ class CommunityBot(Plugin):
         msg_event_id = await evt.respond(html, allow_html=True)
         if msg_event_id:
             now_ms = int(time.time() * 1000)
-            # Seed status reactions plus keycap number reactions up to the event's
-            # guest cap. Older clients lack a send_reaction helper, so send raw
-            # m.reaction events.
-            for key in event_utils.seed_reaction_keys(max_guests):
-                await self.client.send_message_event(
-                    evt.room_id,
-                    EventType.REACTION,
-                    {
-                        "m.relates_to": {
-                            "rel_type": "m.annotation",
-                            "event_id": msg_event_id,
-                            "key": key,
-                        }
-                    },
-                )
+            # Track the description FIRST so that RSVP reactions are recorded even
+            # if the reaction seeding below is rate-limited or partially fails.
             await self.database.execute(
                 """INSERT INTO event_descriptions
                        (description_event_id, description_room_id, event_room_id, created_ts)
@@ -3111,6 +3099,24 @@ class CommunityBot(Plugin):
                 room_id,
                 now_ms,
             )
+            # Seed status reactions plus keycap number reactions up to the event's
+            # guest cap. Older clients lack a send_reaction helper, so send raw
+            # m.reaction events.
+            for key in event_utils.seed_reaction_keys(max_guests):
+                try:
+                    await self.client.send_message_event(
+                        evt.room_id,
+                        EventType.REACTION,
+                        {
+                            "m.relates_to": {
+                                "rel_type": "m.annotation",
+                                "event_id": msg_event_id,
+                                "key": key,
+                            }
+                        },
+                    )
+                except Exception as e:
+                    self.log.debug(f"Failed to seed reaction {key} on {msg_event_id}: {e}")
 
     @event.subcommand(
         "update",

@@ -829,3 +829,52 @@ class TestEventAddressingRealDB:
             assert await _labels(db, EV_A) == ["A1"]
         finally:
             await db.stop()
+
+
+class TestGuestClearReactions:
+    def test_keycap_zero_returns_zero(self):
+        assert event_utils.guest_count_from_reaction_key("0️⃣") == 0
+
+    def test_minus_returns_zero(self):
+        assert event_utils.guest_count_from_reaction_key("➖") == 0
+
+    def test_minus_with_variation_selector(self):
+        assert event_utils.guest_count_from_reaction_key("➖️") == 0
+
+    def test_classify_keycap_zero_is_guest(self):
+        assert event_utils.classify_reaction("0️⃣") == ("guest", 0)
+
+    def test_classify_minus_is_guest(self):
+        assert event_utils.classify_reaction("➖") == ("guest", 0)
+
+    def test_compute_rsvp_clear_overrides_prior_guest_count(self):
+        """0️⃣ with a later timestamp overrides an earlier 3️⃣."""
+        reactions = [
+            {"key": "👍", "created_ts": 1},
+            {"key": "3️⃣", "created_ts": 100},
+            {"key": "0️⃣", "created_ts": 200},
+        ]
+        assert event_utils.compute_rsvp_from_reactions(reactions) == ("yes", 0)
+
+    def test_compute_rsvp_minus_overrides_prior_guest_count(self):
+        """➖ with a later timestamp overrides an earlier 2️⃣."""
+        reactions = [
+            {"key": "👍", "created_ts": 1},
+            {"key": "2️⃣", "created_ts": 100},
+            {"key": "➖", "created_ts": 200},
+        ]
+        assert event_utils.compute_rsvp_from_reactions(reactions) == ("yes", 0)
+
+    def test_compute_rsvp_later_number_beats_clear(self):
+        """A later 2️⃣ overrides an earlier 0️⃣."""
+        reactions = [
+            {"key": "👍", "created_ts": 1},
+            {"key": "0️⃣", "created_ts": 100},
+            {"key": "2️⃣", "created_ts": 200},
+        ]
+        assert event_utils.compute_rsvp_from_reactions(reactions) == ("yes", 2)
+
+    def test_one_thru_nine_still_work(self):
+        """Ensure existing 1-9 keycaps still parse correctly."""
+        for n in range(1, 10):
+            assert event_utils.guest_count_from_reaction_key(f"{n}️⃣") == n
