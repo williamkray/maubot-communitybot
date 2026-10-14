@@ -132,3 +132,32 @@ async def upgrade_v8(conn: Connection) -> None:
                 value TEXT NOT NULL
             )"""
     )
+
+
+@upgrade_table.register(description="Multi-description support for event RSVP")
+async def upgrade_v9(conn: Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE event_descriptions (
+            description_event_id TEXT PRIMARY KEY,
+            description_room_id  TEXT NOT NULL,
+            event_room_id        TEXT NOT NULL,
+            created_ts           BIGINT NOT NULL
+        )"""
+    )
+    await conn.execute(
+        "CREATE INDEX idx_event_descriptions_event_room "
+        "ON event_descriptions(event_room_id)"
+    )
+    # Migrate any existing single description into the new table.
+    await conn.execute(
+        """INSERT INTO event_descriptions
+               (description_event_id, description_room_id, event_room_id, created_ts)
+           SELECT description_event_id, description_room_id, room_id, created_ts
+           FROM community_events
+           WHERE description_event_id IS NOT NULL
+             AND description_room_id  IS NOT NULL"""
+    )
+    # Remove the now-redundant columns from community_events.
+    await conn.execute("DROP INDEX IF EXISTS idx_community_events_description_event_id")
+    await conn.execute("ALTER TABLE community_events DROP COLUMN description_event_id")
+    await conn.execute("ALTER TABLE community_events DROP COLUMN description_room_id")

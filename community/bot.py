@@ -1999,7 +1999,10 @@ class CommunityBot(Plugin):
         if not kind:
             return False  # not a status or guest-count reaction
         row = await self.database.fetchrow(
-            "SELECT room_id, max_additional_guests FROM community_events WHERE description_event_id = $1",
+            """SELECT ce.room_id, ce.max_additional_guests
+               FROM event_descriptions ed
+               JOIN community_events ce ON ce.room_id = ed.event_room_id
+               WHERE ed.description_event_id = $1""",
             target_event_id,
         )
         if not (row and await self.is_user_in_parent_space(evt.sender)):
@@ -2138,7 +2141,8 @@ class CommunityBot(Plugin):
     @event.on(EventType.ROOM_REDACTION)
     async def handle_event_reaction_redaction(self, evt: RedactionEvent) -> None:
         """When a user un-reacts (redacts their reaction) on an event, drop the
-        tracked reaction and recompute their RSVP so the headcount stays correct."""
+        tracked reaction and recompute their RSVP so the headcount stays correct.
+        Also handles the case where the description message itself is redacted."""
         redacted_id = getattr(evt, "redacts", None)
         if not redacted_id:
             return
@@ -2146,12 +2150,18 @@ class CommunityBot(Plugin):
             "SELECT event_room_id, user_id FROM event_reactions WHERE reaction_event_id = $1",
             str(redacted_id),
         )
-        if not row:
-            return  # not a tracked RSVP reaction
-        await self.database.execute(
-            "DELETE FROM event_reactions WHERE reaction_event_id = $1", str(redacted_id)
-        )
-        await self._recompute_user_rsvp(row["event_room_id"], row["user_id"])
+        if row:
+            await self.database.execute(
+                "DELETE FROM event_reactions WHERE reaction_event_id = $1", str(redacted_id)
+            )
+            await self._recompute_user_rsvp(row["event_room_id"], row["user_id"])
+        else:
+            # The description message itself was redacted — remove it from tracking.
+            # RSVPs already in event_reactions are keyed on event_room_id and remain intact.
+            await self.database.execute(
+                "DELETE FROM event_descriptions WHERE description_event_id = $1",
+                str(redacted_id),
+            )
 
     @staticmethod
     def _parse_max_guests_arg(val: str) -> int:
@@ -2166,31 +2176,36 @@ class CommunityBot(Plugin):
         return n if n >= 0 else -1
 
     async def _seed_guest_reactions(self, event_row, max_guests: int) -> None:
-        """Add keycap number reactions up to the (new) cap on the event's posted
-        description. Duplicate reactions are ignored by the server, so this is
-        safe to call on cap changes. Over-cap reactions are not removed here, but
-        the cap is still enforced when a user actually reacts."""
-        desc_event_id = event_row["description_event_id"]
-        desc_room_id = event_row["description_room_id"]
-        if not (desc_event_id and desc_room_id):
+        """Add keycap number reactions up to the (new) cap on all posted
+        description messages for this event. Duplicate reactions are ignored by
+        the server, so this is safe to call on cap changes."""
+        desc_rows = await self.database.fetch(
+            "SELECT description_event_id, description_room_id "
+            "FROM event_descriptions WHERE event_room_id = $1",
+            event_row["room_id"],
+        )
+        if not desc_rows:
             return
-        for key in event_utils.seed_reaction_keys(max_guests):
-            if event_utils.guest_count_from_reaction_key(key) is None:
-                continue  # status reactions are already present
-            try:
-                await self.client.send_message_event(
-                    desc_room_id,
-                    EventType.REACTION,
-                    {
-                        "m.relates_to": {
-                            "rel_type": "m.annotation",
-                            "event_id": desc_event_id,
-                            "key": key,
-                        }
-                    },
-                )
-            except Exception as e:
-                self.log.debug(f"Failed to seed guest reaction {key}: {e}")
+        for desc_row in desc_rows:
+            desc_event_id = desc_row["description_event_id"]
+            desc_room_id = desc_row["description_room_id"]
+            for key in event_utils.seed_reaction_keys(max_guests):
+                if event_utils.guest_count_from_reaction_key(key) is None:
+                    continue  # status reactions are already present
+                try:
+                    await self.client.send_message_event(
+                        desc_room_id,
+                        EventType.REACTION,
+                        {
+                            "m.relates_to": {
+                                "rel_type": "m.annotation",
+                                "event_id": desc_event_id,
+                                "key": key,
+                            }
+                        },
+                    )
+                except Exception as e:
+                    self.log.debug(f"Failed to seed guest reaction {key} on {desc_event_id}: {e}")
 
     def _matrix_to_link(self, target: str, label: str = None) -> str:
         """Build an HTML matrix.to link for a user/room/event target.
@@ -2606,7 +2621,7 @@ class CommunityBot(Plugin):
             "attendees, add-organizer, add-link, links, remove-link, edit-link, ics, cancel"
         )
 
-    @event.subcommand("create", help="create a new event (you become the host)")
+    @event.subcommand("create", help="create a new event (you become the host). Optional: --date YYYY-MM-DD --time HH:MM TZ --location ... --description ...")
     @command.argument("name", pass_raw=True, required=True)
     @decorators.require_parent_room
     async def event_create(self, evt: MessageEvent, name: str) -> None:
@@ -2614,6 +2629,10 @@ class CommunityBot(Plugin):
             await evt.reply("Only community (space) members can create events.")
             return
         name = (name or "").strip()
+        # Split optional flags from the name: everything before the first " --" is the name.
+        parts = name.split(" --", 1)
+        name = parts[0].strip()
+        flags_raw = "--" + parts[1] if len(parts) > 1 else ""
         if not name:
             await evt.reply("Please provide an event name.")
             return
@@ -2637,19 +2656,106 @@ class CommunityBot(Plugin):
         if not result:
             return
         room_id, room_alias = result
+        # Parse optional creation-time flags (same syntax as event update).
+        date_val = time_val = location_val = description_val = None
+        max_guests_val = None
+        raw_chunks = flags_raw.split(" --")
+        for raw_chunk in raw_chunks:
+            s = raw_chunk.strip().lstrip("-").strip()
+            if not s:
+                continue
+            flag_parts = s.split(None, 1)
+            key = (flag_parts[0] or "").lower()
+            val = flag_parts[1].strip() if len(flag_parts) > 1 else ""
+            if key == "date" and val:
+                date_val = val.split()[0]
+            elif key == "time" and val:
+                time_val = val
+            elif key == "location":
+                location_val = val
+            elif key == "description":
+                description_val = val
+            elif key in ("max-guests", "maxguests", "guests") and val:
+                try:
+                    max_guests_val = self._parse_max_guests_arg(val)
+                except ValueError:
+                    await evt.reply(
+                        "Invalid --max-guests value. Use a number (e.g. 2), "
+                        "`none` to disallow guests, or `unlimited`."
+                    )
+                    return
+        event_start_ts = 0
+        event_end_ts = None
+        new_timezone = event_utils.DEFAULT_TIMEZONE
+        adjust_note = None
+        if date_val or time_val:
+            try:
+                from datetime import datetime as dt, timezone as tz
+                import re as _re
+                base_zone = event_utils._resolve_timezone(new_timezone) or tz.utc
+                existing_date = dt.now(tz.utc).date()
+                if date_val:
+                    target_date = dt.strptime(date_val, "%Y-%m-%d").date()
+                else:
+                    target_date = existing_date
+                if time_val:
+                    time_val = _re.sub(r"\s*-\s*", " - ", time_val.strip(), count=1)
+                    m_tz = _re.search(r"\b([A-Za-z]{2,5})\b$", time_val.strip())
+                    if m_tz:
+                        orig_tz = m_tz.group(1).upper()
+                        month = target_date.month
+                        is_dst_month = 3 <= month <= 10
+                        desired_tz = orig_tz
+                        if orig_tz in ("PST", "PDT"):
+                            desired_tz = "PDT" if is_dst_month else "PST"
+                        elif orig_tz in ("MST", "MDT"):
+                            desired_tz = "MDT" if is_dst_month else "MST"
+                        elif orig_tz in ("CST", "CDT"):
+                            desired_tz = "CDT" if is_dst_month else "CST"
+                        elif orig_tz in ("EST", "EDT"):
+                            desired_tz = "EDT" if is_dst_month else "EST"
+                        elif orig_tz in ("AKST", "AKDT"):
+                            desired_tz = "AKDT" if is_dst_month else "AKST"
+                        if desired_tz != orig_tz:
+                            start, end = m_tz.span(1)
+                            time_val = time_val[:start] + desired_tz + time_val[end:]
+                            adjust_note = (
+                                f"Interpreting {orig_tz} as {desired_tz} on {target_date.isoformat()} "
+                                "based on daylight saving time. For precise control, use an IANA timezone "
+                                "like America/Los_Angeles instead of an abbreviation."
+                            )
+                if time_val:
+                    event_start_ts, event_end_ts, new_timezone = (
+                        event_utils.parse_time_span_with_timezone(
+                            time_val, target_date, default_tz=new_timezone
+                        )
+                    )
+                else:
+                    # date only: default to 12:00 on that date
+                    event_start_ts, event_end_ts, new_timezone = (
+                        event_utils.parse_time_span_with_timezone(
+                            "12:00", target_date, default_tz=new_timezone
+                        )
+                    )
+            except (ValueError, TypeError) as e:
+                hint = getattr(event_utils, "TIME_FORMAT_HINT", "Use --date YYYY-MM-DD and --time HH:MM or HH:MM TZ.")
+                await evt.reply(f"Invalid date/time: {e}. {hint}")
+                return
         now_ms = int(time.time() * 1000)
         max_guests = int(self.config.get("events_default_max_additional_guests", 1))
+        if max_guests_val is not None:
+            max_guests = max_guests_val
         topic = event_utils.format_event_topic(
             name=name,
-            start_ts=0,
-            end_ts=None,
-            location=None,
+            start_ts=event_start_ts,
+            end_ts=event_end_ts,
+            location=location_val,
             host_id=str(evt.sender),
             organizers=[],
-            description=None,
+            description=description_val,
             extra_links=[],
             room_link=room_alias,
-            timezone_str=event_utils.DEFAULT_TIMEZONE,
+            timezone_str=new_timezone,
             max_additional_guests=max_guests,
         )
         try:
@@ -2666,21 +2772,28 @@ class CommunityBot(Plugin):
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)""",
             room_id,
             name,
-            None,
-            0,
-            None,
-            None,
+            description_val,
+            event_start_ts,
+            event_end_ts,
+            location_val,
             str(evt.sender),
             "[]",
             "[]",
             now_ms,
-            event_utils.DEFAULT_TIMEZONE,
+            new_timezone,
             max_guests,
         )
-        await evt.respond(
-            "Event created (time is in UTC until you set it). Use !community event update <room> --date YYYY-MM-DD --time HH:MM TZ to set date, time and timezone (e.g. --time 15:00 PST). "
-            "Use !community event describe <room> to post an event description with RSVP reactions."
+        parts_reply = []
+        if adjust_note:
+            parts_reply.append(adjust_note)
+        if not (date_val or time_val):
+            parts_reply.append(
+                "Use <code>!community event update &lt;room&gt; --date YYYY-MM-DD --time HH:MM TZ</code> to set the date and time."
+            )
+        parts_reply.append(
+            "Use <code>!community event describe &lt;room&gt;</code> to post an event description with RSVP reactions."
         )
+        await evt.respond("<br/>".join(parts_reply), allow_html=True)
 
     @event.subcommand("list", help="list current and upcoming events (and recent past)")
     @decorators.require_parent_room
@@ -2896,10 +3009,16 @@ class CommunityBot(Plugin):
         except Exception as e:
             self.log.warning(f"Failed to update event room topic: {e}")
 
-        # 2) edit the posted description message, if one exists
-        desc_event_id = event_row["description_event_id"]
-        desc_room_id = event_row["description_room_id"]
-        if desc_event_id and desc_room_id:
+        # 2) edit all posted description messages
+        desc_rows = await self.database.fetch(
+            "SELECT description_event_id, description_room_id "
+            "FROM event_descriptions WHERE event_room_id = $1",
+            room_id,
+        )
+        all_ok = True
+        for desc_row in desc_rows:
+            desc_event_id = desc_row["description_event_id"]
+            desc_room_id = desc_row["description_room_id"]
             common = dict(
                 name=event_row["name"],
                 start_ts=start_ts,
@@ -2918,9 +3037,12 @@ class CommunityBot(Plugin):
             try:
                 await self._edit_message(desc_room_id, desc_event_id, text, html)
             except Exception as e:
-                self.log.warning(f"Failed to update event description message: {e}")
-                return False
-        return True
+                self.log.warning(
+                    f"Failed to update event description message {desc_event_id} "
+                    f"in {desc_room_id}: {e}"
+                )
+                all_ok = False
+        return all_ok
 
     @event.subcommand(
         "describe",
@@ -2940,35 +3062,6 @@ class CommunityBot(Plugin):
         if not event_row:
             await evt.reply("This room is not a registered community event.")
             return
-
-        # Idempotent: if a description has already been posted, refresh that
-        # message in place instead of posting a second one with its own
-        # (untracked) reactions.
-        if event_row["description_event_id"] and event_row["description_room_id"]:
-            synced = await self._sync_event_presentation(room_id)
-            if synced:
-                desc_link = self._matrix_to_link(
-                    f"{event_row['description_room_id']}/{event_row['description_event_id']}",
-                    "the existing description message",
-                )
-                await evt.reply(
-                    f"This event already has a description, see {desc_link}. "
-                    "I refreshed it to match the event's current details (running "
-                    "<code>describe</code> again just re-syncs it; it won't post a duplicate). "
-                    "<br/>To move the description to a different room, delete that message and run "
-                    "<code>describe</code> in the room you want it. Deleting it and re-posting "
-                    "does <b>not</b> affect anyone's RSVPs or the headcount.",
-                    allow_html=True,
-                )
-                return
-            # The tracked description couldn't be edited (likely redacted/deleted).
-            # Forget it so this describe call falls through and reposts a fresh one.
-            await self.database.execute(
-                """UPDATE community_events
-                   SET description_event_id = NULL, description_room_id = NULL
-                   WHERE room_id = $1""",
-                room_id,
-            )
 
         orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
         links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
@@ -2992,6 +3085,7 @@ class CommunityBot(Plugin):
         )
         msg_event_id = await evt.respond(html, allow_html=True)
         if msg_event_id:
+            now_ms = int(time.time() * 1000)
             # Seed status reactions plus keycap number reactions up to the event's
             # guest cap. Older clients lack a send_reaction helper, so send raw
             # m.reaction events.
@@ -3008,11 +3102,14 @@ class CommunityBot(Plugin):
                     },
                 )
             await self.database.execute(
-                """UPDATE community_events SET description_event_id = $1, description_room_id = $2
-                 WHERE room_id = $3""",
-                msg_event_id,
-                evt.room_id,
+                """INSERT INTO event_descriptions
+                       (description_event_id, description_room_id, event_room_id, created_ts)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (description_event_id) DO NOTHING""",
+                str(msg_event_id),
+                str(evt.room_id),
                 room_id,
+                now_ms,
             )
 
     @event.subcommand(
@@ -3437,6 +3534,12 @@ class CommunityBot(Plugin):
             return
         # Remove the event registration and its RSVPs. The room itself is left
         # intact (archive it separately with !community room archive if desired).
+        await self.database.execute(
+            "DELETE FROM event_descriptions WHERE event_room_id = $1", room_id
+        )
+        await self.database.execute(
+            "DELETE FROM event_reactions WHERE event_room_id = $1", room_id
+        )
         await self.database.execute(
             "DELETE FROM event_rsvps WHERE event_room_id = $1", room_id
         )

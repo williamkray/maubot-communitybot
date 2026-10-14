@@ -267,22 +267,30 @@ async def _make_db():
     await db.execute("DELETE FROM community_events")
     await db.execute("DELETE FROM event_rsvps")
     await db.execute("DELETE FROM event_reactions")
+    await db.execute("DELETE FROM event_descriptions")
     return db
 
 
 async def _seed_event(db, max_guests=1):
     await db.execute(
         """INSERT INTO community_events
-           (room_id, name, event_start_ts, host_id, created_ts,
-            description_event_id, max_additional_guests)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+           (room_id, name, event_start_ts, host_id, created_ts, max_additional_guests)
+           VALUES ($1, $2, $3, $4, $5, $6)""",
         EVENT_ROOM,
         "Test Event",
         1_700_000_000_000,
         "@host:example.com",
         1_700_000_000_000,
-        DESC_EVENT_ID,
         max_guests,
+    )
+    await db.execute(
+        """INSERT INTO event_descriptions
+               (description_event_id, description_room_id, event_room_id, created_ts)
+           VALUES ($1, $2, $3, $4)""",
+        DESC_EVENT_ID,
+        "!descroom:example.com",
+        EVENT_ROOM,
+        1_700_000_000_000,
     )
 
 
@@ -466,6 +474,79 @@ class TestRSVPDerivedModelRealDB:
             row = await _fetch_rsvp(db)
             assert (row["rsvp_status"], row["guest_count"]) == ("yes", 2)
             bot.client.invite_user.assert_awaited()
+        finally:
+            await db.stop()
+
+
+class TestMultiDescription:
+    @pytest.mark.asyncio
+    async def test_rsvp_coalesces_across_two_descriptions(self):
+        """Reactions on two different description messages coalesce into one RSVP row,
+        with most-recent timestamp winning globally."""
+        db = await _make_db()
+        try:
+            await _seed_event(db)
+            await db.execute(
+                """INSERT INTO event_descriptions
+                       (description_event_id, description_room_id, event_room_id, created_ts)
+                   VALUES ($1, $2, $3, $4)""",
+                "$desc2:example.com",
+                "!otherroom:example.com",
+                EVENT_ROOM,
+                1_700_000_001_000,
+            )
+            bot = _make_rsvp_bot(db)
+
+            # React 👍 on description 1 (ts=100)
+            evt1 = _make_reaction("👍", "$a", ts=100)
+            evt1.content.relates_to.event_id = DESC_EVENT_ID
+            assert await CommunityBot.handle_event_rsvp(bot, evt1) is True
+
+            # React 🤔 on description 2 (ts=200) — most-recent wins
+            evt2 = _make_reaction("🤔", "$b", ts=200)
+            evt2.content.relates_to.event_id = "$desc2:example.com"
+            assert await CommunityBot.handle_event_rsvp(bot, evt2) is True
+
+            row = await _fetch_rsvp(db)
+            assert row["rsvp_status"] == "maybe"
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_description_redaction_removes_tracking_row(self):
+        """Redacting a description message removes it from tracking; existing RSVPs are unaffected."""
+        db = await _make_db()
+        try:
+            await _seed_event(db)
+            bot = _make_rsvp_bot(db)
+            bot.handle_event_reaction_redaction = CommunityBot.handle_event_reaction_redaction.__get__(bot)
+
+            # RSVP first
+            await CommunityBot.handle_event_rsvp(bot, _make_reaction("👍", "$r1", ts=1))
+            assert (await _fetch_rsvp(db))["rsvp_status"] == "yes"
+
+            # Redact the description message itself
+            await CommunityBot.handle_event_reaction_redaction(bot, _make_redaction(DESC_EVENT_ID))
+
+            # Tracking row removed
+            desc_row = await db.fetchrow(
+                "SELECT 1 FROM event_descriptions WHERE description_event_id = $1",
+                DESC_EVENT_ID,
+            )
+            assert desc_row is None
+
+            # RSVP unchanged
+            assert (await _fetch_rsvp(db))["rsvp_status"] == "yes"
+        finally:
+            await db.stop()
+
+    @pytest.mark.asyncio
+    async def test_unknown_redaction_is_noop(self):
+        """Redacting an unknown event ID neither crashes nor corrupts state."""
+        db = await _make_db()
+        try:
+            bot = _make_rsvp_bot(db)
+            await CommunityBot.handle_event_reaction_redaction(bot, _make_redaction("$unknown:example.com"))
         finally:
             await db.stop()
 
