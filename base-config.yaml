@@ -48,6 +48,10 @@ warn_threshold_days: 30
 # subject to removal by the purge command.
 kick_threshold_days: 60
 
+# automatically purge purgeable users every N days, posting a report to the
+# notification room first. 0 or omit to disable.
+auto_purge_days: 0
+
 # track users? empty list disables all tracking, otherwise specify what to track:
 # - "messages": track user activity from messages
 # - "reactions": track user activity from reactions

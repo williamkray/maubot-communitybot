@@ -163,6 +163,10 @@ class ConfigManager:
         """
         return self.config.get("kick_threshold_days", 60)
 
+    def get_auto_purge_days(self) -> int:
+        """Get the auto-purge interval in days. 0 means disabled."""
+        return self.config.get("auto_purge_days", 0)
+
     def get_verification_phrase(self) -> str:
         """Get the verification phrase.
 

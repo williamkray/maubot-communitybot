@@ -122,3 +122,13 @@ async def upgrade_v7(conn: Connection) -> None:
     await conn.execute(
             "CREATE INDEX idx_event_reactions_event_user ON event_reactions(event_room_id, user_id)"
     )
+
+
+@upgrade_table.register(description="Add bot_state table for persistent key-value bot state")
+async def upgrade_v8(conn: Connection) -> None:
+    await conn.execute(
+            """CREATE TABLE bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )"""
+    )

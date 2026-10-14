@@ -107,11 +107,13 @@ class Config(BaseProxyConfig):
         helper.copy("room_version")
         helper.copy("events_encrypt_rooms")
         helper.copy("events_default_max_additional_guests")
+        helper.copy("auto_purge_days")
 
 
 class CommunityBot(Plugin):
 
     _redaction_tasks: asyncio.Task = None
+    _auto_purge_task: asyncio.Task = None
     _verification_states: Dict[str, Dict] = {}
     # Cached flattened list of all rooms in the managed space tree (including
     # nested subspaces). None means "not yet computed / invalidated". Rebuilt
@@ -127,6 +129,8 @@ class CommunityBot(Plugin):
         self.client.add_dispatcher(MembershipEventDispatcher)
         # Start background redaction task
         self._redaction_tasks = asyncio.create_task(self._redaction_loop())
+        # Start background auto-purge task
+        self._auto_purge_task = asyncio.create_task(self._auto_purge_loop())
         # Clean up stale verification states
         await self.cleanup_stale_verification_states()
 
@@ -174,6 +178,8 @@ class CommunityBot(Plugin):
     async def stop(self) -> None:
         if self._redaction_tasks:
             self._redaction_tasks.cancel()
+        if self._auto_purge_task:
+            self._auto_purge_task.cancel()
         await super().stop()
 
     async def user_permitted(
@@ -471,6 +477,71 @@ class CommunityBot(Plugin):
             except Exception as e:
                 self.log.error(f"Error in redaction loop: {e}")
                 await asyncio.sleep(60)  # Wait a minute before retrying on error
+
+    async def _auto_purge_loop(self) -> None:
+        while True:
+            try:
+                auto_purge_days = self.config.get("auto_purge_days", 0)
+                if auto_purge_days and auto_purge_days > 0:
+                    now_ms = int(time.time() * 1000)
+                    interval_ms = int(auto_purge_days * 86400 * 1000)
+                    row = await self.database.fetchrow(
+                        "SELECT value FROM bot_state WHERE key = 'last_auto_purge_ts'"
+                    )
+                    if row is None:
+                        # First run — initialize the clock; purge will fire N days from now.
+                        await self.database.execute(
+                            "INSERT INTO bot_state (key, value) VALUES ('last_auto_purge_ts', $1)",
+                            str(now_ms),
+                        )
+                    elif now_ms - int(row["value"]) >= interval_ms:
+                        await self._run_auto_purge()
+                        await self.database.execute(
+                            "UPDATE bot_state SET value = $1 WHERE key = 'last_auto_purge_ts'",
+                            str(now_ms),
+                        )
+                await asyncio.sleep(3600)  # Check once per hour
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.log.error(f"Error in auto-purge loop: {e}")
+                await asyncio.sleep(3600)
+
+    async def _run_auto_purge(self) -> None:
+        """Post activity reports to the notification room, then kick purgeable users."""
+        if not self.config["notification_room"]:
+            self.log.warning("auto-purge: notification_room not configured, skipping")
+            return
+        if not self.config_manager.is_tracking_enabled():
+            self.log.warning("auto-purge: user tracking disabled, skipping")
+            return
+
+        auto_purge_days = self.config.get("auto_purge_days", 0)
+        await self.do_sync()
+        report = await self.generate_report()
+        warn_days = self.config["warn_threshold_days"]
+        kick_days = self.config["kick_threshold_days"]
+
+        await self._post_notification(
+            f"🕐 Scheduled auto-purge running (every {auto_purge_days} days)"
+        )
+        await self._post_notification(
+            f"<p><b>Users inactive for between {warn_days} and "
+            f"{kick_days} days:</b><br />"
+            f"{'<br />'.join(report['warn_inactive'])} <br /></p>"
+        )
+        await self._post_notification(
+            f"<p><b>Users inactive for at least {kick_days} days:</b><br />"
+            f"{'<br />'.join(report['kick_inactive'])} <br /></p>"
+        )
+
+        purge_list, error_list = await self._execute_purge(report["kick_inactive"])
+
+        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            purge_list=purge_list, error_list=error_list
+        )
+        await self._post_notification(results)
 
     async def do_sync(self) -> None:
         if not self.config_manager.is_tracking_enabled():
@@ -3518,20 +3589,16 @@ class CommunityBot(Plugin):
             self.log.exception("Failed to upload .ics")
             await evt.reply(f"Failed to generate or upload .ics: {e}")
 
-    @community.subcommand("purge", help="kick users for excessive inactivity")
-    @decorators.require_parent_room
-    @decorators.require_permission()
-    async def kick_users(self, evt: MessageEvent) -> None:
-        await evt.mark_read()
+    async def _execute_purge(self, purgeable: list) -> tuple:
+        """Kick purgeable users from all managed rooms.
 
-        msg = await evt.respond("starting the purge...")
-        notif = await self._post_notification(
-            "🧹 Starting inactivity purge…"
-        )
-        report = await self.generate_report()
-        purgeable = report["kick_inactive"]
+        Returns (purge_list, error_list) so the caller can post results.
+        """
+        purgeable = [u for u in purgeable if u != "none"]
+        if not purgeable:
+            await self.do_sync()
+            return {}, {}
         roomlist = await self.get_space_roomlist()
-        # don't forget to kick from the space itself
         roomlist.append(self.config["parent_room"])
         purge_list = {}
         error_list = {}
@@ -3560,11 +3627,19 @@ class CommunityBot(Plugin):
                     error_list[user] = []
                     error_list[user].append(roomname or room)
 
-        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            purge_list=purge_list, error_list=error_list
-        )
-        await evt.respond(results, allow_html=True, edits=msg)
+        await self.do_sync()
+        return purge_list, error_list
+
+    @community.subcommand("purge", help="kick users for excessive inactivity")
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def kick_users(self, evt: MessageEvent) -> None:
+        await evt.mark_read()
+
+        msg = await evt.respond("starting the purge...")
+        notif = await self._post_notification("🧹 Starting inactivity purge…")
+        report = await self.generate_report()
+        purge_list, error_list = await self._execute_purge(report["kick_inactive"])
 
         purged_users = [u for u, rooms in purge_list.items() if rooms]
         readout = (
@@ -3575,8 +3650,11 @@ class CommunityBot(Plugin):
             readout += f" ⚠️ {len(error_list)} user(s) had errors."
         await self._post_notification(readout, edit=notif)
 
-        # sync our database after we've made changes to room memberships
-        await self.do_sync()
+        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
+                recorded:<p><code>{error_list}</code></p>".format(
+            purge_list=purge_list, error_list=error_list
+        )
+        await evt.respond(results, allow_html=True, edits=msg)
 
     @user.subcommand(
         "kick", help="kick a specific user from the community and all rooms"
