@@ -1584,6 +1584,10 @@ class CommunityBot(Plugin):
         if evt.room_id not in space_rooms:
             return
 
+        # only notify for rooms tracked in greeting_rooms, matching join notification scope
+        if str(evt.room_id) not in self.config.get("greeting_rooms", {}):
+            return
+
         template = self.config.get(template_key, "")
         if not template:
             return  # notification disabled by leaving the message blank
