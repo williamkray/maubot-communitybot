@@ -9,6 +9,8 @@ import asyncio
 import random
 import asyncpg.exceptions
 from datetime import datetime
+import secrets
+import urllib.parse
 
 from mautrix.client import (
     Client,
@@ -44,7 +46,8 @@ from mautrix.types import (
 from mautrix.errors import MNotFound
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
-from maubot.handlers import command, event
+from maubot.handlers import command, event, web
+from aiohttp.web import Request, Response, json_response
 
 BAN_STATE_EVENT = EventType.find("m.policy.rule.user", EventType.Class.STATE)
 
@@ -66,6 +69,7 @@ from .helpers import (
     diagnostic_utils,
     base_command_handler,
     event_utils,
+    event_web,
 )
 
 
@@ -108,6 +112,9 @@ class Config(BaseProxyConfig):
         helper.copy("events_encrypt_rooms")
         helper.copy("events_default_max_additional_guests")
         helper.copy("auto_purge_days")
+        helper.copy("event_web_base_url")
+        helper.copy("event_web_magiclink_ttl")
+        helper.copy("event_web_session_ttl")
 
 
 class CommunityBot(Plugin):
@@ -2087,8 +2094,11 @@ class CommunityBot(Plugin):
         reactions = [{"key": r["key"], "created_ts": r["created_ts"]} for r in rows]
         result = event_utils.compute_rsvp_from_reactions(reactions)
         if result is None:
+            # Only delete reaction-origin rows. Widget-origin RSVPs persist even
+            # when the user has no active reactions.
             await self.database.execute(
-                "DELETE FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
+                "DELETE FROM event_rsvps "
+                "WHERE event_room_id = $1 AND user_id = $2 AND rsvp_source = 'reaction'",
                 event_room_id,
                 user_id,
             )
@@ -2097,13 +2107,14 @@ class CommunityBot(Plugin):
         now_ms = int(time.time() * 1000)
         await self.database.execute(
             """INSERT INTO event_rsvps
-                 (event_room_id, user_id, rsvp_status, plus_one, guest_count, updated_ts)
-               VALUES ($1, $2, $3, $4, $5, $6)
+                 (event_room_id, user_id, rsvp_status, plus_one, guest_count, updated_ts, rsvp_source)
+               VALUES ($1, $2, $3, $4, $5, $6, 'reaction')
                ON CONFLICT (event_room_id, user_id)
                DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
                  plus_one = EXCLUDED.plus_one,
                  guest_count = EXCLUDED.guest_count,
-                 updated_ts = EXCLUDED.updated_ts""",
+                 updated_ts = EXCLUDED.updated_ts,
+                 rsvp_source = 'reaction'""",
             event_room_id,
             user_id,
             status,
@@ -2623,7 +2634,8 @@ class CommunityBot(Plugin):
         """Main event command - show usage."""
         await evt.reply(
             "Use !community event <subcommand>. Subcommands: create, list, describe, update, "
-            "attendees, add-organizer, add-link, links, remove-link, edit-link, ics, cancel"
+            "attendees, add-organizer, add-link, links, remove-link, edit-link, ics, cancel, "
+            "addwidget, magiclink"
         )
 
     @event.subcommand("create", help="create a new event (you become the host). Optional: --date YYYY-MM-DD --time HH:MM TZ --location ... --description ...")
@@ -2798,6 +2810,12 @@ class CommunityBot(Plugin):
         parts_reply.append(
             "Use <code>!community event describe &lt;room&gt;</code> to post an event description with RSVP reactions."
         )
+        # Auto-add the event widget if the web base URL is available.
+        web_base = self._event_web_base()
+        if web_base:
+            await self._add_event_widget(str(room_id), name, web_base)
+        else:
+            self.log.debug("event_web_base_url not configured; skipping widget for %s", room_id)
         await evt.respond("<br/>".join(parts_reply), allow_html=True)
 
     @event.subcommand("list", help="list current and upcoming events (and recent past)")
@@ -2971,6 +2989,167 @@ class CommunityBot(Plugin):
             },
         }
         await self.client.send_message_event(room_id, EventType.ROOM_MESSAGE, content)
+
+    # ── Event widget infrastructure ─────────────────────────────────────────
+
+    def _event_web_base(self) -> str:
+        """Public base URL for event widget endpoints (no trailing slash)."""
+        override = self.config.get("event_web_base_url", "")
+        if override:
+            return str(override).rstrip("/")
+        try:
+            return str(self.webapp_url).rstrip("/")
+        except Exception:
+            return ""
+
+    async def _resolve_federation_base(self, server_name: str) -> str:
+        try:
+            async with self.http.get(
+                f"https://{server_name}/.well-known/matrix/server"
+            ) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    delegated = data.get("m.server")
+                    if delegated:
+                        return f"https://{delegated}"
+        except Exception as e:
+            self.log.debug("well-known lookup for %s failed: %s", server_name, e)
+        return f"https://{server_name}:8448"
+
+    async def _verify_openid(self, access_token: str, server_name: str) -> Optional[str]:
+        if not access_token or not server_name:
+            return None
+        if not re.match(r"^[A-Za-z0-9.\-]+(:\d+)?$", server_name):
+            return None
+        base = await self._resolve_federation_base(server_name)
+        try:
+            async with self.http.get(
+                f"{base}/_matrix/federation/v1/openid/userinfo",
+                params={"access_token": access_token},
+            ) as r:
+                if r.status != 200:
+                    return None
+                data = await r.json(content_type=None)
+                sub = data.get("sub")
+                # Verify the sub domain matches the declared server_name (prevents
+                # a malicious server vouching for a user on a different server).
+                if sub and ":" in sub:
+                    sub_domain = sub.split(":", 1)[1]
+                    if sub_domain != server_name:
+                        self.log.warning(
+                            "openid sub domain %s != server_name %s", sub_domain, server_name
+                        )
+                        return None
+                return sub
+        except Exception as e:
+            self.log.warning("openid verification failed: %s", e)
+            return None
+
+    async def create_event_session(self, user_id: str, kind: str, ttl: int, event_room_id: str = None) -> str:
+        token = secrets.token_urlsafe(32)
+        expires_at = int(time.time()) + int(ttl)
+        await self.database.execute(
+            "INSERT INTO event_widget_sessions (token, user_id, kind, event_room_id, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            token, user_id, kind, event_room_id, expires_at,
+        )
+        return token
+
+    async def get_event_session(self, token: str):
+        """Return (user_id, event_room_id) or None if invalid/expired."""
+        if not token:
+            return None
+        row = await self.database.fetchrow(
+            "SELECT user_id, event_room_id, expires_at FROM event_widget_sessions "
+            "WHERE token = $1 AND kind = 'session'",
+            token,
+        )
+        if not row:
+            return None
+        if int(row["expires_at"] or 0) < int(time.time()):
+            return None
+        return row["user_id"], row["event_room_id"]
+
+    async def redeem_event_login(self, token: str):
+        """Consume a single-use login token; return (user_id, event_room_id) or None."""
+        if not token:
+            return None
+        row = await self.database.fetchrow(
+            "SELECT user_id, kind, event_room_id, expires_at FROM event_widget_sessions WHERE token = $1",
+            token,
+        )
+        # Always delete on first use, valid or not
+        await self.database.execute(
+            "DELETE FROM event_widget_sessions WHERE token = $1", token
+        )
+        if not row:
+            return None
+        if (row["kind"] or "") != "login":
+            return None
+        if int(row["expires_at"] or 0) < int(time.time()):
+            return None
+        return row["user_id"], row["event_room_id"]
+
+    async def prune_event_sessions(self) -> None:
+        try:
+            await self.database.execute(
+                "DELETE FROM event_widget_sessions WHERE expires_at < $1", int(time.time())
+            )
+        except Exception as e:
+            self.log.debug("prune_event_sessions failed: %s", e)
+
+    async def _is_user_in_event_room(self, user_id: str, room_id: str) -> bool:
+        """Check if user is a joined member of the event room."""
+        try:
+            members = await self.client.get_joined_members(room_id)
+            return user_id in members
+        except Exception as e:
+            self.log.warning("get_joined_members(%s) failed: %s", room_id, e)
+            return False
+
+    async def _get_dm_room(self, user_id: str) -> Optional[str]:
+        """Find existing DM with user_id (via m.direct) or create one."""
+        direct = None
+        try:
+            direct = await self.client.get_account_data("m.direct")
+        except Exception:
+            direct = None
+        if isinstance(direct, dict):
+            for r in (direct.get(user_id) or []):
+                try:
+                    members = await self.client.get_joined_members(r)
+                    if user_id in members:
+                        return r
+                except Exception:
+                    continue
+        try:
+            room_id = await self.client.create_room(
+                is_direct=True, invitees=[user_id]
+            )
+            return str(room_id) if room_id else None
+        except Exception as e:
+            self.log.warning("create DM with %s failed: %s", user_id, e)
+            return None
+
+    async def _add_event_widget(self, room_id: str, event_name: str, base: str) -> None:
+        """Send an im.vector.modular.widgets state event to room_id for the event widget."""
+        state_key = "org.jobmachine.communitybot.event"
+        widget_url = f"{base}/event/widget?widgetId=$matrix_widget_id&roomId=$matrix_room_id"
+        title = f"{event_name} — Event Details"
+        content = {
+            "type": "m.custom",
+            "url": widget_url,
+            "name": title,
+            "creatorUserId": str(self.client.mxid),
+            "id": state_key,
+            "waitForIframeLoad": True,
+            "data": {"title": title},
+        }
+        widget_type = EventType.find("im.vector.modular.widgets", t_class=EventType.Class.STATE)
+        try:
+            await self.client.send_state_event(room_id, widget_type, content, state_key=state_key)
+        except Exception as e:
+            self.log.warning("_add_event_widget failed for %s: %s", room_id, e)
 
     async def _sync_event_presentation(self, room_id: str) -> bool:
         """Regenerate the event room topic and, if a description message has been
@@ -3561,6 +3740,77 @@ class CommunityBot(Plugin):
             "The room still exists — use !community room archive to archive it if you no longer need it."
         )
 
+    @event.subcommand("addwidget", help="add or refresh the event widget in an event room")
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_addwidget(self, evt: MessageEvent, room: str) -> None:
+        room_id, err = await self._resolve_event_room(evt, (room or "").strip())
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve event room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._can_manage_event(evt.sender, event_row):
+            await evt.reply("Only the event host, organizers, or community moderators can add the widget.")
+            return
+        base = self._event_web_base()
+        if not base:
+            await evt.reply(
+                "No web base URL is configured. Set <code>event_web_base_url</code> in the bot config.",
+                allow_html=True,
+            )
+            return
+        try:
+            await self._add_event_widget(str(room_id), event_row["name"], base)
+            await evt.react("✅")
+        except Exception as e:
+            await evt.reply(
+                "Could not add the widget — I may not have permission to send widget state events in this room. "
+                "Try giving me a higher power level."
+            )
+
+    @event.subcommand("magiclink", help="DM you a private direct browser link to this event's widget")
+    @command.argument("room", pass_raw=True, required=False)
+    @decorators.require_parent_room
+    async def event_magiclink(self, evt: MessageEvent, room: str) -> None:
+        room_id, err = await self._resolve_event_room(evt, (room or "").strip())
+        if err or not room_id:
+            await evt.reply(err or "Could not resolve event room.")
+            return
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            await evt.reply("This room is not a registered community event.")
+            return
+        if not await self._is_user_in_event_room(str(evt.sender), str(room_id)):
+            await evt.reply("You must be a member of the event room to get a magic link.")
+            return
+        base = self._event_web_base()
+        if not base:
+            await evt.reply(
+                "No web base URL is configured — I can't generate a link.",
+            )
+            return
+        ttl = int(self.config.get("event_web_magiclink_ttl", 300))
+        token = await self.create_event_session(
+            str(evt.sender), "login", ttl, event_room_id=str(room_id)
+        )
+        link = f"{base}/event/login?t={urllib.parse.quote(token)}&roomId={urllib.parse.quote(str(room_id))}"
+        ttl_min = max(1, ttl // 60)
+        dm_room = await self._get_dm_room(str(evt.sender))
+        msg = (
+            f"Here's your private event widget link (valid {ttl_min} min, one-time use): {link}"
+        )
+        if dm_room:
+            try:
+                await self.client.send_text(dm_room, msg)
+                await evt.reply("Check your DMs for a private link to the event widget.")
+                return
+            except Exception as e:
+                self.log.warning("magiclink DM failed: %s", e)
+        await evt.reply(f"Couldn't DM you — here's your one-time link (valid {ttl_min} min): {link}")
+
     @event.subcommand("attendees", help="show current RSVPs and headcount for an event")
     @command.argument("room", pass_raw=True, required=False)
     @decorators.require_parent_room
@@ -3679,6 +3929,7 @@ class CommunityBot(Plugin):
             description=event_row["description"],
             room_id=room_id,
             uid_suffix=event_row["room_id"].replace("!", "").replace(":", "-")[:32],
+            timezone_str=event_utils.get_event_timezone(event_row),
         )
         try:
             import io
@@ -5605,6 +5856,414 @@ class CommunityBot(Plugin):
                 )
                 # If we can't check the state, assume it's stale
                 await self.delete_verification_state(state["dm_room_id"])
+
+    # ── Event widget web routes ──────────────────────────────────────────────
+
+    @web.get("/event/style.css")
+    async def web_event_style(self, req: Request) -> Response:
+        return Response(text=event_web.render_style_css(), content_type="text/css",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+    @web.get("/event/widget")
+    async def web_event_widget(self, req: Request) -> Response:
+        base = self._event_web_base()
+        if not base:
+            return Response(text="Event widget not configured.", status=503, content_type="text/plain")
+        return Response(text=event_web.render_bootstrap_html(base=base), content_type="text/html")
+
+    @web.post("/event/widget/auth")
+    async def web_event_widget_auth(self, req: Request) -> Response:
+        await self.prune_event_sessions()
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        user_id = await self._verify_openid(body.get("openid_token"), body.get("matrix_server_name"))
+        if not user_id:
+            return json_response({"error": "openid verification failed"}, status=401)
+        room_id = body.get("room_id", "")
+        if room_id and not await self._is_user_in_event_room(user_id, room_id):
+            return json_response({"error": "you are not a member of this event room"}, status=403)
+        ttl = int(self.config.get("event_web_session_ttl", 604800))
+        session = await self.create_event_session(user_id, "session", ttl, event_room_id=room_id or None)
+        return json_response({"token": session})
+
+    @web.get("/event/login")
+    async def web_event_login(self, req: Request) -> Response:
+        token = req.query.get("t", "")
+        room_id = req.query.get("roomId", "")
+        result = await self.redeem_event_login(token)
+        if not result:
+            return Response(
+                text=event_web.render_message_html(title="Link expired", message="This link has expired or already been used. Ask for a new one with !community event magiclink."),
+                content_type="text/html", status=401,
+            )
+        user_id, stored_room_id = result
+        room_id = room_id or stored_room_id or ""
+        ttl = int(self.config.get("event_web_session_ttl", 604800))
+        session = await self.create_event_session(user_id, "session", ttl, event_room_id=room_id or None)
+        base = self._event_web_base()
+        location = f"{base}/event/?t={urllib.parse.quote(session)}"
+        if room_id:
+            location += f"&roomId={urllib.parse.quote(room_id)}"
+        return Response(status=302, headers={"Location": location})
+
+    async def _get_event_web_session(self, req: Request):
+        """Validate session token from ?t= param. Returns (user_id, event_room_id) or None."""
+        token = req.query.get("t", "")
+        return await self.get_event_session(token)
+
+    @web.get("/event/")
+    async def web_event_main(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return Response(
+                text=event_web.render_message_html(title="Session expired", message="Your session has expired. Please re-open the widget or use !community event magiclink for a new link."),
+                content_type="text/html", status=401,
+            )
+        user_id, _ = session
+        room_id = req.query.get("roomId", "")
+        if not room_id:
+            return Response(
+                text=event_web.render_message_html(title="No room", message="No event room specified."),
+                content_type="text/html", status=400,
+            )
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return Response(
+                text=event_web.render_message_html(title="Not found", message="This event no longer exists or was cancelled."),
+                content_type="text/html", status=404,
+            )
+        # Verify membership (re-check at render time)
+        if not await self._is_user_in_event_room(user_id, room_id):
+            return Response(
+                text=event_web.render_message_html(title="Access denied", message="You are not a member of this event room."),
+                content_type="text/html", status=403,
+            )
+        rsvp_row_raw = await self.database.fetchrow(
+            "SELECT rsvp_status, guest_count, rsvp_source FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
+            room_id, user_id,
+        )
+        rsvp_row = dict(rsvp_row_raw) if rsvp_row_raw else None
+        count_rows = await self.database.fetch(
+            "SELECT rsvp_status, SUM(1) as cnt, SUM(guest_count) as guests FROM event_rsvps WHERE event_room_id = $1 AND user_id != $2 GROUP BY rsvp_status",
+            room_id, str(self.client.mxid),
+        )
+        rsvp_counts = {"yes": 0, "no": 0, "maybe": 0, "yes_guests": 0, "no_guests": 0, "maybe_guests": 0}
+        for r in count_rows:
+            s = (r["rsvp_status"] or "").lower()
+            if s in ("yes", "no", "maybe"):
+                rsvp_counts[s] = int(r["cnt"] or 0)
+                rsvp_counts[f"{s}_guests"] = int(r["guests"] or 0)
+        is_manager = await self._can_manage_event(user_id, dict(event_row))
+        is_host = (event_row["host_id"] == user_id)
+        token = req.query.get("t", "")
+        widget_mode = req.query.get("widget", "") == "1"
+        widget_id = req.query.get("widgetId", "")
+        parent_url = req.query.get("parentUrl", "")
+        base = self._event_web_base()
+        html_out = event_web.render_event_page_html(
+            event_row=dict(event_row),
+            rsvp_row=rsvp_row,
+            rsvp_counts=rsvp_counts,
+            is_manager=is_manager,
+            is_host=is_host,
+            token=token,
+            room_id=room_id,
+            widget_mode=widget_mode,
+            widget_id=widget_id,
+            parent_url=parent_url,
+            base=base,
+        )
+        return Response(text=html_out, content_type="text/html")
+
+    @web.post("/event/rsvp")
+    async def web_event_rsvp(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        if not room_id:
+            return json_response({"error": "room_id required"}, status=400)
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found"}, status=404)
+        if not await self._is_user_in_event_room(user_id, room_id):
+            return json_response({"error": "access denied"}, status=403)
+        rsvp_status = str(body.get("rsvp_status", "")).lower()
+        if rsvp_status == "none" or not rsvp_status:
+            await self.database.execute(
+                "DELETE FROM event_rsvps WHERE event_room_id = $1 AND user_id = $2",
+                room_id, user_id,
+            )
+            return json_response({"ok": True, "rsvp_status": None, "guest_count": 0})
+        if rsvp_status not in ("yes", "no", "maybe"):
+            return json_response({"error": "invalid rsvp_status"}, status=400)
+        guest_count = int(body.get("guest_count", 0) or 0)
+        max_guests = int(event_row["max_additional_guests"] or 1)
+        if max_guests == 0:
+            guest_count = 0
+        elif max_guests != -1 and guest_count > max_guests:
+            return json_response({"error": f"guest count exceeds limit of {max_guests}"}, status=400)
+        if guest_count < 0:
+            guest_count = 0
+        now_ms = int(time.time() * 1000)
+        await self.database.execute(
+            """INSERT INTO event_rsvps
+                 (event_room_id, user_id, rsvp_status, plus_one, guest_count, updated_ts, rsvp_source)
+               VALUES ($1, $2, $3, $4, $5, $6, 'widget')
+               ON CONFLICT (event_room_id, user_id)
+               DO UPDATE SET rsvp_status = EXCLUDED.rsvp_status,
+                 plus_one = EXCLUDED.plus_one,
+                 guest_count = EXCLUDED.guest_count,
+                 updated_ts = EXCLUDED.updated_ts,
+                 rsvp_source = 'widget'""",
+            room_id, user_id, rsvp_status,
+            1 if guest_count > 0 else 0, guest_count, now_ms,
+        )
+        # Return updated counts
+        count_rows = await self.database.fetch(
+            "SELECT rsvp_status, SUM(1) as cnt, SUM(guest_count) as guests FROM event_rsvps WHERE event_room_id = $1 AND user_id != $2 GROUP BY rsvp_status",
+            room_id, str(self.client.mxid),
+        )
+        counts = {"yes": 0, "no": 0, "maybe": 0, "yes_guests": 0, "no_guests": 0, "maybe_guests": 0}
+        for r in count_rows:
+            s = (r["rsvp_status"] or "").lower()
+            if s in ("yes", "no", "maybe"):
+                counts[s] = int(r["cnt"] or 0)
+                counts[f"{s}_guests"] = int(r["guests"] or 0)
+        return json_response({"ok": True, "rsvp_status": rsvp_status, "guest_count": guest_count, "counts": counts})
+
+    @web.post("/event/edit")
+    async def web_event_edit(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found"}, status=404)
+        if not await self._can_manage_event(user_id, dict(event_row)):
+            return json_response({"error": "access denied"}, status=403)
+        set_pairs = []
+        if "name" in body and body["name"]:
+            set_pairs.append(("name", str(body["name"]).strip()))
+        if "location" in body:
+            set_pairs.append(("location", str(body["location"]).strip() or None))
+        if "description" in body:
+            set_pairs.append(("description", str(body["description"]).strip() or None))
+        if "max_additional_guests" in body:
+            try:
+                mg = int(body["max_additional_guests"])
+                if mg < -1:
+                    mg = -1
+                set_pairs.append(("max_additional_guests", mg))
+            except (TypeError, ValueError):
+                pass
+        # Time parsing: use structured date/start_time/end_time/timezone inputs
+        date_str = str(body.get("date", "") or "").strip()
+        start_time_str = str(body.get("start_time", "") or "").strip()
+        end_time_str = str(body.get("end_time", "") or "").strip()
+        tz_str = str(body.get("timezone", "") or "").strip() or "UTC"
+        if date_str or start_time_str:
+            try:
+                from datetime import datetime as dt
+                if date_str:
+                    target_date = dt.strptime(date_str, "%Y-%m-%d").date()
+                else:
+                    target_date = dt.utcnow().date()
+                time_span = start_time_str
+                if end_time_str:
+                    time_span = f"{start_time_str} - {end_time_str} {tz_str}"
+                elif start_time_str:
+                    time_span = f"{start_time_str} {tz_str}"
+                else:
+                    time_span = f"12:00 {tz_str}"
+                start_ts, end_ts, new_tz = event_utils.parse_time_span_with_timezone(
+                    time_span, target_date, default_tz=tz_str
+                )
+                set_pairs.append(("event_start_ts", start_ts))
+                set_pairs.append(("event_end_ts", end_ts))
+                set_pairs.append(("timezone", new_tz))
+            except Exception as e:
+                return json_response({"error": f"invalid date/time: {e}"}, status=400)
+        elif "timezone" in body and body["timezone"]:
+            set_pairs.append(("timezone", tz_str))
+        if not set_pairs:
+            return json_response({"error": "nothing to update"}, status=400)
+        placeholders = ", ".join(f"{col} = ${i}" for i, (col, _) in enumerate(set_pairs, 1))
+        params = [v for _, v in set_pairs]
+        params.append(room_id)
+        await self.database.execute(
+            f"UPDATE community_events SET {placeholders} WHERE room_id = ${len(params)}",
+            *params,
+        )
+        await self._sync_event_presentation(room_id)
+        return json_response({"ok": True})
+
+    @web.post("/event/add-organizer")
+    async def web_event_add_organizer(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        new_org = str(body.get("user_id", "")).strip()
+        if not new_org.startswith("@"):
+            return json_response({"error": "invalid Matrix ID"}, status=400)
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found"}, status=404)
+        if not await self._can_manage_event(user_id, dict(event_row)):
+            return json_response({"error": "access denied"}, status=403)
+        orgs = event_utils.parse_organizers_json(event_row["organizers"] or "[]")
+        if new_org in orgs:
+            return json_response({"error": f"{new_org} is already an organizer"}, status=409)
+        orgs.append(new_org)
+        await self.database.execute(
+            "UPDATE community_events SET organizers = $1 WHERE room_id = $2",
+            json.dumps(orgs), room_id,
+        )
+        await self._sync_event_presentation(room_id)
+        return json_response({"ok": True})
+
+    @web.post("/event/add-link")
+    async def web_event_add_link(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        url = str(body.get("url", "")).strip()
+        label = str(body.get("label", "") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return json_response({"error": "URL must start with http:// or https://"}, status=400)
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found"}, status=404)
+        if not await self._can_manage_event(user_id, dict(event_row)):
+            return json_response({"error": "access denied"}, status=403)
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        links, added = event_utils.add_link(links, url, label)
+        await self.database.execute(
+            "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
+            json.dumps(links), room_id,
+        )
+        await self._sync_event_presentation(room_id)
+        return json_response({"ok": True, "added": added})
+
+    @web.post("/event/remove-link")
+    async def web_event_remove_link(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        selector = body.get("index") or body.get("url") or body.get("label") or ""
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found"}, status=404)
+        if not await self._can_manage_event(user_id, dict(event_row)):
+            return json_response({"error": "access denied"}, status=403)
+        links = event_utils.parse_extra_links_json(event_row["extra_links"] or "[]")
+        new_links, removed = event_utils.remove_link(links, selector)
+        if not removed:
+            return json_response({"error": "link not found"}, status=404)
+        await self.database.execute(
+            "UPDATE community_events SET extra_links = $1 WHERE room_id = $2",
+            json.dumps(new_links), room_id,
+        )
+        await self._sync_event_presentation(room_id)
+        return json_response({"ok": True})
+
+    @web.post("/event/cancel")
+    async def web_event_cancel(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return json_response({"error": "session expired"}, status=401)
+        user_id, _ = session
+        try:
+            body = await req.json()
+        except Exception:
+            return json_response({"error": "bad request"}, status=400)
+        if not body.get("confirm"):
+            return json_response({"error": "must confirm cancellation"}, status=400)
+        room_id = str(body.get("room_id", ""))
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return json_response({"error": "event not found or already cancelled"}, status=404)
+        if not await self._can_manage_event(user_id, dict(event_row)):
+            return json_response({"error": "access denied"}, status=403)
+        event_name = event_row["name"]
+        await self.database.execute("DELETE FROM event_descriptions WHERE event_room_id = $1", room_id)
+        await self.database.execute("DELETE FROM event_reactions WHERE event_room_id = $1", room_id)
+        await self.database.execute("DELETE FROM event_rsvps WHERE event_room_id = $1", room_id)
+        await self.database.execute("DELETE FROM community_events WHERE room_id = $1", room_id)
+        # Post a notice to the event room so attendees see the cancellation
+        try:
+            await self.client.send_notice(
+                room_id,
+                text=f"This event has been cancelled by {user_id}.",
+            )
+        except Exception as e:
+            self.log.warning("cancel notice failed for %s: %s", room_id, e)
+        return json_response({"ok": True, "event_name": event_name})
+
+    @web.get("/event/ics")
+    async def web_event_ics(self, req: Request) -> Response:
+        session = await self._get_event_web_session(req)
+        if not session:
+            return Response(text="Session expired.", status=401, content_type="text/plain")
+        user_id, _ = session
+        room_id = req.query.get("roomId", "")
+        if not room_id:
+            return Response(text="roomId required.", status=400, content_type="text/plain")
+        event_row = await self._get_event_row(room_id)
+        if not event_row:
+            return Response(text="Event not found.", status=404, content_type="text/plain")
+        if not await self._is_user_in_event_room(user_id, room_id):
+            return Response(text="Access denied.", status=403, content_type="text/plain")
+        start_ts = int(event_row["event_start_ts"] or 0)
+        if start_ts == 0:
+            return Response(text="Event has no date set; cannot generate .ics.", status=400, content_type="text/plain")
+        ics_content = event_utils.generate_ics(
+            name=event_row["name"],
+            start_ts=start_ts,
+            end_ts=event_row["event_end_ts"],
+            location=event_row["location"],
+            description=event_row["description"],
+            room_id=room_id,
+            uid_suffix="communitybot",
+            timezone_str=event_utils.get_event_timezone(event_row),
+        )
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", event_row["name"])[:40]
+        return Response(
+            text=ics_content,
+            content_type="text/calendar",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.ics"'},
+        )
 
     @classmethod
     def get_db_upgrade_table(cls) -> None:

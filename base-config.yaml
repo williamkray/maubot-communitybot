@@ -224,3 +224,13 @@ verification_message: |
   Thank you for joining {room}. As an anti-spam measure, you must demonstrate that you are a real person before you can send messages in its rooms.
 
   Please send a message to this chat with the content: "{phrase}"
+
+# Base URL for the event widget web interface, e.g. https://mybot.example.com/_matrix/maubot/plugin/communitybot
+# Leave empty to auto-detect from maubot's webapp URL.
+event_web_base_url: ''
+
+# How long (seconds) a single-use event widget magic link token is valid.
+event_web_magiclink_ttl: 300
+
+# How long (seconds) an event widget web session token is valid.
+event_web_session_ttl: 604800

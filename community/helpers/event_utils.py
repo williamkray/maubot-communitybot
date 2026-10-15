@@ -61,6 +61,153 @@ TZ_ABBREV_OFFSETS: Dict[str, int] = {
     "AEDT": 11,
 }
 
+# --- Self-contained VTIMEZONE support (no tzdata/ZoneInfo required) -----------
+#
+# The maubot container has no system tzdata, so ZoneInfo("America/Los_Angeles")
+# raises ZoneInfoNotFoundError. To produce RFC 5545 ICS files that non-Apple
+# clients (Evolution, Thunderbird, Google, Outlook) display in the correct local
+# timezone, we embed a VTIMEZONE component describing the zone's STANDARD and
+# DAYLIGHT transitions, and emit DTSTART;TZID=<name>:<local-wall-clock-time>.
+#
+# Two kinds of zones are supported:
+#
+#   * US zones with DST (Pacific/Mountain/Central/Eastern/Alaska). We hardcode
+#     the current US DST rule — DST begins 02:00 local on the 2nd Sunday of
+#     March and ends 02:00 local on the 1st Sunday of November — and build a
+#     DST-aware VTIMEZONE whose RRULEs encode exactly that rule. The wall-clock
+#     conversion uses the SAME rule, so the local time and the VTIMEZONE always
+#     agree (no fixed-offset-vs-DST-aware mismatch).
+#
+#   * Fixed-offset zones (Honolulu, and any abbreviation that is effectively a
+#     single offset). We emit a single-component VTIMEZONE declaring that fixed
+#     offset, and convert using the same fixed offset.
+#
+# IANA name -> DST rule spec for US zones. std_off/dst_off are UTC offsets in
+# minutes; tznames are the abbreviations shown by clients.
+_US_DST_ZONES: Dict[str, Dict[str, Any]] = {
+    "America/Los_Angeles": {"std_off": -480, "dst_off": -420, "std_name": "PST", "dst_name": "PDT"},
+    "America/Denver":      {"std_off": -420, "dst_off": -360, "std_name": "MST", "dst_name": "MDT"},
+    "America/Chicago":     {"std_off": -360, "dst_off": -300, "std_name": "CST", "dst_name": "CDT"},
+    "America/New_York":    {"std_off": -300, "dst_off": -240, "std_name": "EST", "dst_name": "EDT"},
+    "America/Anchorage":   {"std_off": -540, "dst_off": -480, "std_name": "AKST", "dst_name": "AKDT"},
+}
+
+# IANA name -> fixed offset (minutes) + display name for zones we treat as a
+# single fixed offset (no DST handling without tzdata).
+_FIXED_OFFSET_ZONES: Dict[str, Dict[str, Any]] = {
+    "Pacific/Honolulu": {"off": -600, "name": "HST"},
+}
+
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    """Return the date of the nth given weekday (Mon=0..Sun=6) in year/month.
+
+    n=1 -> first, n=2 -> second, etc. Assumes the month has enough weeks.
+    """
+    d = date(year, month, 1)
+    offset = (weekday - d.weekday()) % 7
+    return date(year, month, 1 + offset + (n - 1) * 7)
+
+
+def _us_dst_bounds(year: int) -> Tuple[datetime, datetime]:
+    """UTC-naive local-time boundaries of US DST for a given year.
+
+    Returns (dst_start_local, dst_end_local) as naive datetimes representing the
+    local wall-clock instant of the transition:
+      * DST starts 02:00 on the 2nd Sunday of March.
+      * DST ends   02:00 on the 1st Sunday of November.
+    These are compared against the candidate local wall-clock time.
+    """
+    march = _nth_weekday_of_month(year, 3, 6, 2)   # 2nd Sunday of March (Sun=6)
+    nov = _nth_weekday_of_month(year, 11, 6, 1)     # 1st Sunday of November
+    return (
+        datetime(march.year, march.month, march.day, 2, 0, 0),
+        datetime(nov.year, nov.month, nov.day, 2, 0, 0),
+    )
+
+
+def _us_is_dst(local_naive: datetime) -> bool:
+    """Is the given naive *local* wall-clock datetime within US DST?
+
+    DST is [2nd Sun March 02:00, 1st Sun Nov 02:00). Boundary times are compared
+    against local wall clock, which is the convention the VTIMEZONE RRULEs encode.
+    """
+    start, end = _us_dst_bounds(local_naive.year)
+    return start <= local_naive < end
+
+
+def _offset_to_ics(minutes: int) -> str:
+    """Format a UTC offset in minutes as an ICS offset string, e.g. -480 -> -0800."""
+    sign = "+" if minutes >= 0 else "-"
+    m = abs(minutes)
+    return f"{sign}{m // 60:02d}{m % 60:02d}"
+
+
+def _build_vtimezone(iana_name: str) -> Optional[List[str]]:
+    """Return VTIMEZONE lines for a supported zone, or None if unsupported.
+
+    For US DST zones this emits DST-aware STANDARD + DAYLIGHT subcomponents whose
+    RRULEs match _us_is_dst exactly. For fixed-offset zones it emits a single
+    STANDARD subcomponent with a constant offset.
+    """
+    if iana_name in _US_DST_ZONES:
+        z = _US_DST_ZONES[iana_name]
+        std = _offset_to_ics(z["std_off"])
+        dst = _offset_to_ics(z["dst_off"])
+        return [
+            "BEGIN:VTIMEZONE",
+            f"TZID:{iana_name}",
+            "BEGIN:DAYLIGHT",
+            f"TZOFFSETFROM:{std}",
+            f"TZOFFSETTO:{dst}",
+            f"TZNAME:{z['dst_name']}",
+            "DTSTART:19700308T020000",
+            "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU",
+            "END:DAYLIGHT",
+            "BEGIN:STANDARD",
+            f"TZOFFSETFROM:{dst}",
+            f"TZOFFSETTO:{std}",
+            f"TZNAME:{z['std_name']}",
+            "DTSTART:19701101T020000",
+            "RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU",
+            "END:STANDARD",
+            "END:VTIMEZONE",
+        ]
+    if iana_name in _FIXED_OFFSET_ZONES:
+        z = _FIXED_OFFSET_ZONES[iana_name]
+        off = _offset_to_ics(z["off"])
+        return [
+            "BEGIN:VTIMEZONE",
+            f"TZID:{iana_name}",
+            "BEGIN:STANDARD",
+            f"TZOFFSETFROM:{off}",
+            f"TZOFFSETTO:{off}",
+            f"TZNAME:{z['name']}",
+            "DTSTART:19700101T000000",
+            "END:STANDARD",
+            "END:VTIMEZONE",
+        ]
+    return None
+
+
+def _local_wall_clock(iana_name: str, utc_dt: datetime) -> datetime:
+    """Convert an aware UTC datetime to the naive local wall-clock time for a
+    supported zone, using the same DST rules the VTIMEZONE encodes.
+
+    Must only be called for zones in _US_DST_ZONES or _FIXED_OFFSET_ZONES.
+    """
+    if iana_name in _US_DST_ZONES:
+        z = _US_DST_ZONES[iana_name]
+        # Determine DST state by testing against the standard-offset local time.
+        # The DST boundary is at 02:00 local; a 1-hour ambiguity near the
+        # transition is immaterial for event display, so a single pass suffices.
+        std_local = utc_dt + timedelta(minutes=z["std_off"])
+        off = z["dst_off"] if _us_is_dst(std_local.replace(tzinfo=None)) else z["std_off"]
+        return (utc_dt + timedelta(minutes=off)).replace(tzinfo=None)
+    z = _FIXED_OFFSET_ZONES[iana_name]
+    return (utc_dt + timedelta(minutes=z["off"])).replace(tzinfo=None)
+
+
 # RSVP status reaction keys (with and without the emoji variation selector)
 RSVP_YES_KEYS = {"👍", "👍️"}
 RSVP_NO_KEYS = {"👎", "👎️"}
@@ -653,27 +800,80 @@ def generate_ics(
     description: Optional[str],
     room_id: str,
     uid_suffix: str,
+    timezone_str: str = "UTC",
 ) -> str:
-    """Generate .ics file content (VCALENDAR with one VEVENT)."""
-    start_dt = datetime.fromtimestamp(start_ts / 1000.0, tz=UTC_TZ)
+    """Generate .ics file content (VCALENDAR with one VEVENT).
+
+    Uses DTSTART;TZID= with local wall-clock time when a known IANA timezone
+    can be resolved, so calendar clients display the event at the intended local
+    time rather than converting from a bare UTC timestamp.
+    """
     end_ts_use = end_ts if (end_ts and end_ts > start_ts) else start_ts + 3600 * 1000
-    end_dt = datetime.fromtimestamp(end_ts_use / 1000.0, tz=UTC_TZ)
-    # DTSTAMP is when the calendar object was created, not the event start.
     dtstamp = datetime.now(UTC_TZ)
+    start_utc = datetime.fromtimestamp(start_ts / 1000.0, tz=UTC_TZ)
+    end_utc = datetime.fromtimestamp(end_ts_use / 1000.0, tz=UTC_TZ)
+
+    # Resolve the stored timezone string to an IANA name.
+    # Abbreviations (PST, EDT…) map to their canonical IANA name via TZ_ABBREV_TO_IANA;
+    # IANA names are used directly.  Fall back to UTC if resolution fails.
+    tz_upper = (timezone_str or "UTC").strip().upper()
+    iana_name = TZ_ABBREV_TO_IANA.get(tz_upper, timezone_str.strip() if timezone_str.strip() else "UTC")
+    if iana_name in ("UTC", "GMT"):
+        iana_name = "UTC"
+    else:
+        # Normalize common lowercase IANA forms ("america/los_angeles").
+        if "/" in iana_name and iana_name not in _US_DST_ZONES and iana_name not in _FIXED_OFFSET_ZONES:
+            norm = "/".join(
+                "_".join(s[:1].upper() + s[1:] for s in seg.split("_") if s)
+                for seg in iana_name.split("/")
+            )
+            if norm in _US_DST_ZONES or norm in _FIXED_OFFSET_ZONES:
+                iana_name = norm
+
+    # Build a self-contained VTIMEZONE when we recognize the zone. This needs no
+    # tzdata/ZoneInfo and makes RFC 5545 clients (Evolution, Thunderbird, Google,
+    # Outlook, Apple) display the event in the intended local timezone.
+    vtimezone = None if iana_name == "UTC" else _build_vtimezone(iana_name)
 
     def ics_escape(s: str) -> str:
         return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 
     uid = f"community-event-{uid_suffix}@{room_id.replace('!', '').replace(':', '-')}"
+
+    if vtimezone is not None:
+        # Emit local wall-clock time anchored to the embedded VTIMEZONE. The
+        # conversion uses the same DST/offset rules the VTIMEZONE encodes, so the
+        # wall-clock time and the TZID always agree.
+        start_local = _local_wall_clock(iana_name, start_utc)
+        end_local = _local_wall_clock(iana_name, end_utc)
+        dtstart = f"DTSTART;TZID={iana_name}:{start_local.strftime('%Y%m%dT%H%M%S')}"
+        dtend = f"DTEND;TZID={iana_name}:{end_local.strftime('%Y%m%dT%H%M%S')}"
+    else:
+        # Unknown/unsupported zone (or UTC) — emit plain UTC, always consistent
+        # with the stored timestamp.
+        dtstart = f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
+        dtend = f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}"
+
+    # X-WR-TIMEZONE is an Apple extension; harmless to include as a hint alongside
+    # the standards-compliant VTIMEZONE for clients that honor it.
+    xwr = f"X-WR-TIMEZONE:{iana_name}" if vtimezone is not None else ""
+
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//CommunityBot//Event//EN",
+        "CALSCALE:GREGORIAN",
+    ]
+    if xwr:
+        lines.append(xwr)
+    if vtimezone is not None:
+        lines += vtimezone
+    lines += [
         "BEGIN:VEVENT",
         f"UID:{uid}",
         f"DTSTAMP:{dtstamp.strftime('%Y%m%dT%H%M%SZ')}",
-        f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
-        f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        dtstart,
+        dtend,
         f"SUMMARY:{ics_escape(name)}",
     ]
     if location:

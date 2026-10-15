@@ -161,3 +161,25 @@ async def upgrade_v9(conn: Connection) -> None:
     await conn.execute("DROP INDEX IF EXISTS idx_community_events_description_event_id")
     await conn.execute("ALTER TABLE community_events DROP COLUMN description_event_id")
     await conn.execute("ALTER TABLE community_events DROP COLUMN description_room_id")
+
+@upgrade_table.register(description="Event widget sessions and widget-RSVP source tracking")
+async def upgrade_v10(conn: Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE event_widget_sessions (
+            token         TEXT    PRIMARY KEY,
+            user_id       TEXT    NOT NULL,
+            kind          TEXT    NOT NULL,
+            event_room_id TEXT,
+            expires_at    INTEGER NOT NULL
+        )"""
+    )
+    await conn.execute(
+        "CREATE INDEX idx_event_widget_sessions_expires "
+        "ON event_widget_sessions(expires_at)"
+    )
+    # Track whether an event_rsvps row was set via widget or via reaction.
+    # When _recompute_user_rsvp finds no reactions, it only deletes rows
+    # with rsvp_source='reaction'; widget-origin rows are preserved.
+    await conn.execute(
+        "ALTER TABLE event_rsvps ADD COLUMN rsvp_source TEXT NOT NULL DEFAULT 'reaction'"
+    )
