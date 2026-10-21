@@ -1,6 +1,7 @@
 # kickbot - a maubot plugin to track user activity and remove inactive users from rooms/spaces.
 
 from typing import Awaitable, Type, Optional, Tuple, Dict
+import html
 import json
 import time
 import re
@@ -126,6 +127,25 @@ class CommunityBot(Plugin):
     # nested subspaces). None means "not yet computed / invalidated". Rebuilt
     # lazily by get_space_roomlist() and cleared by _invalidate_roomlist_cache().
     _roomlist_cache: Optional[list] = None
+    # Cached banlist room ID -> configured label (alias). Only populated when
+    # every configured banlist resolved; cleared on config update.
+    _banlist_cache: Optional[Dict[str, str]] = None
+    # monotonic deadline after which _banlist_cache must be re-resolved
+    # (None = valid until config update)
+    _banlist_cache_expires: Optional[float] = None
+    _banlist_lock: Optional[asyncio.Lock] = None
+    # How long a partially-failed banlist resolution is reused before retrying
+    _BANLIST_RETRY_SECONDS = 60
+    # Bounds concurrent proactive bans so a flood of new policy rules can't
+    # stampede the homeserver. Created lazily.
+    _proactive_ban_semaphore: Optional[asyncio.Semaphore] = None
+    _PROACTIVE_BAN_CONCURRENCY = 3
+
+    def on_external_config_update(self):
+        result = super().on_external_config_update()
+        self._banlist_cache = None
+        self._banlist_cache_expires = None
+        return result
 
     async def start(self) -> None:
         await super().start()
@@ -826,8 +846,10 @@ class CommunityBot(Plugin):
         return message_utils.censor_room(msg, self.config["censor"])
 
     async def check_if_banned(self, userid):
+        # Pass resolved room IDs so joins reuse the banlist alias cache.
+        banlist_ids = list((await self._get_banlists()).keys())
         return await user_utils.check_if_banned(
-            self.client, userid, self.config["banlists"], self.log
+            self.client, userid, banlist_ids, self.log
         )
 
     async def get_messages_to_redact(self, room_id, mxid):
@@ -1064,7 +1086,13 @@ class CommunityBot(Plugin):
         return removed_aliases
 
     async def ban_this_user(
-        self, user, reason="banned", all_rooms=False, quiet_if_empty=False
+        self,
+        user,
+        reason="banned",
+        all_rooms=False,
+        quiet_if_empty=False,
+        members_only=False,
+        source=None,
     ):
         roomlist = await self.get_space_roomlist()
         # don't forget to kick from the space itself
@@ -1077,7 +1105,7 @@ class CommunityBot(Plugin):
         # users who aren't in any of our rooms, which would otherwise emit a
         # noisy "0 room(s): no rooms" notice. In that case (quiet_if_empty) we
         # defer the notification and only post it if the ban actually landed
-        # somewhere (or errored).
+        # somewhere (or a ban call failed).
         notif = None
         if not quiet_if_empty:
             notif = await self._post_notification(
@@ -1095,10 +1123,11 @@ class CommunityBot(Plugin):
             self.database,
             self.config["sleep"],
             self.log,
+            members_only=members_only,
         )
 
         banned = results.get("ban_list", {}).get(user, [])
-        errors = results.get("error_list", {})
+        errors = results.get("error_list", {}).get(user, [])
 
         # Nothing happened and the caller asked to stay quiet in that case:
         # skip the notification entirely to avoid noise from external banlists.
@@ -1109,16 +1138,45 @@ class CommunityBot(Plugin):
             f"⛔ Banned <code>{user}</code> from {len(banned)} room(s): "
             f"{self._summarize_rooms(banned)}."
         )
+        if source:
+            readout += f" Source: {html.escape(source)}."
         if errors:
-            readout += f" ⚠️ {len(errors)} room(s) had errors."
+            readout += (
+                f" ⚠️ Ban failed in {len(errors)} room(s): "
+                f"{self._summarize_rooms(errors)}."
+            )
         await self._post_notification(readout, edit=notif)
 
         return results
 
+    async def _get_banlists(self) -> Dict[str, str]:
+        """Return banlist room ID -> label, resolving aliases at most once.
+
+        Resolving on every policy event meant hundreds of alias lookups when a
+        banlist received a burst of rules. Concurrent callers share a single
+        resolution; a partial result (an alias failed to resolve) is reused
+        for _BANLIST_RETRY_SECONDS before retrying.
+        """
+        if self._banlist_lock is None:
+            self._banlist_lock = asyncio.Lock()
+        async with self._banlist_lock:
+            if self._banlist_cache is not None and (
+                self._banlist_cache_expires is None
+                or time.monotonic() < self._banlist_cache_expires
+            ):
+                return self._banlist_cache
+            failures = []
+            resolved = await user_utils.resolve_banlists(
+                self.client, self.config["banlists"] or [], self.log, failures
+            )
+            self._banlist_cache = resolved
+            self._banlist_cache_expires = (
+                time.monotonic() + self._BANLIST_RETRY_SECONDS if failures else None
+            )
+            return resolved
+
     async def get_banlist_roomids(self):
-        return await user_utils.get_banlist_roomids(
-            self.client, self.config["banlists"], self.log
-        )
+        return list((await self._get_banlists()).keys())
 
     async def get_room_version_and_creators(
         self, room_id: str
@@ -1184,14 +1242,17 @@ class CommunityBot(Plugin):
         if not self.config["proactive_banning"]:
             return
 
-        banlist_roomids = await self.get_banlist_roomids()
+        banlists = await self._get_banlists()
         # we only care about ban events in rooms in the banlist
-        if evt.room_id not in banlist_roomids:
+        if evt.room_id not in banlists:
             return
         else:
             try:
                 entity = evt.content["entity"]
                 recommendation = evt.content["recommendation"]
+                if not entity or not recommendation:
+                    # Removed/redacted rule (empty content); nothing to act on.
+                    return
                 self.log.debug(
                     f"DEBUG new ban rule found: {entity} should have action {recommendation}"
                 )
@@ -1201,9 +1262,34 @@ class CommunityBot(Plugin):
                     )
                     return
                 if bool(re.search("ban$", recommendation)):
-                    # Proactive ban from an external banlist: stay silent unless
-                    # the user was actually in one of our rooms.
-                    await self.ban_this_user(entity, quiet_if_empty=True)
+                    # Proactive ban from an external banlist: only act where the
+                    # user is currently joined/invited/knocking, and stay silent
+                    # unless that actually happened. Former members are caught
+                    # by the banlist check if they try to rejoin.
+                    banlist = banlists.get(evt.room_id, evt.room_id)
+                    try:
+                        policy_reason = evt.content["reason"]
+                    except KeyError:
+                        policy_reason = None
+                    # The reason is free text from a third-party banlist:
+                    # bound it before it goes into the ban reason and notice.
+                    if policy_reason and len(policy_reason) > 200:
+                        policy_reason = policy_reason[:200] + "…"
+                    source = (
+                        f"{banlist} ({policy_reason})" if policy_reason else banlist
+                    )
+                    if self._proactive_ban_semaphore is None:
+                        self._proactive_ban_semaphore = asyncio.Semaphore(
+                            self._PROACTIVE_BAN_CONCURRENCY
+                        )
+                    async with self._proactive_ban_semaphore:
+                        await self.ban_this_user(
+                            entity,
+                            reason=f"banlist {source}",
+                            quiet_if_empty=True,
+                            members_only=True,
+                            source=source,
+                        )
             except Exception as e:
                 self.log.error(e)
 
@@ -3988,8 +4074,7 @@ class CommunityBot(Plugin):
                     pass
                 except Exception as e:
                     self.log.warning(e)
-                    error_list[user] = []
-                    error_list[user].append(roomname or room)
+                    error_list.setdefault(user, []).append(roomname or room)
 
         await self.do_sync()
         return purge_list, error_list
@@ -4058,8 +4143,7 @@ class CommunityBot(Plugin):
                 pass
             except Exception as e:
                 self.log.warning(e)
-                error_list[user] = []
-                error_list[user].append(roomname or room)
+                error_list.setdefault(user, []).append(roomname or room)
 
         results = "the following users were kicked:<p><code>{kick_list}</code></p>the following errors were \
                 recorded:<p><code>{error_list}</code></p>".format(

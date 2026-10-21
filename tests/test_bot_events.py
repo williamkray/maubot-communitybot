@@ -94,15 +94,17 @@ class TestBotEvents:
         real_bot.log = bot.log
         
         # Mock required methods
-        with patch.object(real_bot, 'get_banlist_roomids', return_value=["!banlist:example.com"]), \
+        with patch.object(real_bot, '_get_banlists', return_value={"!banlist:example.com": "!banlist:example.com"}), \
              patch.object(real_bot, 'ban_this_user', return_value={"ban_list": {}, "error_list": {}}):
             
             await real_bot.check_ban_event(mock_state_evt)
         
         # Should call ban_this_user, staying quiet if the user isn't in any room
-        real_bot.ban_this_user.assert_called_once_with(
-            "@banned:example.com", quiet_if_empty=True
-        )
+        real_bot.ban_this_user.assert_called_once()
+        args, kwargs = real_bot.ban_this_user.call_args
+        assert args == ("@banned:example.com",)
+        assert kwargs["quiet_if_empty"] is True
+        assert kwargs["members_only"] is True
 
     @pytest.mark.asyncio
     async def test_check_ban_event_proactive_banning_disabled(self, bot, mock_state_evt):
@@ -114,7 +116,7 @@ class TestBotEvents:
         real_bot.client = bot.client
         real_bot.log = bot.log
         
-        with patch.object(real_bot, 'get_banlist_roomids', return_value=["!banlist:example.com"]):
+        with patch.object(real_bot, '_get_banlists', return_value={"!banlist:example.com": "!banlist:example.com"}):
             await real_bot.check_ban_event(mock_state_evt)
         
         # Should not call ban_this_user
@@ -130,7 +132,7 @@ class TestBotEvents:
         real_bot.client = bot.client
         real_bot.log = bot.log
         
-        with patch.object(real_bot, 'get_banlist_roomids', return_value=["!other:example.com"]):
+        with patch.object(real_bot, '_get_banlists', return_value={"!other:example.com": "!other:example.com"}):
             await real_bot.check_ban_event(mock_state_evt)
         
         # Should not call ban_this_user

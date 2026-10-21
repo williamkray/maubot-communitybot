@@ -2,11 +2,12 @@
 
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
-from mautrix.types import EventType, UserID
+from mautrix.types import EventType, Membership, UserID
 from mautrix.errors import MNotFound
 
 from community.helpers.user_utils import (
-    check_if_banned, get_banlist_roomids, ban_user_from_rooms, user_permitted
+    check_if_banned, get_banlist_roomids, ban_user_from_rooms, user_permitted,
+    resolve_banlists,
 )
 
 
@@ -221,3 +222,175 @@ class TestUserUtils:
             
             assert result == False
             logger.error.assert_called()
+
+
+def _membership_client(memberships, ban_side_effect=None):
+    """Client whose member state per room comes from ``memberships``.
+
+    Values are a Membership, or an exception instance to raise.
+    """
+    client = Mock()
+    client.ban_user = AsyncMock(side_effect=ban_side_effect)
+
+    async def get_state_event(room, event_type, state_key=None):
+        if event_type == "m.room.name":
+            return {"name": f"name-{room}"}
+        value = memberships[room]
+        if isinstance(value, Exception):
+            raise value
+        member = Mock()
+        member.membership = value
+        return member
+
+    client.get_state_event = AsyncMock(side_effect=get_state_event)
+    return client
+
+
+class TestProactiveBanFiltering:
+    """ban_user_from_rooms behaviour relied on by proactive (banlist) bans."""
+
+    USER = "@spammer:example.com"
+
+    async def _ban(self, client, rooms, **kwargs):
+        return await ban_user_from_rooms(
+            client, self.USER, rooms, "banned", False, False, None, None, 0, Mock(),
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_members_only_bans_active_memberships(self):
+        memberships = {
+            "!join": Membership.JOIN,
+            "!invite": Membership.INVITE,
+            "!knock": Membership.KNOCK,
+            "!leave": Membership.LEAVE,
+            "!ban": Membership.BAN,
+        }
+        client = _membership_client(memberships)
+
+        result = await self._ban(client, list(memberships), members_only=True)
+
+        banned_rooms = [c.args[0] for c in client.ban_user.call_args_list]
+        assert banned_rooms == ["!join", "!invite", "!knock"]
+        assert result["ban_list"][self.USER] == [
+            "name-!join", "name-!invite", "name-!knock"
+        ]
+        assert result["error_list"] == {}
+
+    @pytest.mark.asyncio
+    async def test_without_members_only_former_members_are_banned(self):
+        client = _membership_client({"!leave": Membership.LEAVE})
+
+        result = await self._ban(client, ["!leave"])
+
+        client.ban_user.assert_called_once()
+        assert result["ban_list"][self.USER] == ["name-!leave"]
+
+    @pytest.mark.asyncio
+    async def test_never_member_skipped_without_redaction_scan(self):
+        client = _membership_client({"!room": MNotFound(404, "not found")})
+        get_messages = AsyncMock(return_value=[])
+        database = Mock()
+        database.execute = AsyncMock()
+
+        result = await ban_user_from_rooms(
+            client, self.USER, ["!room"], "banned", False, True,
+            get_messages, database, 0, Mock(), members_only=True,
+        )
+
+        client.ban_user.assert_not_called()
+        get_messages.assert_not_called()
+        assert result["ban_list"][self.USER] == []
+        assert result["error_list"] == {}
+
+    @pytest.mark.asyncio
+    async def test_membership_lookup_failure_is_skipped_not_error(self):
+        # e.g. homeserver timeout, or the bot isn't joined to the room (403)
+        client = _membership_client({
+            "!timeout": TimeoutError(),
+            "!forbidden": Exception("not in room"),
+        })
+        logger = Mock()
+
+        result = await ban_user_from_rooms(
+            client, self.USER, ["!timeout", "!forbidden"], "banned", False, False,
+            None, None, 0, logger, members_only=True,
+        )
+
+        client.ban_user.assert_not_called()
+        assert result["error_list"] == {}
+        assert logger.warning.call_count == 2
+        # The exception type is logged even when str(e) is empty
+        assert "TimeoutError" in logger.warning.call_args_list[0].args[0]
+
+    @pytest.mark.asyncio
+    async def test_membership_lookup_failure_still_bans_when_not_proactive(self):
+        # on-join / non-proactive path: a transient lookup error must not let
+        # a banlisted user through
+        client = _membership_client({"!timeout": TimeoutError()})
+
+        result = await self._ban(client, ["!timeout"])
+
+        client.ban_user.assert_called_once()
+        assert result["ban_list"][self.USER] == ["name-!timeout"]
+
+    @pytest.mark.asyncio
+    async def test_ban_failures_counted_per_room(self):
+        client = _membership_client(
+            {"!a": Membership.JOIN, "!b": Membership.JOIN},
+            ban_side_effect=Exception("forbidden"),
+        )
+
+        result = await self._ban(client, ["!a", "!b"], members_only=True)
+
+        assert result["error_list"][self.USER] == ["name-!a", "name-!b"]
+
+    @pytest.mark.asyncio
+    async def test_all_rooms_skips_membership_check(self):
+        client = _membership_client({})
+
+        result = await ban_user_from_rooms(
+            client, self.USER, ["!x"], "banned", True, False, None, None, 0, Mock(),
+            members_only=True,
+        )
+
+        client.ban_user.assert_called_once()
+        assert result["ban_list"][self.USER] == ["name-!x"]
+
+
+class TestResolveBanlists:
+
+    @pytest.mark.asyncio
+    async def test_maps_room_ids_to_labels(self):
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(return_value={"room_id": "!bl1:example.com"})
+
+        result = await resolve_banlists(
+            client, ["#bl:example.com", "!bl2:example.com"], Mock()
+        )
+
+        assert result == {
+            "!bl1:example.com": "#bl:example.com",
+            "!bl2:example.com": "!bl2:example.com",
+        }
+
+    @pytest.mark.asyncio
+    async def test_failed_alias_omitted(self):
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(side_effect=Exception("boom"))
+        logger = Mock()
+
+        result = await resolve_banlists(client, ["#bl:example.com"], logger)
+
+        assert result == {}
+        logger.error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failures_reported(self):
+        client = Mock()
+        client.resolve_room_alias = AsyncMock(side_effect=Exception("boom"))
+        failures = []
+
+        await resolve_banlists(client, ["#bl:example.com", "!ok:example.com"], Mock(), failures)
+
+        assert failures == ["#bl:example.com"]

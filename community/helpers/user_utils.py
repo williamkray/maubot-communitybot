@@ -5,7 +5,7 @@ import re
 import asyncio
 import time
 from typing import List, Dict, Tuple
-from mautrix.types import EventType, UserID
+from mautrix.types import EventType, Membership, UserID
 from mautrix.errors import MNotFound
 
 
@@ -54,6 +54,38 @@ async def check_if_banned(client, userid: str, banlists: List[str], logger) -> b
     return is_banned
 
 
+async def resolve_banlists(
+    client, banlists: List[str], logger, failures: List[str] = None
+) -> Dict[str, str]:
+    """Resolve configured banlists to room IDs.
+
+    Args:
+        client: Matrix client instance
+        banlists: List of banlist room IDs or aliases
+        logger: Logger instance for error reporting
+        failures: Optional list that unresolvable banlist aliases are appended to
+
+    Returns:
+        dict: Mapping of banlist room ID -> configured label (alias or ID).
+            Banlists whose alias failed to resolve are omitted.
+    """
+    resolved = {}
+    for banlist in banlists:
+        if banlist.startswith("#"):
+            try:
+                room_info = await client.resolve_room_alias(banlist)
+                resolved[room_info["room_id"]] = banlist
+            except Exception as e:
+                logger.error(f"Banlist fetching failed for {banlist}: {e!r}")
+                if failures is not None:
+                    failures.append(banlist)
+                continue
+        else:
+            resolved[banlist] = banlist
+
+    return resolved
+
+
 async def get_banlist_roomids(client, banlists: List[str], logger) -> List[str]:
     """Get room IDs for all configured banlists.
 
@@ -65,21 +97,13 @@ async def get_banlist_roomids(client, banlists: List[str], logger) -> List[str]:
     Returns:
         list: List of room IDs for banlists
     """
-    banlist_roomids = []
-    for banlist in banlists:
-        if banlist.startswith("#"):
-            try:
-                room_info = await client.resolve_room_alias(banlist)
-                list_id = room_info["room_id"]
-                banlist_roomids.append(list_id)
-            except Exception as e:
-                logger.error(f"Banlist fetching failed for {banlist}: {e}")
-                continue
-        else:
-            list_id = banlist
-            banlist_roomids.append(list_id)
+    return list((await resolve_banlists(client, banlists, logger)).keys())
 
-    return banlist_roomids
+
+# Memberships that mean a user is actually present in (or actively trying to
+# get into) a room. Users who have left are not banned proactively; the banlist
+# check on join catches them if they come back.
+ACTIVE_MEMBERSHIPS = (Membership.JOIN, Membership.INVITE, Membership.KNOCK)
 
 
 async def ban_user_from_rooms(
@@ -93,6 +117,7 @@ async def ban_user_from_rooms(
     database=None,
     sleep_time: float = 0.1,
     logger=None,
+    members_only: bool = False,
 ) -> Dict:
     """Ban a user from a list of rooms.
 
@@ -107,39 +132,63 @@ async def ban_user_from_rooms(
         database: Database instance for redaction tasks
         sleep_time: Sleep time between operations
         logger: Logger instance
+        members_only: Only ban where the user is joined, invited or knocking
+            (ignored when all_rooms is set)
 
     Returns:
-        dict: Ban results with success/error lists
+        dict: Ban results with success/error lists. error_list maps the user
+            to the rooms where the ban call itself failed; rooms whose
+            membership could not be checked are skipped, not counted as errors.
     """
     ban_event_map = {"ban_list": {}, "error_list": {}}
     ban_event_map["ban_list"][user] = []
 
     for room in roomlist:
-        try:
-            roomname = None
+        if not all_rooms:
             try:
-                roomnamestate = await client.get_state_event(room, "m.room.name")
-                roomname = roomnamestate["name"]
-            except:
-                pass
-
-            # ban user even if they're not in the room!
-            if not all_rooms:
-                await client.get_state_event(room, EventType.ROOM_MEMBER, user)
-
-            await client.ban_user(room, user, reason=reason)
-            if roomname:
-                ban_event_map["ban_list"][user].append(roomname)
+                member = await client.get_state_event(
+                    room, EventType.ROOM_MEMBER, user
+                )
+            except MNotFound:
+                # Never a member: nothing to ban and no messages to redact.
+                continue
+            except Exception as e:
+                # Can't see the room (bot not joined, timeout, ...). For
+                # proactive bans, skip it rather than reporting a ban failure
+                # for a user we couldn't even look up; otherwise attempt the
+                # ban anyway so a transient error doesn't let them through.
+                if members_only:
+                    if logger:
+                        logger.warning(
+                            f"Could not check membership of {user} in {room}, skipping: {e!r}"
+                        )
+                    continue
+                if logger:
+                    logger.warning(
+                        f"Could not check membership of {user} in {room}, banning anyway: {e!r}"
+                    )
             else:
-                ban_event_map["ban_list"][user].append(room)
-            await asyncio.sleep(sleep_time)
-        except MNotFound:
+                if (
+                    members_only
+                    and getattr(member, "membership", None) not in ACTIVE_MEMBERSHIPS
+                ):
+                    continue
+
+        roomname = None
+        try:
+            roomnamestate = await client.get_state_event(room, "m.room.name")
+            roomname = roomnamestate["name"]
+        except Exception:
             pass
+
+        try:
+            await client.ban_user(room, user, reason=reason)
+            ban_event_map["ban_list"][user].append(roomname or room)
+            await asyncio.sleep(sleep_time)
         except Exception as e:
             if logger:
-                logger.warning(e)
-            ban_event_map["error_list"][user] = []
-            ban_event_map["error_list"][user].append(roomname or room)
+                logger.warning(f"Failed to ban {user} in {roomname or room}: {e!r}")
+            ban_event_map["error_list"].setdefault(user, []).append(roomname or room)
 
         if redact_on_ban and get_messages_to_redact_func and database:
             messages = await get_messages_to_redact_func(room, user)
