@@ -182,3 +182,32 @@ def test_pick_placement_parent_top_level_room():
 def test_pick_placement_parent_no_parents_falls_back():
     assert room_creation_utils.pick_placement_parent([], "!parent:x") == "!parent:x"
     assert room_creation_utils.pick_placement_parent(None, "!parent:x") == "!parent:x"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("#room:example.com --unencrypted", ("#room:example.com", False, True)),
+        ("--unencrypted", ("", False, True)),
+        ("--encrypted #room:example.com", ("#room:example.com", True, False)),
+        ("!abc:example.com -unencrypt", ("!abc:example.com", False, True)),
+        ("#room:example.com", ("#room:example.com", False, False)),
+        ("", ("", False, False)),
+        # a flag mid-string must not glue the surrounding words together
+        ("cool --unencrypted room", ("cool room", False, True)),
+    ],
+)
+def test_extract_encryption_flags(text, expected):
+    assert room_creation_utils.extract_encryption_flags(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_validate_params_strips_mid_string_flag():
+    name, enc, unenc, err, cleaned = (
+        await room_creation_utils.validate_room_creation_params(
+            "cool --unencrypted room", {"use_community_slug": False}
+        )
+    )
+    assert (cleaned, name, enc, unenc, err) == (
+        "cool room", "coolroom", False, True, ""
+    )

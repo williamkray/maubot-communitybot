@@ -6,6 +6,25 @@ from typing import Optional, Tuple, List, Dict, Any
 from mautrix.types import MessageEvent, PowerLevelStateEventContent, EventType
 from mautrix.client import Client
 
+# --encrypted / --unencrypted flags (at beginning, middle, or end of a string)
+ENCRYPTED_FLAG_REGEX = re.compile(r"(\s+|^)-+encrypt(ed)?(\s+|$)")
+UNENCRYPTED_FLAG_REGEX = re.compile(r"(\s+|^)-+unencrypt(ed)?(\s+|$)")
+
+
+def extract_encryption_flags(text: str) -> Tuple[str, bool, bool]:
+    """Strip --encrypted / --unencrypted flags from a command argument.
+
+    Returns:
+        Tuple of (cleaned_text, force_encryption, force_unencryption)
+    """
+    force_encryption = bool(ENCRYPTED_FLAG_REGEX.search(text))
+    force_unencryption = bool(UNENCRYPTED_FLAG_REGEX.search(text))
+    if force_encryption:
+        text = ENCRYPTED_FLAG_REGEX.sub(" ", text)
+    if force_unencryption:
+        text = UNENCRYPTED_FLAG_REGEX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(), force_encryption, force_unencryption
+
 
 async def validate_room_creation_params(
     roomname: str, config: dict, evt: Optional[MessageEvent] = None
@@ -20,20 +39,9 @@ async def validate_room_creation_params(
     Returns:
         Tuple of (sanitized_name, force_encryption, force_unencryption, error_msg)
     """
-    # Check for encryption flags (at beginning, middle, or end of string)
-    encrypted_flag_regex = re.compile(r"(\s+|^)-+encrypt(ed)?(\s+|$)")
-    unencrypted_flag_regex = re.compile(r"(\s+|^)-+unencrypt(ed)?(\s+|$)")
-    force_encryption = bool(encrypted_flag_regex.search(roomname))
-    force_unencryption = bool(unencrypted_flag_regex.search(roomname))
-
-    # Clean up room name
-    if force_encryption:
-        roomname = encrypted_flag_regex.sub("", roomname)  # Remove encryption flag
-    if force_unencryption:
-        roomname = unencrypted_flag_regex.sub("", roomname)  # Remove unencryption flag
-
-    # Clean up any extra whitespace
-    roomname = re.sub(r"\s+", " ", roomname).strip()
+    roomname, force_encryption, force_unencryption = extract_encryption_flags(
+        roomname
+    )
 
     sanitized_name = re.sub(r"[^a-zA-Z0-9]", "", roomname).lower()
 

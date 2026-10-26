@@ -4194,6 +4194,7 @@ class CommunityBot(Plugin):
         invitees: Optional[list[str]] = None,
         event_room: bool = False,
         target_parent: Optional[str] = None,
+        encrypt: Optional[bool] = None,
     ) -> tuple[str, str] | None:
         """Create a new room and add it to the parent space.
 
@@ -4203,6 +4204,8 @@ class CommunityBot(Plugin):
             power_level_override: Optional power levels to use. If not provided, will try to get from parent room.
             creation_content: Optional creation content to use when creating the room.
             invitees: Optional list of users to invite. If not provided, uses config invitees.
+            encrypt: Optional explicit encryption choice. Overrides flags in
+                roomname and the config default when not None.
 
         Returns:
             tuple: (room_id, room_alias) if successful, None if failed
@@ -4229,6 +4232,9 @@ class CommunityBot(Plugin):
             if event_room:
                 force_encryption = self.config.get("events_encrypt_rooms", False)
                 force_unencryption = not force_encryption
+            if encrypt is not None:
+                force_encryption = encrypt
+                force_unencryption = not encrypt
 
             # Prepare room creation data
             alias_localpart, server, room_invitees, parent_room = (
@@ -4452,7 +4458,31 @@ class CommunityBot(Plugin):
         if success and room_id != evt.room_id:
             await evt.respond("Room has been archived.")
 
-    @room.subcommand("replace", help="replace a room with a new one")
+    async def _replacement_encryption(
+        self, room_id: str, force_encryption: bool, force_unencryption: bool
+    ) -> Optional[bool]:
+        """Decide whether a replacement room should be encrypted.
+
+        An explicit flag wins; otherwise keep the old room's setting. Returns
+        None (use the config default) if the old room's state can't be read.
+        """
+        if force_encryption or force_unencryption:
+            return force_encryption
+        try:
+            await self.client.get_state_event(room_id, EventType.ROOM_ENCRYPTION)
+            return True
+        except MNotFound:
+            return False
+        except Exception as e:
+            self.log.warning(
+                f"Could not read encryption state of {room_id}, using config default: {e}"
+            )
+            return None
+
+    @room.subcommand(
+        "replace",
+        help="replace a room with a new one. keeps the old room's encryption unless you add `--encrypted` or `--unencrypted`",
+    )
     @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
@@ -4461,6 +4491,13 @@ class CommunityBot(Plugin):
         self.log.info(f"Command arguments: room='{room}', evt.room_id='{evt.room_id}'")
 
         await evt.mark_read()
+
+        room, force_encryption, force_unencryption = (
+            room_creation_utils.extract_encryption_flags(room or "")
+        )
+        if force_encryption and force_unencryption:
+            await evt.reply("pick one of --encrypted or --unencrypted, not both")
+            return
 
         room_id = await self._resolve_room_arg(room, evt)
         if room_id is None:
@@ -4727,12 +4764,18 @@ class CommunityBot(Plugin):
             )
         else:
             # Create a regular room
-            self.log.info(f"Calling create_room with room_name='{room_name}'")
+            encrypt = await self._replacement_encryption(
+                room_id, force_encryption, force_unencryption
+            )
+            self.log.info(
+                f"Calling create_room with room_name='{room_name}', encrypt={encrypt}"
+            )
             new_room_id, new_room_alias = await self.create_room(
                 room_name,
                 evt,
                 creation_content=predecessor_content,
                 target_parent=replacement_parent,
+                encrypt=encrypt,
             )
             self.log.info(
                 f"create_room returned: room_id={new_room_id}, alias={new_room_alias}"
