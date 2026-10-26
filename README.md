@@ -233,7 +233,7 @@ use the `!community room replace` subcommand to replace an existing room with a 
 
 the replacement process will create a new room with the same name and avatar, transfer all room aliases to the new room, and archive the old room with a pointer to the new room. the new room will have standard join rules that restrict membership to space members. this logic is a little clunky, but it seems to work.
 
-the new room keeps the old room's encryption setting by default. add `--encrypted` or `--unencrypted` to change it, e.g.
+the new room uses the `encrypt` config setting by default, regardless of the old room. add `--encrypted` or `--unencrypted` to override it, e.g.
 `!community room replace #oldroom:myserver.tld --unencrypted` (or just `!community room replace --unencrypted` from inside
 the room). note that encryption cannot be turned off in an existing room, so replacement is the only way to go from
 encrypted to unencrypted. these flags are ignored when replacing a space.

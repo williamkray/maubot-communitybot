@@ -4458,30 +4458,9 @@ class CommunityBot(Plugin):
         if success and room_id != evt.room_id:
             await evt.respond("Room has been archived.")
 
-    async def _replacement_encryption(
-        self, room_id: str, force_encryption: bool, force_unencryption: bool
-    ) -> Optional[bool]:
-        """Decide whether a replacement room should be encrypted.
-
-        An explicit flag wins; otherwise keep the old room's setting. Returns
-        None (use the config default) if the old room's state can't be read.
-        """
-        if force_encryption or force_unencryption:
-            return force_encryption
-        try:
-            await self.client.get_state_event(room_id, EventType.ROOM_ENCRYPTION)
-            return True
-        except MNotFound:
-            return False
-        except Exception as e:
-            self.log.warning(
-                f"Could not read encryption state of {room_id}, using config default: {e}"
-            )
-            return None
-
     @room.subcommand(
         "replace",
-        help="replace a room with a new one. keeps the old room's encryption unless you add `--encrypted` or `--unencrypted`",
+        help="replace a room with a new one. add `--encrypted` or `--unencrypted` to override the default encryption setting",
     )
     @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
@@ -4763,9 +4742,12 @@ class CommunityBot(Plugin):
                 f"create_space returned: room_id={new_room_id}, alias={new_room_alias}"
             )
         else:
-            # Create a regular room
-            encrypt = await self._replacement_encryption(
-                room_id, force_encryption, force_unencryption
+            # Create a regular room. Encryption follows the config default
+            # unless a flag overrides it.
+            encrypt = (
+                force_encryption
+                if force_encryption or force_unencryption
+                else None
             )
             self.log.info(
                 f"Calling create_room with room_name='{room_name}', encrypt={encrypt}"
