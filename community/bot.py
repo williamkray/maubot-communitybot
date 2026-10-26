@@ -623,7 +623,7 @@ class CommunityBot(Plugin):
         return results
 
     async def get_space_roomlist(
-        self, space: str = None, _visited: set = None
+        self, space: str = None, _visited: set = None, _failed: list = None
     ) -> list[str]:
         """Return all rooms in the managed space, recursing into subspaces.
 
@@ -640,6 +640,8 @@ class CommunityBot(Plugin):
                 Passed automatically during recursion into subspaces.
             _visited: Internal set of already-visited space IDs, used to guard
                 against cycles (spaces can reference each other).
+            _failed: Internal list collecting spaces whose state could not be
+                read, so an incomplete traversal is never cached.
         """
         # Top-level call: serve from, or populate, the cache.
         if space is None:
@@ -653,8 +655,13 @@ class CommunityBot(Plugin):
                     "No parent room configured, cannot get space roomlist"
                 )
                 return []
-            rooms = await self.get_space_roomlist(parent, set())
-            self._roomlist_cache = rooms
+            failed = []
+            rooms = await self.get_space_roomlist(parent, set(), failed)
+            # Only cache a complete traversal. Caching after a failed state
+            # fetch would pin an empty/partial list until the next space
+            # change, silently breaking every command that uses it.
+            if not failed:
+                self._roomlist_cache = rooms
             return list(rooms)
 
         # Recursive call for a specific (sub)space.
@@ -668,7 +675,18 @@ class CommunityBot(Plugin):
         rooms = []
         try:
             self.log.debug(f"getting roomlist from {space} space")
-            state = await self.client.get_state(space)
+            try:
+                state = await self.client.get_state(space)
+            except Exception as e:
+                # mautrix's get_state() also rewrites the room's member list
+                # in its state store (DELETE + COPY), which can race with
+                # concurrent membership updates and raise a transient
+                # duplicate-key error. Retry once before giving up.
+                self.log.warning(
+                    f"Retrying space roomlist fetch for {space} after error: {e}"
+                )
+                await asyncio.sleep(1)
+                state = await self.client.get_state(space)
             for evt in state:
                 if evt.type == EventType.SPACE_CHILD:
                     # only look for rooms that include a via path, otherwise they
@@ -679,10 +697,14 @@ class CommunityBot(Plugin):
                         # Recurse into child spaces so their rooms are managed too.
                         if await room_utils.is_space(self.client, child, self.log):
                             rooms.extend(
-                                await self.get_space_roomlist(child, _visited)
+                                await self.get_space_roomlist(
+                                    child, _visited, _failed
+                                )
                             )
         except Exception as e:
             self.log.error(f"Error getting space roomlist for {space}: {e}")
+            if _failed is not None:
+                _failed.append(space)
 
         # De-duplicate while preserving order (a room can be a child of more
         # than one subspace within the tree).

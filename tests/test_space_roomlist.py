@@ -205,3 +205,42 @@ async def test_invalidate_forces_rebuild():
     await bot.get_space_roomlist()
 
     assert bot.client.get_state.call_count > calls_after_first
+
+
+@pytest.mark.asyncio
+async def test_transient_state_error_is_retried(monkeypatch):
+    """A one-off get_state failure (e.g. state store race) is retried."""
+    monkeypatch.setattr("community.bot.asyncio.sleep", AsyncMock())
+    state_map = {
+        "!parent:example.com": [_child_event("!r1:x")],
+    }
+    bot = _make_bot(state_map, space_flags={})
+    real = bot.client.get_state.side_effect
+    calls = {"n": 0}
+
+    async def flaky(room_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception('duplicate key value violates unique constraint')
+        return await real(room_id)
+
+    bot.client.get_state.side_effect = flaky
+
+    assert await bot.get_space_roomlist() == ["!r1:x"]
+    assert bot._roomlist_cache == ["!r1:x"]
+
+
+@pytest.mark.asyncio
+async def test_failed_traversal_is_not_cached(monkeypatch):
+    """A persistent failure returns what it can but never caches it."""
+    monkeypatch.setattr("community.bot.asyncio.sleep", AsyncMock())
+    bot = _make_bot({}, space_flags={})
+    bot.client.get_state.side_effect = Exception("boom")
+
+    assert await bot.get_space_roomlist() == []
+    assert bot._roomlist_cache is None
+
+    # Once the homeserver/state store recovers, the next call succeeds.
+    bot.client.get_state.side_effect = None
+    bot.client.get_state.return_value = [_child_event("!r1:x")]
+    assert await bot.get_space_roomlist() == ["!r1:x"]
