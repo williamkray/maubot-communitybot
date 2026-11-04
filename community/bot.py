@@ -564,10 +564,7 @@ class CommunityBot(Plugin):
 
         purge_list, error_list = await self._execute_purge(report["kick_inactive"])
 
-        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            purge_list=purge_list, error_list=error_list
-        )
+        results = self._format_results("users were purged", purge_list, error_list)
         await self._post_notification(results)
 
     async def do_sync(self) -> None:
@@ -1671,6 +1668,17 @@ class CommunityBot(Plugin):
             return ", ".join(names)
         return ", ".join(names[:6]) + f", and {len(names) - 6} more"
 
+    @staticmethod
+    def _format_results(summary: str, items, error_list) -> str:
+        """Render a purge/kick/ban/unban results message.
+
+        The errors section is only included when there are errors to report.
+        """
+        results = f"the following {summary}:<p><code>{items}</code></p>"
+        if error_list:
+            results += f"the following errors were recorded:<p><code>{error_list}</code></p>"
+        return results
+
     async def send_membership_notification(
         self, evt: StateEvent, template_key: str, actor_id: str = None
     ) -> None:
@@ -2475,9 +2483,10 @@ class CommunityBot(Plugin):
         msg = await evt.respond("starting the ban...")
         results_map = await self.ban_this_user(user, all_rooms=True)
 
-        results = "the following users were kicked and banned:<p><code>{ban_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            ban_list=results_map["ban_list"], error_list=results_map["error_list"]
+        results = self._format_results(
+            "users were kicked and banned",
+            results_map["ban_list"],
+            results_map["error_list"],
         )
         await evt.respond(results, allow_html=True, edits=msg)
 
@@ -2519,10 +2528,7 @@ class CommunityBot(Plugin):
             except Exception as e:
                 error_list[room] = str(e)
 
-        results = "the following users were unbanned:<p><code>{unban_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            unban_list=unban_list, error_list=error_list
-        )
+        results = self._format_results("users were unbanned", unban_list, error_list)
         await evt.respond(results, allow_html=True, edits=msg)
 
         unbanned = unban_list.get(user, [])
@@ -4121,10 +4127,7 @@ class CommunityBot(Plugin):
             readout += f" ⚠️ {len(error_list)} user(s) had errors."
         await self._post_notification(readout, edit=notif)
 
-        results = "the following users were purged:<p><code>{purge_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            purge_list=purge_list, error_list=error_list
-        )
+        results = self._format_results("users were purged", purge_list, error_list)
         await evt.respond(results, allow_html=True, edits=msg)
 
     @user.subcommand(
@@ -4167,10 +4170,7 @@ class CommunityBot(Plugin):
                 self.log.warning(e)
                 error_list.setdefault(user, []).append(roomname or room)
 
-        results = "the following users were kicked:<p><code>{kick_list}</code></p>the following errors were \
-                recorded:<p><code>{error_list}</code></p>".format(
-            kick_list=kick_list, error_list=error_list
-        )
+        results = self._format_results("users were kicked", kick_list, error_list)
         await evt.respond(results, allow_html=True, edits=msg)
 
         kicked = kick_list.get(user, [])
