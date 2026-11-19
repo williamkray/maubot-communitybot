@@ -220,7 +220,31 @@ power-levels. this ensures that the bot is still able to manage room admins. the
 `invitees` list. populate this list with your space admins, other bots, or any other account you want to make sure gets
 invited to the new room!
 
-rooms created by the bot will have join restriction limited to members of the space.
+rooms created by the bot will have join restriction limited to members of the space. they also get the homeserver's usual
+default per-event permissions: changing power levels, encryption, history visibility, server ACLs, or tombstoning the
+room requires power level 100, and name/avatar/alias changes require 50.
+
+### voice rooms
+
+include the `--voice` flag (e.g. `!community room create hangout --voice`) to create a voice room: a room whose primary
+interface is a MatrixRTC (Element Call) voice/video call, with text chat secondary. clients that support voice rooms
+(Cinny, Sable, Element Web with Element Call video rooms) open the call when you click the room; other clients show it
+as an ordinary room where a call can still be started. any member can start or join a call in a voice room, and the bot
+pre-opens a Matrix 2.0 (MSC4143) call slot so that keeps working as clients move to homeserver-backed calling.
+
+voice rooms need MatrixRTC on your homeserver: a LiveKit backend advertised as `org.matrix.msc4143.rtc_foci` in
+`/.well-known/matrix/client`. the room type is set at creation and can't be changed later, but `room replace --voice`
+recreates a text room as a voice room (and replacing a voice room keeps it one). `--voice` is ignored when replacing a
+space.
+
+note that calling is mid-transition between protocol versions. clients on homeservers with sticky events (MSC4354)
+start calls the "Matrix 2.0" way, while others use the older per-device membership events. a client joining an existing
+call generally follows whichever way the call was started, but mixing the two can still break or split a call: with
+Sable as of late 2026, for example, someone without sticky-event support can't join a call that a Matrix 2.0 user
+started. that's a client limitation, not something the bot's room setup can fix.
+
+in regular text rooms, `call_power_level` (default 50, moderators) controls who may start a call. with clients still on
+the older call protocol it also controls who may join one, because starting and joining are the same action there.
 
 ## room archival and replacement
 

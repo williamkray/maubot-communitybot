@@ -31,6 +31,12 @@ encrypt: False
 # of your managed community. otherwise, you must be a space member to join the rooms.
 invite_power_level: 50
 
+# when creating a new text room, what power-level should be required to start a voice/video
+# call (MatrixRTC / Element Call) in it? with clients still using the older call protocol, this
+# also limits who can join a call, since starting and joining are the same action there.
+# voice rooms (`room create --voice`) ignore this: any member can start or join a call in them.
+call_power_level: 50
+
 # when a user is promoted to this power level (or higher) in a managed room,
 # automatically invite them to that room if it is invite-only (e.g. the
 # moderators room), so newly-promoted admins/mods can actually join it. power

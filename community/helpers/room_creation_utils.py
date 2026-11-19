@@ -9,6 +9,43 @@ from mautrix.client import Client
 # --encrypted / --unencrypted flags (at beginning, middle, or end of a string)
 ENCRYPTED_FLAG_REGEX = re.compile(r"(\s+|^)-+encrypt(ed)?(\s+|$)")
 UNENCRYPTED_FLAG_REGEX = re.compile(r"(\s+|^)-+unencrypt(ed)?(\s+|$)")
+# --voice flag: create a MatrixRTC call room instead of a text room
+VOICE_FLAG_REGEX = re.compile(r"(\s+|^)-+voice(\s+|$)")
+
+# MSC3417 call-room type. Clients that support voice rooms (Cinny, Sable,
+# Element Web) render rooms with this m.room.create type call-first; others
+# show them as ordinary rooms.
+CALL_ROOM_TYPE = "org.matrix.msc3417.call"
+# Legacy (MSC3401) call state events: per-device membership state, plus the
+# placeholder "call" event Cinny/Sable put in new call rooms.
+CALL_MEMBER_EVENT = "org.matrix.msc3401.call.member"
+CALL_EVENT = "org.matrix.msc3401.call"
+# MSC4143 (Matrix 2.0) RTC events. A slot is a state event an admin opens so
+# members can join a call by sending rtc.member sticky (non-state) events.
+RTC_SLOT_EVENTS = ("org.matrix.msc4143.rtc.slot", "m.rtc.slot")
+RTC_MEMBER_EVENTS = ("org.matrix.msc4143.rtc.member", "m.rtc.member")
+# The default call slot, as (event type, state key, per-member encryption
+# type) for each wire format. Deployed clients (Element Call, matrix-js-sdk)
+# use the unstable form; clients on homeservers advertising
+# org.matrix.msc4143.stable (e.g. Sable) only accept the stable one.
+RTC_CALL_SLOTS = (
+    ("org.matrix.msc4143.rtc.slot", "m.call#ROOM", "org.matrix.msc4143.per_member"),
+    ("m.rtc.slot", "m.call#room", "m.per_member"),
+)
+
+# Synapse's default per-event power levels. power_level_content_override
+# replaces the whole "events" map, so these must be restated whenever we send
+# one, or they silently fall back to state_default (50).
+DEFAULT_EVENT_POWER_LEVELS = {
+    "m.room.avatar": 50,
+    "m.room.canonical_alias": 50,
+    "m.room.encryption": 100,
+    "m.room.history_visibility": 100,
+    "m.room.name": 50,
+    "m.room.power_levels": 100,
+    "m.room.server_acl": 100,
+    "m.room.tombstone": 100,
+}
 
 
 def extract_encryption_flags(text: str) -> Tuple[str, bool, bool]:
@@ -24,6 +61,80 @@ def extract_encryption_flags(text: str) -> Tuple[str, bool, bool]:
     if force_unencryption:
         text = UNENCRYPTED_FLAG_REGEX.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip(), force_encryption, force_unencryption
+
+
+def extract_voice_flag(text: str) -> Tuple[str, bool]:
+    """Strip a --voice flag from a command argument.
+
+    Returns:
+        Tuple of (cleaned_text, voice)
+    """
+    voice = bool(VOICE_FLAG_REGEX.search(text))
+    if voice:
+        text = VOICE_FLAG_REGEX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(), voice
+
+
+def is_call_room_type(room_type: Any) -> bool:
+    """True if an m.room.create ``type`` (RoomType enum or str) marks a call room."""
+    return getattr(room_type, "value", room_type) == CALL_ROOM_TYPE
+
+
+def call_event_power_levels(voice: bool, call_power_level: int = 50) -> Dict[str, int]:
+    """Build the ``events`` power-level map for a new room.
+
+    Restates the server defaults, then sets the call-related event levels:
+
+    - voice rooms: anyone may join a call. The legacy call.member state event
+      is both "start" and "join", so it must be 0; rtc.member (Matrix 2.0) is
+      0 too. The slot is pre-opened at creation (see ``voice_room_initial_state``),
+      so only closing/reconfiguring it needs moderator power.
+    - text rooms: ``call_power_level`` gates starting calls. In the legacy
+      model it also gates joining (start and join are the same event); with
+      Matrix 2.0 slots, a moderator opens the slot and members join freely.
+    """
+    events = dict(DEFAULT_EVENT_POWER_LEVELS)
+    if voice:
+        events[CALL_MEMBER_EVENT] = 0
+        for slot_event in RTC_SLOT_EVENTS:
+            events[slot_event] = 50
+    else:
+        events[CALL_MEMBER_EVENT] = call_power_level
+        events[CALL_EVENT] = call_power_level
+        for slot_event in RTC_SLOT_EVENTS:
+            events[slot_event] = call_power_level
+    for member_event in RTC_MEMBER_EVENTS:
+        events[member_event] = 0
+    return events
+
+
+def voice_room_creation_content(
+    creation_content: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return ``creation_content`` (copied, may be None) with the call-room type set."""
+    content = dict(creation_content or {})
+    content["type"] = CALL_ROOM_TYPE
+    return content
+
+
+def voice_room_initial_state(encrypted: bool) -> List[Dict[str, Any]]:
+    """Initial state that makes a room usable as a voice room in every model.
+
+    - the empty legacy ``call`` event Cinny/Sable create alongside call rooms
+    - an open MSC4143 call slot in both the unstable and stable forms, so
+      members can join Matrix 2.0 calls without needing permission to open
+      one. Encrypted rooms use per-member keys.
+    """
+    state: List[Dict[str, Any]] = [{"type": CALL_EVENT, "state_key": "", "content": {}}]
+    for slot_event, slot_key, encryption_type in RTC_CALL_SLOTS:
+        slot_content: Dict[str, Any] = {
+            "status": "open",
+            "application": {"type": "m.call"},
+        }
+        if encrypted:
+            slot_content["encryption"] = {"type": encryption_type}
+        state.append({"type": slot_event, "state_key": slot_key, "content": slot_content})
+    return state
 
 
 async def validate_room_creation_params(

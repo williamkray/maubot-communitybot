@@ -108,6 +108,7 @@ class Config(BaseProxyConfig):
         helper.copy("verification_attempts")
         helper.copy("verification_message")
         helper.copy("invite_power_level")
+        helper.copy("call_power_level")
         helper.copy("auto_invite_pl")
         helper.copy("room_version")
         helper.copy("events_encrypt_rooms")
@@ -4195,6 +4196,7 @@ class CommunityBot(Plugin):
         event_room: bool = False,
         target_parent: Optional[str] = None,
         encrypt: Optional[bool] = None,
+        voice: bool = False,
     ) -> tuple[str, str] | None:
         """Create a new room and add it to the parent space.
 
@@ -4206,6 +4208,8 @@ class CommunityBot(Plugin):
             invitees: Optional list of users to invite. If not provided, uses config invitees.
             encrypt: Optional explicit encryption choice. Overrides flags in
                 roomname and the config default when not None.
+            voice: Create a MatrixRTC voice/call room (MSC3417) instead of a
+                text room.
 
         Returns:
             tuple: (room_id, room_alias) if successful, None if failed
@@ -4304,9 +4308,27 @@ class CommunityBot(Plugin):
                 if power_levels.users:
                     power_levels.users.pop(self.client.mxid, None)
 
+            # Per-event levels: server defaults plus who may start/join calls.
+            # Explicit levels from a caller-supplied override take precedence.
+            if power_levels:
+                event_levels = room_creation_utils.call_event_power_levels(
+                    voice, self.config.get("call_power_level", 50)
+                )
+                # mautrix keys parsed events by EventType; normalise to str so
+                # an override replaces our entry instead of duplicating it.
+                event_levels.update(
+                    {str(k): v for k, v in (power_levels.events or {}).items()}
+                )
+                power_levels.events = event_levels
+
+            if voice:
+                creation_content = room_creation_utils.voice_room_creation_content(
+                    creation_content
+                )
+
             if evt:
                 mymsg = await evt.respond(
-                    f"creating {alias_localpart} with room version {self.config['room_version']}, give me a minute..."
+                    f"creating {'voice room ' if voice else ''}{alias_localpart} with room version {self.config['room_version']}, give me a minute..."
                 )
 
             # Prepare initial state events
@@ -4319,6 +4341,14 @@ class CommunityBot(Plugin):
                 creation_content,
                 join_rule_room=parent_room,
             )
+            if voice:
+                encrypted = any(
+                    ev.get("type") == str(EventType.ROOM_ENCRYPTION)
+                    for ev in initial_state
+                )
+                initial_state.extend(
+                    room_creation_utils.voice_room_initial_state(encrypted)
+                )
 
             # Create the room
             self.log.info(
@@ -4389,7 +4419,8 @@ class CommunityBot(Plugin):
     @room.subcommand(
         "create",
         help="create a new room titled <roomname> and add it to the parent space. \
-                          optionally include `--encrypted` or `--unencrypted` to force encryption, and \
+                          optionally include `--encrypted` or `--unencrypted` to force encryption, \
+                          `--voice` to create a voice room (call-first, text chat secondary), and \
                           `--under <subspace>` to nest the room under a managed subspace instead of the parent.",
     )
     @command.argument("roomname", pass_raw=True, required=True)
@@ -4400,17 +4431,20 @@ class CommunityBot(Plugin):
             await evt.reply(
                 'pass me a room name (like "cool topic") and i will create it and add it to the space. \
                             use `--encrypted` or `--unencrypted` to ensure encryption is enabled/disabled at creation time even if that isnt my default \
-                            setting. use `--under <subspace>` to nest the room under a managed subspace instead of the parent space.'
+                            setting. use `--voice` to create a voice room, which supporting clients open as a call first with text chat secondary. \
+                            use `--under <subspace>` to nest the room under a managed subspace instead of the parent space.'
             )
             return
+
+        roomname, voice = room_creation_utils.extract_voice_flag(roomname)
 
         # Split out an optional --under/--target <subspace> flag; the remainder
         # (which may still carry --encrypted/--unencrypted) is the room name.
         roomname, under_target = room_creation_utils.extract_target_flag(roomname)
         if len(roomname) == 0:
             await evt.reply(
-                "pass me a room name before the `--under` flag, like "
-                "`cool topic --under Projects`."
+                "pass me a room name along with any flags, like "
+                "`cool topic --voice --under Projects`."
             )
             return
         target_parent = None
@@ -4436,7 +4470,9 @@ class CommunityBot(Plugin):
             )
             return
 
-        result = await self.create_room(roomname, evt, target_parent=target_parent)
+        result = await self.create_room(
+            roomname, evt, target_parent=target_parent, voice=voice
+        )
         if not result:
             return  # Error already logged and reported to user by create_room
 
@@ -4460,7 +4496,8 @@ class CommunityBot(Plugin):
 
     @room.subcommand(
         "replace",
-        help="replace a room with a new one. add `--encrypted` or `--unencrypted` to override the default encryption setting",
+        help="replace a room with a new one. add `--encrypted` or `--unencrypted` to override the default encryption setting, \
+            or `--voice` to make the replacement a voice room (voice rooms stay voice rooms automatically)",
     )
     @command.argument("room", required=False, pass_raw=True)
     @decorators.require_parent_room
@@ -4477,11 +4514,25 @@ class CommunityBot(Plugin):
         if force_encryption and force_unencryption:
             await evt.reply("pick one of --encrypted or --unencrypted, not both")
             return
+        room, voice = room_creation_utils.extract_voice_flag(room)
 
         room_id = await self._resolve_room_arg(room, evt)
         if room_id is None:
             return
         self.log.info(f"Using room ID: {room_id}")
+
+        # The room type lives in the immutable m.room.create event, so a voice
+        # room must be recreated as one or it silently becomes a text room.
+        if not voice:
+            try:
+                old_create = await self.client.get_state_event(
+                    room_id, EventType.ROOM_CREATE
+                )
+                voice = room_creation_utils.is_call_room_type(
+                    getattr(old_create, "type", None)
+                )
+            except Exception as e:
+                self.log.warning(f"Could not read room type of {room_id}: {e}")
 
         # Check bot permissions in the old room
         self.log.info(f"=== CHECKING BOT PERMISSIONS ===")
@@ -4758,6 +4809,7 @@ class CommunityBot(Plugin):
                 creation_content=predecessor_content,
                 target_parent=replacement_parent,
                 encrypt=encrypt,
+                voice=voice,
             )
             self.log.info(
                 f"create_room returned: room_id={new_room_id}, alias={new_room_alias}"
