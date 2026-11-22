@@ -171,7 +171,8 @@ if configured with the `redact_on_ban` setting, banning a user from your space w
 invite someone to the community with `user invite` (e.g. `!community user invite @newfriend:server.tld`). anyone
 allowed to invite users to the parent space (its own "invite users" power level, set from `invite_power_level` when the
 community is initialized) can use it. it invites them to the parent space plus every room listed in the `invite_rooms` config option
-(room IDs, e.g. your general and announcements rooms). users on a subscribed banlist are refused.
+(room IDs, e.g. your general and announcements rooms). users on a subscribed banlist are refused. set
+`invite_rooms_on_join: true` to also invite everyone who joins the parent space to those rooms, however they got in.
 
 community members can bring other community members into a room with `room invite`, run in that room (e.g.
 `!community room invite @friend:server.tld`). the person being invited must already be in the parent space; only

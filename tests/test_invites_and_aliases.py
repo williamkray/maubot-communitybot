@@ -507,3 +507,84 @@ class TestCouldSelfJoin:
     async def test_lookup_error_fails_closed(self):
         assert await self._call(MNotFound("nf", 404)) is False
         assert await self._call(RuntimeError("boom")) is False
+
+
+# --- parent-space joins --------------------------------------------------------
+
+
+class TestParentJoin:
+    def _join_bot(self, on_join=True, banned=False, memberships=None):
+        bot = _wire(_bot(invite_rooms=["!a:x", "#alias:x", "!b:x"], memberships=memberships))
+        bot.config["invite_rooms_on_join"] = on_join
+        bot.check_if_banned = AsyncMock(return_value=banned)
+        bot.ban_this_user = AsyncMock()
+        bot.do_sync = AsyncMock()
+        return bot
+
+    def _evt(self, sender=TARGET):
+        return Mock(sender=sender, room_id=PARENT)
+
+    @pytest.mark.asyncio
+    async def test_invites_to_invite_rooms_when_enabled(self):
+        bot = self._join_bot()
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        invited = [c.args[0] for c in bot.client.invite_user.await_args_list]
+        assert invited == ["!a:x", "!b:x"]  # alias entry skipped
+        assert all(
+            c.kwargs["reason"] == "joined the community"
+            for c in bot.client.invite_user.await_args_list
+        )
+        bot.do_sync.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_invites_when_disabled_but_still_syncs(self):
+        bot = self._join_bot(on_join=False)
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        bot.client.invite_user.assert_not_awaited()
+        bot.do_sync.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_option_missing_defaults_off(self):
+        bot = self._join_bot()
+        del bot.config["invite_rooms_on_join"]
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        bot.client.invite_user.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_banlisted_joiner_is_banned_not_invited(self):
+        bot = self._join_bot(banned=True)
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        bot.ban_this_user.assert_awaited_once_with(TARGET)
+        bot.client.invite_user.assert_not_awaited()
+        bot.do_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bot_own_join_ignored(self):
+        bot = self._join_bot()
+        await CommunityBot._handle_parent_join(bot, self._evt(sender=bot.client.mxid))
+        bot.check_if_banned.assert_not_awaited()
+        bot.client.invite_user.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_rooms_already_joined_and_survives_errors(self):
+        bot = self._join_bot(memberships={("!a:x", TARGET): Membership.JOIN})
+        bot.client.invite_user = AsyncMock(side_effect=RuntimeError("no power"))
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        # !a:x skipped (joined); !b:x attempted and failed without raising
+        assert [c.args[0] for c in bot.client.invite_user.await_args_list] == ["!b:x"]
+
+    @pytest.mark.asyncio
+    async def test_newjoin_routes_parent_and_skips_replayed_state(self):
+        from mautrix.client import SyncStream
+
+        bot = self._join_bot()
+        bot._handle_parent_join = AsyncMock()
+        bot.get_space_roomlist = AsyncMock(return_value=[])
+        live = Mock(sender=TARGET, room_id=PARENT, source=SyncStream.TIMELINE)
+        await CommunityBot.newjoin(bot, live)
+        bot._handle_parent_join.assert_awaited_once_with(live)
+
+        bot._handle_parent_join.reset_mock()
+        replay = Mock(sender=TARGET, room_id=PARENT, source=SyncStream.STATE)
+        await CommunityBot.newjoin(bot, replay)
+        bot._handle_parent_join.assert_not_awaited()

@@ -24,6 +24,10 @@ commands or rely on features outside the space:**
 - **`!community event magiclink`** no longer posts the one-time login link in the room if it can't
   DM you; it asks you to DM the bot instead.
 
+- **v0.7.1:** people joining the parent space are now checked against your banlists and added to activity
+  tracking right away (before, joins to the parent space itself were skipped). the new
+  `invite_rooms_on_join` option also invites them to your `invite_rooms`.
+
 there's no database or config migration to do.
 
 ## v0.5

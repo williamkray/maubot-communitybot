@@ -81,6 +81,7 @@ class Config(BaseProxyConfig):
         helper.copy("parent_room")
         helper.copy("command_aliases")
         helper.copy("invite_rooms")
+        helper.copy("invite_rooms_on_join")
         helper.copy("community_slug")
         helper.copy("track_users")
         helper.copy("warn_threshold_days")
@@ -1584,6 +1585,42 @@ class CommunityBot(Plugin):
         except Exception as e:
             self.log.warning(f"could not auto-invite {user} to {room_id}: {e}")
 
+    async def _handle_parent_join(self, evt: StateEvent) -> None:
+        """Someone joined the parent space: banlist check, tracking sync, and
+        (if invite_rooms_on_join is set) invites to the invite_rooms."""
+        user = evt.sender
+        if user == self.client.mxid:
+            return
+        try:
+            on_banlist = await self.check_if_banned(user)
+        except Exception as e:
+            self.log.error(f"Failed to check if {user} is banned: {e}")
+            on_banlist = False
+        if on_banlist:
+            await self.ban_this_user(user)
+            return
+        # passive sync of tracking db
+        await self.do_sync()
+
+        if not self.config.get("invite_rooms_on_join", False):
+            return
+        invited = []
+        for room_id in self.config.get("invite_rooms", []) or []:
+            room_id = str(room_id)
+            if not room_id.startswith("!"):
+                continue
+            try:
+                result = await self._invite_to_room(
+                    room_id, user, reason="joined the community"
+                )
+            except Exception as e:
+                self.log.warning(f"could not auto-invite {user} to {room_id}: {e}")
+                continue
+            if result == "invited":
+                invited.append(room_id)
+        if invited:
+            self.log.info(f"invited new member {user} to invite_rooms: {invited}")
+
     async def _get_membership(self, room_id: str, user: str) -> Optional[Membership]:
         """Return a user's membership in a room, or None if they have none."""
         try:
@@ -1932,6 +1969,12 @@ class CommunityBot(Plugin):
         if evt.source & SyncStream.STATE:
             return
         else:
+            # The parent space isn't in get_space_roomlist(), so it gets its
+            # own handling (no greetings or verification in a space).
+            parent = self.config["parent_room"]
+            if parent and evt.room_id == parent:
+                await self._handle_parent_join(evt)
+                return
             # we only care about join events in rooms in the space
             # this avoids trying to verify users in other rooms the bot might be in,
             # such as public banlist policy rooms
@@ -1947,9 +1990,6 @@ class CommunityBot(Plugin):
             if on_banlist:
                 await self.ban_this_user(evt.sender)
                 return
-            # passive sync of tracking db
-            if evt.room_id == self.config["parent_room"]:
-                await self.do_sync()
             # greeting activities
             room_id = str(evt.room_id)
             self.log.debug(f"New join in room {room_id} by {evt.sender}")

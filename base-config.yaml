@@ -86,6 +86,10 @@ invitees: []
 # its ID. `!community doctor` lists these with their room names.
 invite_rooms: []
 
+# also invite people to the invite_rooms automatically when they join the
+# parent space, however they were invited (not only through `user invite`).
+invite_rooms_on_join: false
+
 # auto-greet users in rooms with these messages
 # map greeting messages to a room
 # you can use {user} to reference the joining user in this message using a
