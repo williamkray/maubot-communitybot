@@ -3,7 +3,7 @@
 import re
 from typing import Optional, Tuple, List
 from mautrix.types import EventType, PowerLevelStateEventContent
-from mautrix.errors import MNotFound
+from mautrix.errors import MNotFound, MForbidden
 
 
 async def validate_room_alias(client, alias_localpart: str, server: str) -> bool:
@@ -118,7 +118,9 @@ async def get_room_version_and_creators(
         return "1", []
 
 
-async def is_space(client, room_id: str, logger=None) -> bool:
+async def is_space(
+    client, room_id: str, logger=None, raise_transient: bool = False
+) -> bool:
     """Check whether a room is a space (m.space).
 
     Spaces are created by setting the ``m.room.create`` event's ``type`` to
@@ -131,13 +133,18 @@ async def is_space(client, room_id: str, logger=None) -> bool:
         logger: Optional logger for debug output
 
     Returns:
-        bool: True if the room is a space, False otherwise (including on error)
+        bool: True if the room is a space, False otherwise (including on error,
+        unless raise_transient is set: then only not-found/forbidden count as
+        "not a space" and other errors are re-raised so callers can tell a
+        blip from a real answer)
     """
     try:
         create_content = await client.get_state_event(room_id, EventType.ROOM_CREATE)
-    except MNotFound:
+    except (MNotFound, MForbidden):
         return False
     except Exception as e:
+        if raise_transient:
+            raise
         if logger:
             logger.debug(f"Could not determine if {room_id} is a space: {e}")
         return False

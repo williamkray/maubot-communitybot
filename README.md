@@ -36,6 +36,10 @@ Draupnir, Meowlnir, or Mjolnir.
 please read through the comments in the `base-config.yaml` for more thorough explanations, but this covers the high
 points.
 
+commands work in community rooms (the parent space, the notification room, and every room in the space tree) and in a
+DM with the bot. community admins (PL 100 in the parent space) can run them anywhere; the bot ignores commands from
+people outside the community in rooms that aren't part of it.
+
 tired of typing `!community`? add shorter names to `command_aliases` in your config (e.g. `["c"]` lets you type
 `!c room create ...`). `!community` always keeps working.
 

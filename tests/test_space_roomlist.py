@@ -244,3 +244,63 @@ async def test_failed_traversal_is_not_cached(monkeypatch):
     bot.client.get_state.side_effect = None
     bot.client.get_state.return_value = [_child_event("!r1:x")]
     assert await bot.get_space_roomlist() == ["!r1:x"]
+
+
+# --- is_space error semantics / transient child classification ---------------
+
+from mautrix.errors import MNotFound, MForbidden
+from community.helpers import room_utils
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raise_transient", [False, True])
+@pytest.mark.parametrize("exc", [MNotFound("x", 404), MForbidden("x", 403)])
+async def test_is_space_not_found_forbidden_always_false(exc, raise_transient):
+    client = Mock()
+    client.get_state_event = AsyncMock(side_effect=exc)
+    assert (
+        await room_utils.is_space(client, "!r:x", raise_transient=raise_transient)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_space_generic_error_false_by_default():
+    client = Mock()
+    client.get_state_event = AsyncMock(side_effect=RuntimeError("blip"))
+    assert await room_utils.is_space(client, "!r:x") is False
+
+
+@pytest.mark.asyncio
+async def test_is_space_generic_error_raises_when_requested():
+    client = Mock()
+    client.get_state_event = AsyncMock(side_effect=RuntimeError("blip"))
+    with pytest.raises(RuntimeError):
+        await room_utils.is_space(client, "!r:x", raise_transient=True)
+
+
+@pytest.mark.asyncio
+async def test_child_classification_error_not_cached_but_child_listed():
+    state_map = {"!parent:example.com": [_child_event("!r1:x"), _child_event("!r2:x")]}
+    bot = _make_bot(state_map, space_flags={})
+    orig = bot.client.get_state_event.side_effect
+
+    async def flaky(room_id, event_type):
+        if room_id == "!r1:x":
+            raise RuntimeError("blip")
+        return await orig(room_id, event_type)
+
+    bot.client.get_state_event = AsyncMock(side_effect=flaky)
+    result = await bot.get_space_roomlist()
+    assert result == ["!r1:x", "!r2:x"]
+    assert bot._roomlist_cache is None
+
+
+@pytest.mark.asyncio
+async def test_child_forbidden_is_cached_leaf():
+    state_map = {"!parent:example.com": [_child_event("!r1:x")]}
+    bot = _make_bot(state_map, space_flags={})
+    bot.client.get_state_event = AsyncMock(side_effect=MForbidden("x", 403))
+    result = await bot.get_space_roomlist()
+    assert result == ["!r1:x"]
+    assert bot._roomlist_cache == ["!r1:x"]

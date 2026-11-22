@@ -5,6 +5,27 @@ automatically on first start and the upgrade is **one-directional** — always b
 before upgrading, and don't downgrade to an older build once you've run a newer one (maubot will
 refuse to load a plugin whose known schema is older than the database's current version).
 
+## v0.7
+
+this release limits what the bot does outside your community (issue #5). **check these if you run
+commands or rely on features outside the space:**
+
+- **commands only work in community rooms or in a DM with the bot.** community rooms are the parent
+  space, the `notification_room`, and every room in the space tree. community admins (PL 100 in the
+  parent space) can still run commands anywhere. moderators and members get a short reply pointing
+  them to a community room or a DM; people outside the community get no reply. if your moderators run
+  commands from a room that isn't in the space, add it to the space or make it the `notification_room`.
+- **`censor: true` and `check_if_human: true` now only apply to community rooms.** before, `true`
+  meant every room the bot was in, so one instaban word in an unrelated room could ban someone from
+  the whole community. a list of room IDs still works exactly as written.
+- **`!community user bancheck` requires community membership**, and **re-running `!community
+  initialize`** on an existing community requires a community admin. setting up a brand-new
+  community with `initialize` is unchanged.
+- **`!community event magiclink`** no longer posts the one-time login link in the room if it can't
+  DM you; it asks you to DM the bot instead.
+
+there's no database or config migration to do.
+
 ## v0.5
 
 this line of releases adds nested-space (subspace) support and a pile of quality-of-life refinements.

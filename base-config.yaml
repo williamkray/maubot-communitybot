@@ -135,7 +135,8 @@ ban_notification_message: |
   User <code>{user}</code> was banned from <code>{room}</code> by <code>{actor}</code>.
 
 # whether to censor files/messages
-# can be boolean (true/false) for all-or-nothing behavior,
+# can be boolean (true/false) for all-or-nothing behavior (true covers every
+# room in the community, not rooms outside it),
 # or pass a list of room IDs to only censor certain rooms. this may be helpful
 # if certain rooms are publicly facing while others are more trustworthy.
 # this bot, bot admins and bot moderators are immune to censorship.
@@ -197,7 +198,8 @@ auto_redact_majority: false
 report_retention_hours: 168
 
 # should we verify that users are human before allowing them to send messages?
-# can be boolean (true/false) for all-or-nothing behavior,
+# can be boolean (true/false) for all-or-nothing behavior (true covers every
+# room in the community, not rooms outside it),
 # or pass a list of room IDs to only verify users in certain rooms
 # use this in conjunction with room power-levels that require elevated permission
 # to send messages in a room. do not enable this for rooms that will have more than

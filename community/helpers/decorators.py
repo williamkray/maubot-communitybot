@@ -27,7 +27,8 @@ def require_permission(min_level: int = 50, room_id: Optional[str] = None):
 
 
 def require_parent_room(func: Callable) -> Callable:
-    """Decorator to require parent room to be configured."""
+    """Decorator to require parent room to be configured and the command's room
+    to be allowed for the sender (see CommunityBot.check_command_context)."""
 
     @functools.wraps(func)
     async def wrapper(self, evt: MessageEvent, *args, **kwargs) -> Any:

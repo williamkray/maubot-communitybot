@@ -314,6 +314,70 @@ class CommunityBot(Plugin):
             self.log.warning(f"Failed to check space membership for {user_id}: {e}")
             return False
 
+    async def _is_community_room(self, room_id: str) -> Optional[bool]:
+        """Whether a room belongs to the community.
+
+        True for the parent space, the notification room and anything in the
+        space tree. None means "unknown": the room wasn't found and the space
+        traversal failed (failed traversals aren't cached), so callers can
+        fail closed with a useful message.
+        """
+        room_id = str(room_id)
+        if room_id in (
+            self.config.get("parent_room", ""),
+            self.config.get("notification_room", ""),
+        ):
+            return True
+        if room_id in await self.get_space_roomlist():
+            return True
+        if self._roomlist_cache is None:
+            return None
+        return False
+
+    async def _is_dm_with(self, room_id: str, user_id: str) -> bool:
+        """Whether a room's only joined members are the bot and this user."""
+        try:
+            members = await self.client.get_joined_members(room_id)
+        except Exception as e:
+            self.log.warning(f"could not read members of {room_id}: {e}")
+            return False
+        return set(members) == {self.client.mxid, user_id}
+
+    async def check_command_context(self, evt: MessageEvent) -> bool:
+        """Limit where commands work, by sender tier (issue #5).
+
+        Community rooms: allowed (per-command permission checks still apply).
+        Admins (PL 100 in the parent): allowed anywhere.
+        Moderators and members: also allowed in a DM with the bot.
+        Everything else is refused: silently for non-members, so the bot
+        isn't chatty in rooms outside the community.
+        """
+        in_community = await self._is_community_room(evt.room_id)
+        if in_community:
+            return True
+        if await self.user_permitted(evt.sender, 100):
+            return True
+        is_member = await self.user_permitted(
+            evt.sender, 50
+        ) or await self.is_user_in_parent_space(evt.sender)
+        if is_member and await self._is_dm_with(evt.room_id, evt.sender):
+            return True
+        if not is_member:
+            self.log.debug(
+                f"ignoring command from non-member {evt.sender} outside the community ({evt.room_id})"
+            )
+            return False
+        if in_community is None:
+            await evt.reply(
+                "I couldn't confirm this room belongs to the community right now. "
+                "Try again, or DM me."
+            )
+        else:
+            await evt.reply(
+                "This command only works in community rooms or in a DM with me."
+            )
+        return False
+
     async def create_space(
         self,
         space_name: str,
@@ -695,7 +759,20 @@ class CommunityBot(Plugin):
                         child = evt.state_key
                         rooms.append(child)
                         # Recurse into child spaces so their rooms are managed too.
-                        if await room_utils.is_space(self.client, child, self.log):
+                        # A transient error classifying the child marks the
+                        # traversal failed, so a partial tree isn't cached.
+                        try:
+                            child_is_space = await room_utils.is_space(
+                                self.client, child, self.log, raise_transient=True
+                            )
+                        except Exception as e:
+                            self.log.warning(
+                                f"Could not determine if {child} is a space: {e}"
+                            )
+                            if _failed is not None:
+                                _failed.append(child)
+                            child_is_space = False
+                        if child_is_space:
                             rooms.extend(
                                 await self.get_space_roomlist(
                                     child, _visited, _failed
@@ -866,6 +943,19 @@ class CommunityBot(Plugin):
 
     def censor_room(self, msg):
         return message_utils.censor_room(msg, self.config["censor"])
+
+    async def _should_censor(self, msg) -> bool:
+        """censor_room, with `censor: true` limited to community rooms.
+
+        A list of rooms is honoured as written; `true` used to apply to every
+        room the bot was in, so one instaban word in an unrelated room could
+        trigger a community-wide ban.
+        """
+        if not self.censor_room(msg):
+            return False
+        if isinstance(self.config["censor"], list):
+            return True
+        return bool(await self._is_community_room(msg.room_id))
 
     async def check_if_banned(self, userid):
         # Pass resolved room IDs so joins reuse the banlist alias cache.
@@ -1608,9 +1698,12 @@ class CommunityBot(Plugin):
                 await self._cleanup_departed_user(user_id)
                 return
 
+            # `check_if_human: true` only covers community rooms; a list is
+            # honoured as written.
             if (
                 isinstance(self.config["check_if_human"], bool)
                 and self.config["check_if_human"]
+                and await self._is_community_room(evt.room_id)
             ) or (
                 isinstance(self.config["check_if_human"], list)
                 and evt.room_id in self.config["check_if_human"]
@@ -2086,11 +2179,6 @@ class CommunityBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def update_message_timestamp(self, evt: MessageEvent) -> None:
-        power_levels = await self.client.get_state_event(
-            evt.room_id, EventType.ROOM_POWER_LEVELS
-        )
-        user_level = power_levels.get_user_level(evt.sender)
-        # self.log.debug(f"DEBUGDEBUG user {evt.sender} has power level {user_level}")
         if self.flag_message(evt):
             # do we need to redact?
             if (
@@ -2100,7 +2188,7 @@ class CommunityBot(Plugin):
                     evt.room_id,
                 )
                 and evt.sender != self.client.mxid
-                and self.censor_room(evt)
+                and await self._should_censor(evt)
             ):
                 try:
                     await self.client.redact(
@@ -2122,7 +2210,7 @@ class CommunityBot(Plugin):
                         evt.room_id,
                     )
                     and evt.sender != self.client.mxid
-                    and self.censor_room(evt)
+                    and await self._should_censor(evt)
                 ):
                     try:
                         await self.client.redact(
@@ -2524,13 +2612,18 @@ class CommunityBot(Plugin):
         pass
 
     async def check_parent_room(self, evt: MessageEvent) -> bool:
-        """Check if parent room is configured and handle the response if not."""
+        """Check the parent room is configured and the command's room is allowed.
+
+        Every command except initialize passes through here (mostly via
+        @require_parent_room), so this is also where check_command_context
+        limits commands outside the community.
+        """
         if not self.config["parent_room"]:
             await evt.reply(
                 "No parent room configured. Please use the 'initialize' command to set up your community space first."
             )
             return False
-        return True
+        return await self.check_command_context(evt)
 
     @community.subcommand("user", help="manage users in the community")
     @decorators.require_parent_room
@@ -2545,6 +2638,12 @@ class CommunityBot(Plugin):
     @command.argument("mxid", "full matrix ID", required=True)
     async def user_bancheck(self, evt: MessageEvent, mxid: UserID) -> None:
         if not await self.check_parent_room(evt):
+            return
+        if not (
+            await self.user_permitted(evt.sender, 50)
+            or await self.is_user_in_parent_space(evt.sender)
+        ):
+            await evt.reply("Only community members can use this command")
             return
         ban_status = await self.check_if_banned(mxid)
         await evt.reply(f"user on banlist: {ban_status}")
@@ -4087,7 +4186,19 @@ class CommunityBot(Plugin):
                 return
             except Exception as e:
                 self.log.warning("magiclink DM failed: %s", e)
-        await evt.reply(f"Couldn't DM you — here's your one-time link (valid {ttl_min} min): {link}")
+        # The link is a login credential: only fall back to replying in place
+        # when this room is itself a DM with the sender.
+        # A new event room with only the bot and host joined looks like a DM,
+        # so also require that the room isn't part of the community.
+        if (
+            await self._is_dm_with(evt.room_id, str(evt.sender))
+            and await self._is_community_room(evt.room_id) is False
+        ):
+            await evt.reply(f"Here's your one-time link (valid {ttl_min} min): {link}")
+            return
+        await evt.reply(
+            "I couldn't DM you the link. Start a DM with me and run this command there."
+        )
 
     @event.subcommand("attendees", help="show current RSVPs and headcount for an event")
     @command.argument("room", pass_raw=True, required=False)
@@ -6700,9 +6811,15 @@ class CommunityBot(Plugin):
             await self._initialize_new_space(evt, community_name)
             return
 
-        # A parent room already exists: re-run in repair mode. If no name was
+        # A parent room already exists: re-run in repair mode, which rewrites
+        # config and can create rooms, so it's admin-only. If no name was
         # provided, recover it from the existing space so child aliases can be
         # derived the same way they were during the original initialize.
+        if not await self.check_command_context(evt):
+            return
+        if not await self.user_permitted(evt.sender, 100):
+            await evt.reply("You don't have permission to use this command")
+            return
         if not community_name:
             community_name = await self._get_space_name(self.config["parent_room"])
             if not community_name:
