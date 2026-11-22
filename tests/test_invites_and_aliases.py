@@ -262,7 +262,7 @@ class TestUserInvite:
         await _user_invite(bot, evt, "notanmxid")
         bot.client.invite_user.assert_not_awaited()
         bot.check_if_banned.assert_not_awaited()
-        assert "not a valid matrix ID" in _reply_text(evt)
+        assert "Please give one user" in _reply_text(evt)
 
     @pytest.mark.asyncio
     async def test_parent_dedup(self):
@@ -341,7 +341,7 @@ class TestRoomInvite:
         bot = _wire(_bot())
         evt = _evt()
         await _room_invite(bot, evt, "bad")
-        assert "not a valid matrix ID" in _reply_text(evt)
+        assert "Please give one user" in _reply_text(evt)
         bot.client.invite_user.assert_not_awaited()
 
     @pytest.mark.asyncio

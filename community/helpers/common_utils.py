@@ -1,9 +1,10 @@
 """Common utility functions for bot operations."""
 
 import asyncio
+import html
 import re
-from typing import Optional, Dict, Any
-from urllib.parse import unquote
+from typing import Optional, Dict, Any, List, Tuple
+from urllib.parse import unquote, urlparse
 from mautrix.types import EventType, MessageEvent
 from mautrix.errors import MLimitExceeded
 
@@ -189,6 +190,76 @@ def extract_room_ref_from_formatted_body(formatted_body: str, plain_text: str) -
             if rest.startswith("!") and ":" in rest:
                 return rest
     return None
+
+
+_USER_ID_RE = re.compile(r"^@[^:\s]+:\S+$")
+
+
+def _user_id_from_href(href: str) -> Optional[str]:
+    """Return the user ID a matrix.to link or matrix: URI points at, if any.
+
+    matrix.to: ``https://matrix.to/#/%40alice%3Aexample.org`` (percent-encoded,
+    keeps the ``@``). matrix: URI: ``matrix:u/alice:example.org?action=chat``
+    (no sigil). See the "URIs" appendix of the Matrix spec.
+    """
+    href = html.unescape(href).strip()
+    user = None
+    if href.startswith("matrix:u/"):
+        user = "@" + unquote(href[len("matrix:u/"):].split("?")[0].split("/")[0])
+    else:
+        parsed = urlparse(href)
+        if parsed.scheme in ("https", "http") and parsed.netloc.lower() == "matrix.to":
+            path = parsed.fragment.lstrip("/").split("?")[0].split("/")[0]
+            user = unquote(path)
+    if user and _USER_ID_RE.match(user):
+        return user
+    return None
+
+
+def extract_user_pills(formatted_body: str) -> List[Tuple[str, str]]:
+    """Return ``(link text, user ID)`` for each user mention link in an HTML body."""
+    pills = []
+    for m in _A_HREF_RE.finditer(formatted_body or ""):
+        user = _user_id_from_href(m.group(1))
+        if user:
+            pills.append((html.unescape(m.group(2)).strip(), user))
+    return pills
+
+
+def split_user_arg(raw: str, formatted_body: Optional[str]) -> Tuple[Optional[str], str]:
+    """Split a command argument string into (user ID, remaining text).
+
+    Clients often put a mention's display name (which may contain spaces) in
+    the plain-text body instead of the user ID, with the ID only in the
+    formatted body's link. Mention links are matched first, so the link's
+    target wins even if someone's display name looks like another user's ID;
+    a typed ``@user:server`` is only used when no mention matches. Returns
+    ``(None, raw)`` if no user could be found at the start (including when
+    the same text links to two different users).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None, ""
+    matches = {}
+    for text, user in extract_user_pills(formatted_body):
+        if not text:
+            continue
+        for candidate in (text, "@" + text):
+            if raw.startswith(candidate) and (
+                len(raw) == len(candidate) or raw[len(candidate)].isspace()
+            ):
+                matches.setdefault(candidate, set()).add(user)
+    if matches:
+        # Longest matching text first, so "Will Smith" wins over "Will".
+        text = max(matches, key=len)
+        users = matches[text]
+        if len(users) != 1:
+            return None, raw
+        return next(iter(users)), raw[len(text):].strip()
+    parts = raw.split(None, 1)
+    if _USER_ID_RE.match(parts[0]):
+        return parts[0], parts[1].strip() if len(parts) > 1 else ""
+    return None, raw
 
 
 def safe_get(dictionary: Dict[str, Any], key: str, default: Any = None) -> Any:

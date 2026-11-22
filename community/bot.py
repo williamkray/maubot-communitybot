@@ -811,6 +811,25 @@ class CommunityBot(Plugin):
         """
         self._roomlist_cache = None
 
+    def _split_user_arg(self, evt: MessageEvent, raw: str) -> tuple[Optional[str], str]:
+        """Split args into (user ID, rest), reading mention links in the
+        formatted body when the plain text only has a display name."""
+        formatted = getattr(evt.content, "formatted_body", None)
+        return common_utils.split_user_arg(
+            raw, formatted if isinstance(formatted, str) else None
+        )
+
+    async def _require_user_arg(self, evt: MessageEvent, raw: str) -> Optional[str]:
+        """Resolve an argument that must be exactly one user, or reply and
+        return None."""
+        user, rest = self._split_user_arg(evt, raw)
+        if not user or rest:
+            await evt.reply(
+                "Please give one user, as a full Matrix ID (e.g. @user:server) or a mention."
+            )
+            return None
+        return user
+
     async def _resolve_room_arg(self, room: str = None, evt: MessageEvent = None) -> Optional[str]:
         """Resolve a room argument to a room ID.
 
@@ -2696,8 +2715,8 @@ class CommunityBot(Plugin):
             "Use !community user <subcommand> to manage users. Available subcommands: bancheck, ban, unban, kick, invite, ignore, unignore, redact"
         )
 
-    @user.subcommand("bancheck", help="check subscribed banlists for a user's mxid")
-    @command.argument("mxid", "full matrix ID", required=True)
+    @user.subcommand("bancheck", help="check subscribed banlists for a user (full matrix ID or mention)")
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     async def user_bancheck(self, evt: MessageEvent, mxid: UserID) -> None:
         if not await self.check_parent_room(evt):
             return
@@ -2707,16 +2726,22 @@ class CommunityBot(Plugin):
         ):
             await evt.reply("Only community members can use this command")
             return
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         ban_status = await self.check_if_banned(mxid)
         await evt.reply(f"user on banlist: {ban_status}")
 
     @user.subcommand(
         "ban", help="kick and ban a specific user from the community and all rooms"
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def user_ban(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         await evt.mark_read()
 
         user = mxid
@@ -2736,10 +2761,13 @@ class CommunityBot(Plugin):
     @user.subcommand(
         "unban", help="unban a specific user from the community and all rooms"
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def user_unban(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         await evt.mark_read()
 
         user = mxid
@@ -2802,7 +2830,7 @@ class CommunityBot(Plugin):
         "invite",
         help="invite a user to the community space and the configured invite_rooms",
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     async def user_invite(self, evt: MessageEvent, mxid: UserID) -> None:
         # Gated on the parent space's own invite level rather than a fixed
@@ -2810,6 +2838,9 @@ class CommunityBot(Plugin):
         # bot-mediated invites too.
         if not await self.user_permitted(evt.sender, await self._parent_invite_level()):
             await evt.reply("You don't have permission to invite people to the community")
+            return
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
             return
         await evt.mark_read()
         try:
@@ -2871,11 +2902,14 @@ class CommunityBot(Plugin):
     @user.subcommand(
         "ignore", help="exclude a specific matrix ID from inactivity tracking"
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     @decorators.handle_errors("Failed to ignore user")
     async def user_ignore(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -2892,11 +2926,14 @@ class CommunityBot(Plugin):
     @user.subcommand(
         "unignore", help="re-enable activity tracking for a specific matrix ID"
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     @decorators.handle_errors("Failed to unignore user")
     async def user_unignore(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         if not self.config_manager.is_tracking_enabled():
             await evt.reply("user tracking is disabled")
             return
@@ -2914,11 +2951,16 @@ class CommunityBot(Plugin):
         "redact",
         help="redact messages from a specific user (optionally in a specific room)",
     )
-    @command.argument("mxid", "full matrix ID", required=True)
-    @command.argument("room", "room ID", required=False, pass_raw=True)
+    @command.argument("args", "user [room]", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
-    async def user_redact(self, evt: MessageEvent, mxid: UserID, room: str) -> None:
+    async def user_redact(self, evt: MessageEvent, args: str) -> None:
+        mxid, room = self._split_user_arg(evt, args)
+        if not mxid:
+            await evt.reply(
+                "Please give a user, as a full Matrix ID (e.g. @user:server) or a mention."
+            )
+            return
         await evt.mark_read()
 
         room_id = await self._resolve_room_arg(room, evt)
@@ -4330,10 +4372,11 @@ class CommunityBot(Plugin):
         if err or not room_id:
             await evt.reply(err or "Could not resolve the event.")
             return
-        mxid_str = (rest or "").strip().split()[0] if (rest or "").strip() else ""
+        mxid_str, _ = self._split_user_arg(evt, rest or "")
+        mxid_str = mxid_str or ""
         if not mxid_str.startswith("@"):
             await evt.reply(
-                "Please provide the organizer's full Matrix ID, e.g. @user:server."
+                "Please provide the organizer as a full Matrix ID (e.g. @user:server) or a mention."
             )
             return
         event_row = await self._get_event_row(room_id)
@@ -4470,10 +4513,13 @@ class CommunityBot(Plugin):
     @user.subcommand(
         "kick", help="kick a specific user from the community and all rooms"
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission()
     async def user_kick(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         await evt.mark_read()
 
         user = mxid
@@ -5444,9 +5490,12 @@ class CommunityBot(Plugin):
         "invite",
         help="invite a community member to this room (moderators can invite anyone)",
     )
-    @command.argument("mxid", "full matrix ID", required=True)
+    @command.argument("mxid", "full matrix ID or mention", required=True, pass_raw=True)
     @decorators.require_parent_room
     async def room_invite(self, evt: MessageEvent, mxid: UserID) -> None:
+        mxid = await self._require_user_arg(evt, mxid)
+        if not mxid:
+            return
         # Deliberately not moderator-gated: any community member may invite
         # another community member, into rooms that member could join anyway.
         # Only moderators may invite outsiders or into invite-only rooms.
@@ -6234,15 +6283,18 @@ class CommunityBot(Plugin):
         help="grant a user power over a subspace and all its rooms. \
               usage: delegate <user> <subspace> [mod|admin|<level>] (subspace by alias/id if its name has spaces)",
     )
-    @command.argument("user", required=True)
-    @command.argument("subspace", required=True)
-    @command.argument("level", required=False)
+    @command.argument("args", "user subspace [level]", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
-    async def space_delegate(
-        self, evt: MessageEvent, user: str = None, subspace: str = None, level: str = None
-    ) -> None:
+    async def space_delegate(self, evt: MessageEvent, args: str = None) -> None:
         await evt.mark_read()
+        user, rest = self._split_user_arg(evt, args)
+        rest_parts = rest.split()
+        if user is None:
+            user = (args or "").split()[0] if (args or "").split() else None
+            rest_parts = (args or "").split()[1:]
+        subspace = rest_parts[0] if rest_parts else None
+        level = rest_parts[1] if len(rest_parts) > 1 else None
 
         if not user or not subspace:
             await evt.reply(
@@ -6283,14 +6335,14 @@ class CommunityBot(Plugin):
         help="revoke a user's delegated power over a subspace and its rooms. \
               usage: undelegate <user> <subspace>",
     )
-    @command.argument("user", required=True)
-    @command.argument("subspace", required=True)
+    @command.argument("args", "user subspace", required=True, pass_raw=True)
     @decorators.require_parent_room
     @decorators.require_permission(min_level=100)
-    async def space_undelegate(
-        self, evt: MessageEvent, user: str = None, subspace: str = None
-    ) -> None:
+    async def space_undelegate(self, evt: MessageEvent, args: str = None) -> None:
         await evt.mark_read()
+        user, rest = self._split_user_arg(evt, args)
+        rest_parts = rest.split()
+        subspace = rest_parts[0] if rest_parts else None
 
         if not user or not subspace:
             await evt.reply("usage: !community space undelegate <user> <subspace>")
