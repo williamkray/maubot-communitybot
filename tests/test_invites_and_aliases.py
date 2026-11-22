@@ -15,7 +15,10 @@ USER = "@user:example.com"
 TARGET = "@target:example.com"
 
 
-def _bot(aliases=None, memberships=None, invite_rooms=None, mod=True, join_rules=None):
+def _bot(
+    aliases=None, memberships=None, invite_rooms=None, mod=True, join_rules=None,
+    parent_invite=50,
+):
     bot = CommunityBot.__new__(CommunityBot)
     bot.config = {"parent_room": PARENT}
     if aliases is not None:
@@ -28,6 +31,10 @@ def _bot(aliases=None, memberships=None, invite_rooms=None, mod=True, join_rules
     join_rules = join_rules or {}
 
     async def get_state_event(room_id, event_type, state_key=""):
+        if event_type == EventType.ROOM_POWER_LEVELS:
+            if isinstance(parent_invite, Exception):
+                raise parent_invite
+            return Mock(invite=parent_invite)
         if event_type == EventType.ROOM_JOIN_RULES:
             jr = join_rules.get(room_id, _jr(JoinRule.PUBLIC))
             if isinstance(jr, Exception):
@@ -185,17 +192,41 @@ def _wire(bot):
     bot._could_self_join = lambda r, u: CommunityBot._could_self_join(bot, r, u)
     bot._get_membership = lambda r, u: CommunityBot._get_membership(bot, r, u)
     bot._summarize_rooms = CommunityBot._summarize_rooms
+    bot._parent_invite_level = lambda: CommunityBot._parent_invite_level(bot)
     return bot
 
 
 async def _user_invite(bot, evt, mxid):
-    fn = CommunityBot.user_invite.__mb_func__.__wrapped__.__wrapped__
+    fn = CommunityBot.user_invite.__mb_func__.__wrapped__
     await fn(bot, evt, mxid)
 
 
 async def _room_invite(bot, evt, mxid):
     fn = CommunityBot.room_invite.__mb_func__.__wrapped__
     await fn(bot, evt, mxid)
+
+
+class TestUserInvitePermission:
+    @pytest.mark.asyncio
+    async def test_gate_uses_parent_space_invite_level(self):
+        bot = _wire(_bot(parent_invite=0))
+        await _user_invite(bot, _evt(), TARGET)
+        bot.user_permitted.assert_awaited_once_with(MOD, 0)
+        bot.client.invite_user.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refused_below_parent_invite_level(self):
+        bot = _wire(_bot(mod=False, parent_invite=50))
+        evt = _evt()
+        await _user_invite(bot, evt, TARGET)
+        bot.user_permitted.assert_awaited_once_with(MOD, 50)
+        bot.client.invite_user.assert_not_awaited()
+        assert "permission" in evt.reply.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_level_lookup_failure_falls_back_to_moderator(self):
+        bot = _bot(parent_invite=RuntimeError("boom"))
+        assert await CommunityBot._parent_invite_level(bot) == 50
 
 
 class TestUserInvite:

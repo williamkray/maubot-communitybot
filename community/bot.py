@@ -2622,14 +2622,34 @@ class CommunityBot(Plugin):
         # sync our database after we've made changes to room memberships
         await self.do_sync()
 
+    async def _parent_invite_level(self) -> int:
+        """The parent space's own invite power level.
+
+        Falls back to moderator (50) if it can't be read, so failures don't
+        open up community invites.
+        """
+        try:
+            pl = await self.client.get_state_event(
+                self.config["parent_room"], EventType.ROOM_POWER_LEVELS
+            )
+            return int(pl.invite)
+        except Exception as e:
+            self.log.warning(f"could not read parent space invite level: {e}")
+            return 50
+
     @user.subcommand(
         "invite",
         help="invite a user to the community space and the configured invite_rooms",
     )
     @command.argument("mxid", "full matrix ID", required=True)
     @decorators.require_parent_room
-    @decorators.require_permission()
     async def user_invite(self, evt: MessageEvent, mxid: UserID) -> None:
+        # Gated on the parent space's own invite level rather than a fixed
+        # moderator level, so the space's "who can invite" setting governs
+        # bot-mediated invites too.
+        if not await self.user_permitted(evt.sender, await self._parent_invite_level()):
+            await evt.reply("You don't have permission to invite people to the community")
+            return
         await evt.mark_read()
         try:
             Client.parse_user_id(mxid)
@@ -2671,7 +2691,10 @@ class CommunityBot(Plugin):
             else:
                 skipped.append(f"{roomname} ({result})")
 
-        lines = [f"Invited {mxid} to {len(done)} room(s): {self._summarize_rooms(done)}."]
+        if done:
+            lines = [f"Invited {mxid} to {len(done)} room(s): {self._summarize_rooms(done)}."]
+        else:
+            lines = [f"No new invites sent to {mxid}."]
         if skipped:
             lines.append(f"Skipped: {', '.join(skipped)}.")
         if errors:

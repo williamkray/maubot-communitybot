@@ -164,8 +164,9 @@ need to rejoin all rooms themselves or be re-invited.
 
 if configured with the `redact_on_ban` setting, banning a user from your space will also queue up to their last 100 messages in each room for redaction. if not, you can redact their messages in each individual room using the `!community user redact` command.
 
-invite someone to the community with `user invite` (e.g. `!community user invite @newfriend:server.tld`). this is
-limited to moderators and invites them to the parent space plus every room listed in the `invite_rooms` config option
+invite someone to the community with `user invite` (e.g. `!community user invite @newfriend:server.tld`). anyone
+allowed to invite users to the parent space (its own "invite users" power level, set from `invite_power_level` when the
+community is initialized) can use it. it invites them to the parent space plus every room listed in the `invite_rooms` config option
 (room IDs, e.g. your general and announcements rooms). users on a subscribed banlist are refused.
 
 community members can bring other community members into a room with `room invite`, run in that room (e.g.
