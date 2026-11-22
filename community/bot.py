@@ -79,6 +79,8 @@ class Config(BaseProxyConfig):
         helper.copy("sleep")
         helper.copy("welcome_sleep")
         helper.copy("parent_room")
+        helper.copy("command_aliases")
+        helper.copy("invite_rooms")
         helper.copy("community_slug")
         helper.copy("track_users")
         helper.copy("warn_threshold_days")
@@ -1478,6 +1480,64 @@ class CommunityBot(Plugin):
         except Exception as e:
             self.log.warning(f"could not auto-invite {user} to {room_id}: {e}")
 
+    async def _get_membership(self, room_id: str, user: str) -> Optional[Membership]:
+        """Return a user's membership in a room, or None if they have none."""
+        try:
+            member = await self.client.get_state_event(
+                room_id, EventType.ROOM_MEMBER, user
+            )
+        except MNotFound:
+            return None
+        except Exception as e:
+            # Callers treat None as "not a member", so lookup failures fail closed.
+            self.log.warning(f"could not read membership of {user} in {room_id}: {e}")
+            return None
+        return getattr(member, "membership", None)
+
+    async def _invite_to_room(
+        self, room_id: str, user: str, reason: Optional[str] = None
+    ) -> str:
+        """Invite a user to a room unless they are already in it.
+
+        Returns "invited", "joined" or "already invited". Raises on failure
+        (e.g. the bot lacks invite power, or the user is banned there).
+        """
+        membership = await self._get_membership(room_id, user)
+        if membership == Membership.JOIN:
+            return "joined"
+        if membership == Membership.INVITE:
+            return "already invited"
+        await self.client.invite_user(room_id, user, reason=reason)
+        return "invited"
+
+    async def _could_self_join(self, room_id: str, user: str) -> bool:
+        """Whether the room's join rules would let a user join without an invite.
+
+        True for public rooms, and for restricted rooms where the user is
+        joined to one of the allowed rooms. Fails closed on lookup errors.
+        Used so member-initiated invites can't bypass a room's own invite
+        restrictions (e.g. the invite-only moderators room).
+        """
+        try:
+            jr = await self.client.get_state_event(
+                room_id, EventType.ROOM_JOIN_RULES
+            )
+        except Exception as e:
+            self.log.warning(f"could not read join rules of {room_id}: {e}")
+            return False
+        rule = getattr(jr, "join_rule", None)
+        if rule == JoinRule.PUBLIC:
+            return True
+        if rule not in (JoinRule.RESTRICTED, JoinRule.KNOCK_RESTRICTED):
+            return False
+        for allow in getattr(jr, "allow", None) or []:
+            allowed_room = getattr(allow, "room_id", None)
+            if allowed_room and (
+                await self._get_membership(allowed_room, user) == Membership.JOIN
+            ):
+                return True
+        return False
+
     async def _remove_user_from_rooms(
         self, rooms: list, user: str, keep_level=None
     ) -> tuple[list, list]:
@@ -2441,7 +2501,25 @@ class CommunityBot(Plugin):
             except Exception as e:
                 self.log.error(f"Failed to send report notification: {e}")
 
-    @command.new("community", help="manage rooms and members of a space")
+    def _is_community_command(self, val: str) -> bool:
+        """Match the top-level command name or any configured alias.
+
+        maubot lowercases the typed command before matching, so aliases are
+        compared case-insensitively. Read live so config edits apply without a
+        reload.
+        """
+        if val == "community":
+            return True
+        aliases = self.config.get("command_aliases", []) or []
+        names = {str(a).lower().lstrip("!") for a in aliases}
+        names.discard("")
+        return val in names
+
+    @command.new(
+        "community",
+        help="manage rooms and members of a space",
+        aliases=_is_community_command,
+    )
     async def community(self) -> None:
         pass
 
@@ -2460,7 +2538,7 @@ class CommunityBot(Plugin):
     async def user(self, evt: MessageEvent) -> None:
         """Main user command - shows usage by default"""
         await evt.reply(
-            "Use !community user <subcommand> to manage users. Available subcommands: bancheck, ban, unban, kick, ignore, unignore, redact"
+            "Use !community user <subcommand> to manage users. Available subcommands: bancheck, ban, unban, kick, invite, ignore, unignore, redact"
         )
 
     @user.subcommand("bancheck", help="check subscribed banlists for a user's mxid")
@@ -2543,6 +2621,68 @@ class CommunityBot(Plugin):
 
         # sync our database after we've made changes to room memberships
         await self.do_sync()
+
+    @user.subcommand(
+        "invite",
+        help="invite a user to the community space and the configured invite_rooms",
+    )
+    @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    @decorators.require_permission()
+    async def user_invite(self, evt: MessageEvent, mxid: UserID) -> None:
+        await evt.mark_read()
+        try:
+            Client.parse_user_id(mxid)
+        except ValueError:
+            await evt.reply(f"{mxid} is not a valid matrix ID (expected @user:server)")
+            return
+        if await self.check_if_banned(mxid):
+            await evt.reply(
+                f"{mxid} is on a subscribed banlist, not inviting. "
+                "Remove them from the banlist first if this is a mistake."
+            )
+            return
+
+        rooms = [self.config["parent_room"]]
+        for room_id in self.config.get("invite_rooms", []) or []:
+            room_id = str(room_id)
+            if room_id not in rooms:
+                rooms.append(room_id)
+
+        done, skipped, errors = [], [], []
+        for room_id in rooms:
+            if not room_id.startswith("!"):
+                errors.append(f"{room_id} (invite_rooms entries must be room IDs)")
+                continue
+            roomname = (
+                await common_utils.get_room_name(self.client, room_id, self.log)
+                or room_id
+            )
+            try:
+                result = await self._invite_to_room(
+                    room_id, mxid, reason=f"invited by {evt.sender}"
+                )
+            except Exception as e:
+                self.log.warning(f"could not invite {mxid} to {room_id}: {e}")
+                errors.append(f"{roomname} ({e})")
+                continue
+            if result == "invited":
+                done.append(roomname)
+            else:
+                skipped.append(f"{roomname} ({result})")
+
+        lines = [f"Invited {mxid} to {len(done)} room(s): {self._summarize_rooms(done)}."]
+        if skipped:
+            lines.append(f"Skipped: {', '.join(skipped)}.")
+        if errors:
+            lines.append(f"⚠️ Failed: {', '.join(errors)}.")
+        await evt.reply("\n".join(lines))
+        if done:
+            await self._post_notification(
+                f"📨 {evt.sender} invited <code>{mxid}</code> to "
+                f"{len(done)} room(s): "
+                f"{html.escape(self._summarize_rooms(done))}."
+            )
 
     @user.subcommand(
         "ignore", help="exclude a specific matrix ID from inactivity tracking"
@@ -4413,7 +4553,7 @@ class CommunityBot(Plugin):
     async def room(self, evt: MessageEvent) -> None:
         """Main room command - shows usage by default"""
         await evt.reply(
-            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, move, guests, id, version, setpower, enable-verification"
+            "Use !community room <subcommand> to manage rooms. Available subcommands: create, archive, replace, move, guests, id, invite, version, setpower, enable-verification"
         )
 
     @room.subcommand(
@@ -5020,6 +5160,7 @@ class CommunityBot(Plugin):
             "check_if_human",
             "banlists",
             "greeting_rooms",
+            "invite_rooms",
         ]
 
         for key in config_keys:
@@ -5102,6 +5243,63 @@ class CommunityBot(Plugin):
             await evt.reply(f"Room ID is: {room_id}")
         except Exception as e:
             await evt.respond(f"something went wrong: {e}")
+
+    @room.subcommand(
+        "invite",
+        help="invite a community member to this room (moderators can invite anyone)",
+    )
+    @command.argument("mxid", "full matrix ID", required=True)
+    @decorators.require_parent_room
+    async def room_invite(self, evt: MessageEvent, mxid: UserID) -> None:
+        # Deliberately not moderator-gated: any community member may invite
+        # another community member, into rooms that member could join anyway.
+        # Only moderators may invite outsiders or into invite-only rooms.
+        await evt.mark_read()
+        parent = self.config["parent_room"]
+        try:
+            Client.parse_user_id(mxid)
+        except ValueError:
+            await evt.reply(f"{mxid} is not a valid matrix ID (expected @user:server)")
+            return
+
+        if evt.room_id != parent and evt.room_id not in await self.get_space_roomlist():
+            await evt.reply("This room isn't part of the community.")
+            return
+
+        is_mod = await self.user_permitted(evt.sender, 50)
+        if not is_mod:
+            if await self._get_membership(parent, evt.sender) != Membership.JOIN:
+                await evt.reply("Only community members can invite people to rooms.")
+                return
+            if await self._get_membership(parent, mxid) != Membership.JOIN:
+                await evt.reply(
+                    f"{mxid} isn't a member of the community. "
+                    "Ask a moderator to invite them."
+                )
+                return
+            if not await self._could_self_join(evt.room_id, mxid):
+                await evt.reply(
+                    f"{mxid} can't join this room on their own, so only a "
+                    "moderator can invite them here."
+                )
+                return
+
+        if await self.check_if_banned(mxid):
+            await evt.reply(f"{mxid} is on a subscribed banlist, not inviting.")
+            return
+
+        try:
+            result = await self._invite_to_room(
+                evt.room_id, mxid, reason=f"invited by {evt.sender}"
+            )
+        except Exception as e:
+            self.log.warning(f"could not invite {mxid} to {evt.room_id}: {e}")
+            await evt.reply(f"Couldn't invite {mxid}: {e}")
+            return
+        if result == "invited":
+            await evt.reply(f"Invited {mxid}.")
+        else:
+            await evt.reply(f"{mxid} is {result}.")
 
     @room.subcommand(
         "version", help="return the room version and creators of this, or a given, room"
@@ -7069,6 +7267,37 @@ class CommunityBot(Plugin):
                         f"Bot lacks administrative privileges in room '{room_data.get('room_name', room_id)}' ({room_id}) - level: {room_data.get('bot_power_level', 0)}"
                     )
 
+            # Check configured invite_rooms so a stale or wrong room ID is
+            # visible. Entries are listed by name for easy verification.
+            invite_room_lines = []
+            for invite_room in self.config.get("invite_rooms", []) or []:
+                invite_room = str(invite_room)
+                if not invite_room.startswith("!"):
+                    report["issues"].append(
+                        f"invite_rooms entry '{invite_room}' is not a room ID"
+                    )
+                    continue
+                name = await common_utils.get_room_name(
+                    self.client, invite_room, self.log
+                )
+                membership = await self._get_membership(
+                    invite_room, self.client.mxid
+                )
+                if membership != Membership.JOIN:
+                    report["issues"].append(
+                        f"Bot is not in invite_rooms entry '{name or invite_room}' ({invite_room})"
+                    )
+                elif (
+                    invite_room != self.config["parent_room"]
+                    and invite_room not in space_rooms
+                ):
+                    report["warnings"].append(
+                        f"invite_rooms entry '{name or invite_room}' ({invite_room}) is not part of the community"
+                    )
+                invite_room_lines.append(
+                    f"{html.escape(name or '(unnamed)')} <code>{invite_room}</code>"
+                )
+
             # Generate response using helper functions
             response = "<h3>🔍 Bot Permission Diagnostic Summary</h3><br /><br />"
 
@@ -7095,6 +7324,13 @@ class CommunityBot(Plugin):
             response += diagnostic_utils.generate_summary_stats(
                 report["space"], room_stats
             )
+
+            if invite_room_lines:
+                response += (
+                    "<b>invite_rooms:</b><br />"
+                    + "<br />".join(invite_room_lines)
+                    + "<br /><br />"
+                )
 
             # Issues and warnings
             response += diagnostic_utils.generate_issues_and_warnings(

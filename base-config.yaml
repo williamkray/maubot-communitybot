@@ -15,6 +15,11 @@ community_slug: ''
 # (e.g. when this bot manages the only community on its homeserver).
 use_community_slug: true
 
+# extra names for the !community command, e.g. ["c", "cb"] lets you type
+# `!c room create ...`. !community always works regardless of this list.
+# don't pick a name another bot in your rooms already uses.
+command_aliases: []
+
 # sleep time between actions. you can drop this to 0 if your bot has no
 # ratelimits imposed on its homeserver, otherwise you may want to increase this
 # to avoid errors.
@@ -74,6 +79,12 @@ track_users: ["messages", "reactions"]
 # list of users who should be invited to new rooms immediately (other bots, moderators, perhaps)
 # use full matrix IDs here
 invitees: []
+
+# rooms (in addition to the parent space) that `!community user invite` also
+# invites people to, e.g. your general and announcements rooms. use room IDs;
+# `!community room id` in a room (or `!community room id #alias:server`) prints
+# its ID. `!community doctor` lists these with their room names.
+invite_rooms: []
 
 # auto-greet users in rooms with these messages
 # map greeting messages to a room

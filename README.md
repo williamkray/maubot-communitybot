@@ -36,6 +36,9 @@ Draupnir, Meowlnir, or Mjolnir.
 please read through the comments in the `base-config.yaml` for more thorough explanations, but this covers the high
 points.
 
+tired of typing `!community`? add shorter names to `command_aliases` in your config (e.g. `["c"]` lets you type
+`!c room create ...`). `!community` always keeps working.
+
 ## nested spaces (subspaces)
 
 your community can be organized into subspaces (spaces nested inside your parent space). every space-wide operation —
@@ -160,6 +163,15 @@ will automatically kick them from those rooms as well). if you've made a mistake
 need to rejoin all rooms themselves or be re-invited.
 
 if configured with the `redact_on_ban` setting, banning a user from your space will also queue up to their last 100 messages in each room for redaction. if not, you can redact their messages in each individual room using the `!community user redact` command.
+
+invite someone to the community with `user invite` (e.g. `!community user invite @newfriend:server.tld`). this is
+limited to moderators and invites them to the parent space plus every room listed in the `invite_rooms` config option
+(room IDs, e.g. your general and announcements rooms). users on a subscribed banlist are refused.
+
+community members can bring other community members into a room with `room invite`, run in that room (e.g.
+`!community room invite @friend:server.tld`). the person being invited must already be in the parent space; only
+moderators can use it to invite people from outside the community, or into rooms the person couldn't join on their own
+(like an invite-only moderators room).
 
 use the `room guests` subcommand to see who is in a room but NOT a member of the parent space (invited guests) e.g.
 `!community room guests #myroom:alias.here`.
