@@ -343,6 +343,14 @@ class CommunityBot(Plugin):
             return False
         return set(members) == {self.client.mxid, user_id}
 
+    async def _has_pending_verification(self, room_id: str) -> bool:
+        """Whether a room is a join-verification DM with a pending challenge."""
+        try:
+            return bool(await self.get_verification_state(str(room_id)))
+        except Exception as e:
+            self.log.warning(f"could not read verification state for {room_id}: {e}")
+            return False
+
     async def check_command_context(self, evt: MessageEvent) -> bool:
         """Limit where commands work, by sender tier (issue #5).
 
@@ -350,11 +358,17 @@ class CommunityBot(Plugin):
         Admins (PL 100 in the parent): allowed anywhere.
         Moderators and members: also allowed in a DM with the bot.
         Everything else is refused: silently for non-members, so the bot
-        isn't chatty in rooms outside the community.
+        isn't chatty in rooms outside the community. A join-verification DM
+        only accepts the verification phrase, so commands there are ignored.
         """
         in_community = await self._is_community_room(evt.room_id)
         if in_community:
             return True
+        if await self._has_pending_verification(evt.room_id):
+            self.log.debug(
+                f"ignoring command from {evt.sender} in verification DM {evt.room_id}"
+            )
+            return False
         if await self.user_permitted(evt.sender, 100):
             return True
         is_member = await self.user_permitted(

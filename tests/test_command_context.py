@@ -20,7 +20,10 @@ LEVELS = {ADMIN: 100, MOD: 50}
 MEMBERS = {ADMIN, MOD, MEMBER}
 
 
-def _bot(roomlist=(CHILD,), lookup_fails=False, dm_members=None, censor=True):
+def _bot(
+    roomlist=(CHILD,), lookup_fails=False, dm_members=None, censor=True,
+    verifying_rooms=(),
+):
     bot = CommunityBot.__new__(CommunityBot)
     bot.config = {
         "parent_room": PARENT,
@@ -39,6 +42,9 @@ def _bot(roomlist=(CHILD,), lookup_fails=False, dm_members=None, censor=True):
 
     bot.user_permitted = AsyncMock(side_effect=permitted)
     bot.is_user_in_parent_space = AsyncMock(side_effect=lambda u: u in MEMBERS)
+    bot.get_verification_state = AsyncMock(
+        side_effect=lambda r: {"phrase": "x"} if r in verifying_rooms else None
+    )
     client = Mock()
     client.mxid = BOT
     members = {DM: dm_members} if dm_members is not None else {}
@@ -136,6 +142,33 @@ class TestCheckCommandContext:
         bot = _bot(dm_members=[BOT, STRANGER])
         evt = _evt(MEMBER, DM)
         assert await bot.check_command_context(evt) is False
+
+
+class TestVerificationDM:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sender", [ADMIN, MOD, MEMBER, STRANGER])
+    async def test_commands_ignored_silently_in_verification_dm(self, sender):
+        bot = _bot(dm_members=[BOT, sender], verifying_rooms=(DM,))
+        evt = _evt(sender, DM)
+        assert await bot.check_command_context(evt) is False
+        evt.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_member_dm_without_pending_verification_allowed(self):
+        bot = _bot(dm_members=[BOT, MEMBER])
+        assert await bot.check_command_context(_evt(MEMBER, DM)) is True
+
+    @pytest.mark.asyncio
+    async def test_community_room_skips_verification_lookup(self):
+        bot = _bot(verifying_rooms=(CHILD,))
+        assert await bot.check_command_context(_evt(MEMBER, CHILD)) is True
+        bot.get_verification_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_verification_lookup_error_does_not_block(self):
+        bot = _bot(dm_members=[BOT, MEMBER])
+        bot.get_verification_state = AsyncMock(side_effect=RuntimeError("db"))
+        assert await bot.check_command_context(_evt(MEMBER, DM)) is True
 
 
 class TestHelpers:
