@@ -1586,23 +1586,30 @@ class CommunityBot(Plugin):
             self.log.warning(f"could not auto-invite {user} to {room_id}: {e}")
 
     async def _handle_parent_join(self, evt: StateEvent) -> None:
-        """Someone joined the parent space: banlist check, tracking sync, and
-        (if invite_rooms_on_join is set) invites to the invite_rooms."""
+        """Someone joined the parent space: banlist check, start tracking them,
+        and (if invite_rooms_on_join is set) invite them to the invite_rooms."""
         user = evt.sender
         if user == self.client.mxid:
             return
         try:
             on_banlist = await self.check_if_banned(user)
         except Exception as e:
+            # Don't send invites for someone we couldn't check.
             self.log.error(f"Failed to check if {user} is banned: {e}")
-            on_banlist = False
+            on_banlist = None
         if on_banlist:
             await self.ban_this_user(user)
             return
-        # passive sync of tracking db
-        await self.do_sync()
 
-        if not self.config.get("invite_rooms_on_join", False):
+        # Track just this user rather than a full do_sync(), which races with
+        # itself when several people join at once.
+        if self.config_manager.is_tracking_enabled():
+            try:
+                await self.upsert_user_timestamp(user, int(time.time() * 1000))
+            except Exception as e:
+                self.log.warning(f"could not start tracking {user}: {e}")
+
+        if on_banlist is None or not self.config.get("invite_rooms_on_join", False):
             return
         invited = []
         for room_id in self.config.get("invite_rooms", []) or []:
@@ -1618,6 +1625,7 @@ class CommunityBot(Plugin):
                 continue
             if result == "invited":
                 invited.append(room_id)
+                await asyncio.sleep(self.config["sleep"])
         if invited:
             self.log.info(f"invited new member {user} to invite_rooms: {invited}")
 

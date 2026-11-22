@@ -518,7 +518,9 @@ class TestParentJoin:
         bot.config["invite_rooms_on_join"] = on_join
         bot.check_if_banned = AsyncMock(return_value=banned)
         bot.ban_this_user = AsyncMock()
-        bot.do_sync = AsyncMock()
+        bot.upsert_user_timestamp = AsyncMock()
+        bot.config_manager = Mock(is_tracking_enabled=Mock(return_value=True))
+        bot.config["sleep"] = 0
         return bot
 
     def _evt(self, sender=TARGET):
@@ -534,14 +536,16 @@ class TestParentJoin:
             c.kwargs["reason"] == "joined the community"
             for c in bot.client.invite_user.await_args_list
         )
-        bot.do_sync.assert_awaited_once()
+        bot.upsert_user_timestamp.assert_awaited_once()
+        assert bot.upsert_user_timestamp.await_args.args[0] == TARGET
 
     @pytest.mark.asyncio
     async def test_no_invites_when_disabled_but_still_syncs(self):
         bot = self._join_bot(on_join=False)
         await CommunityBot._handle_parent_join(bot, self._evt())
         bot.client.invite_user.assert_not_awaited()
-        bot.do_sync.assert_awaited_once()
+        bot.upsert_user_timestamp.assert_awaited_once()
+        assert bot.upsert_user_timestamp.await_args.args[0] == TARGET
 
     @pytest.mark.asyncio
     async def test_option_missing_defaults_off(self):
@@ -556,7 +560,31 @@ class TestParentJoin:
         await CommunityBot._handle_parent_join(bot, self._evt())
         bot.ban_this_user.assert_awaited_once_with(TARGET)
         bot.client.invite_user.assert_not_awaited()
-        bot.do_sync.assert_not_awaited()
+        bot.upsert_user_timestamp.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_banlist_error_tracks_but_does_not_invite(self):
+        bot = self._join_bot()
+        bot.check_if_banned = AsyncMock(side_effect=RuntimeError("banlist down"))
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        bot.ban_this_user.assert_not_awaited()
+        bot.client.invite_user.assert_not_awaited()
+        bot.upsert_user_timestamp.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_tracking_error_does_not_block_invites(self):
+        bot = self._join_bot()
+        bot.upsert_user_timestamp = AsyncMock(side_effect=RuntimeError("db"))
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        assert bot.client.invite_user.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_tracking_disabled_skips_upsert(self):
+        bot = self._join_bot()
+        bot.config_manager.is_tracking_enabled.return_value = False
+        await CommunityBot._handle_parent_join(bot, self._evt())
+        bot.upsert_user_timestamp.assert_not_awaited()
+        assert bot.client.invite_user.await_count == 2
 
     @pytest.mark.asyncio
     async def test_bot_own_join_ignored(self):
@@ -585,6 +613,10 @@ class TestParentJoin:
         bot._handle_parent_join.assert_awaited_once_with(live)
 
         bot._handle_parent_join.reset_mock()
+        child = Mock(sender=TARGET, room_id="!other:x", source=SyncStream.TIMELINE)
+        await CommunityBot.newjoin(bot, child)
+        bot._handle_parent_join.assert_not_awaited()
+
         replay = Mock(sender=TARGET, room_id=PARENT, source=SyncStream.STATE)
         await CommunityBot.newjoin(bot, replay)
         bot._handle_parent_join.assert_not_awaited()
